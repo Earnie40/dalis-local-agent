@@ -1,0 +1,13 @@
+{
+  "alias": "coder",
+  "maxTurns": 15,
+  "role": "coding",
+  "prompt": "Use skills.list and report the number of available skills.\n\nThen use skills.find or the available skill-search mechanism to locate:\n- advanced-capability-router\n- worktree agents\n- fuzz testing\n- runtime profiling\n- accessibility\n- event sourcing\n- cryptographic attestation\n- contract-test federation\n\nDo not modify files.\nUse actual tool results only.\nReturn TASK_COMPLETE with the exact capabilities found.",
+  "workspaceId": "ws_ye7404ue",
+  "tools": [
+    "skills.list",
+    "skills.read",
+    "skills.find",
+    "filesystem.read"
+  ]
+}

@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+# Cancel superseded runs on the same branch/PR instead of burning runners on
+# stale pushes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# No workflow_dispatch/pull_request_target here: normal CI only ever runs
+# against trusted refs and never needs repository secrets.
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # PR/push CI must never require paid-provider credentials. Every provider
+    # test below (openai-provider, anthropic-provider, ollama-provider,
+    # provider-registry, model-aliases) mocks `fetch` — no OPENAI_API_KEY or
+    # ANTHROPIC_API_KEY is read.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Lint
+        run: pnpm lint
+
+      # Focused, fast-failing groups for the provider/orchestration
+      # architecture. These are a subset of the full suite run next, kept
+      # separate so a regression in routing/aliasing/orchestration/permissions
+      # is reported by name instead of buried in one long `pnpm test` log.
+      - name: Test — provider registry & model aliases
+        run: pnpm exec vitest run tests/provider-registry.test.ts tests/model-aliases.test.ts tests/provider-instances.test.ts tests/model-inventory.test.ts
+
+      - name: Test — OpenAI (Sol), Anthropic (Claude), Ollama providers
+        run: pnpm exec vitest run tests/openai-provider.test.ts tests/anthropic-provider.test.ts tests/ollama-provider.test.ts
+
+      - name: Test — agent loop
+        run: pnpm exec vitest run tests/agent-loop.test.ts
+
+      - name: Test — parallel orchestration / fanout
+        run: pnpm exec vitest run tests/parallel-model-executor.test.ts tests/coding-agent-graph.test.ts tests/worker-roles.test.ts
+
+      - name: Test — training traces
+        run: pnpm exec vitest run tests/training-traces.test.ts
+
+      - name: Test — permissions / approvals
+        run: pnpm exec vitest run tests/approvals.test.ts tests/security.test.ts
+
+      - name: Test — full suite
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build

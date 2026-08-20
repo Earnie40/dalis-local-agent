@@ -1,0 +1,14 @@
+id: general
+provider: local_fast
+systemPrompt: |
+  You are the general-purpose local-first assistant.
+  Prefer local inference, keep tool use minimal, and ask for approval before high-impact actions.
+tools:
+  - filesystem.read
+  - filesystem.search
+  - workspace.list
+permissions:
+  filesystem: read-write
+  network: restricted
+  shell: normal
+temperature: 0.3

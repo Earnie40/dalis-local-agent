@@ -1,0 +1,10 @@
+{
+  "workspaceId": "ws_ye7404ue",
+  "alias": "sol",
+  "role": "coding",
+  "maxTurns": 8,
+  "prompt": "Use filesystem.read to read package.json.\n\nReturn the package name and version.\nDo not modify anything.\nDo not guess.",
+  "tools": [
+    "filesystem.read"
+  ]
+}

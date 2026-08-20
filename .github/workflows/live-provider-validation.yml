@@ -1,0 +1,58 @@
+name: Live Provider Validation
+
+# Manual-only. This workflow makes real, paid calls to OpenAI (Sol) and/or
+# Anthropic (Claude) using repository secrets. It must never run on
+# push/pull_request — see ci.yml for the mocked, credential-free suite that
+# covers every push and PR.
+on:
+  workflow_dispatch:
+    inputs:
+      aliases:
+        description: 'Space-separated model aliases to validate (default: "sol claude")'
+        required: false
+        default: 'sol claude'
+      parallel:
+        description: 'Also run the bounded read-only Sol+Claude parallel smoke test'
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  live-provider-validation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run live provider acceptance check
+        env:
+          # Only actual credential material is a secret. The Claude model
+          # name is configuration, not a credential — repository variables
+          # are visible in the UI/logs by design, which is fine here.
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_MODEL: ${{ vars.ANTHROPIC_MODEL }}
+          LIVE_ALIASES: ${{ github.event.inputs.aliases }}
+          LIVE_PARALLEL: ${{ github.event.inputs.parallel }}
+        run: |
+          if [ "$LIVE_PARALLEL" = "true" ]; then
+            pnpm test:providers:live $LIVE_ALIASES --parallel
+          else
+            pnpm test:providers:live $LIVE_ALIASES
+          fi

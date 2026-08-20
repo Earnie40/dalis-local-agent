@@ -1,0 +1,18 @@
+{
+  "workspaceId": "ws_ye7404ue",
+  "alias": "sol",
+  "role": "coding",
+  "maxTurns": 15,
+  "maxToolCalls": 25,
+  "prompt": "Perform a small real maintenance task in this repository.\n\nTask:\nInspect package.json and README.md.\n\nDetermine whether README.md clearly states the current package name and version from package.json.\n\nIf it does not, make the smallest appropriate documentation change to README.md so it accurately states:\n- package name\n- current version\n\nRequirements:\n1. Read package.json first. Do not guess.\n2. Read the relevant README.md section before editing.\n3. Make the smallest possible edit.\n4. Do not modify package.json.\n5. Show the exact file changed.\n6. Use git diff to review your change.\n7. Run an appropriate validation after the edit.\n8. Do not claim success unless the tool results prove it.\n9. If the edit requires approval, request approval normally rather than bypassing it.\n10. Return a concise final summary including the evidence you used.",
+  "tools": [
+    "filesystem.list",
+    "filesystem.read",
+    "filesystem.search",
+    "filesystem.stat",
+    "filesystem.edit",
+    "git.run",
+    "tests.run",
+    "code.diagnostics"
+  ]
+}

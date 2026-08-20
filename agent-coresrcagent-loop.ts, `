@@ -1,0 +1,154 @@
+warning: in the working copy of 'packages/agent-core/src/agent-loop.ts', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'packages/tools/src/index.ts', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'packages/training-traces/src/trace-store.ts', LF will be replaced by CRLF the next time Git touches it
+[1mdiff --git a/packages/agent-core/src/agent-loop.ts b/packages/agent-core/src/agent-loop.ts[m
+[1mindex dcd9fc9..c673790 100644[m
+[1m--- a/packages/agent-core/src/agent-loop.ts[m
+[1m+++ b/packages/agent-core/src/agent-loop.ts[m
+[36m@@ -8,26 +8,46 @@[m [mimport type {[m
+   ToolSchema,[m
+ } from './types';[m
+ import { isAgentLoopCapable } from './types';[m
+[32m+[m[32mimport {[m
+[32m+[m[32m  buildWorkingStateContext,[m
+[32m+[m[32m  chooseInitialReasoningMode,[m
+[32m+[m[32m  compactMessagesForRequest,[m
+[32m+[m[32m  escalateReasoningMode,[m
+[32m+[m[32m  extractChangedPaths,[m
+[32m+[m[32m  goalImpliesMutation,[m
+[32m+[m[32m  isMutationTool,[m
+[32m+[m[32m  isValidationTool,[m
+[32m+[m[32m  validationPassed,[m
+[32m+[m[32m  type AgentLoopContextSnapshot,[m
+[32m+[m[32m  type ReasoningMode,[m
+[32m+[m[32m  type ReasoningPreference,[m
+[32m+[m[32m} from './runtime-state';[m
+ [m
+ /**[m
+[31m- * The provider-neutral agent loop.[m
+[32m+[m[32m * Provider-neutral agent loop.[m
+  *[m
+[31m- *   model → tool calls? → permission check → execute → append result → repeat[m
+[32m+[m[32m *   user goal + recent conversation[m
+[32m+[m[32m *       ↓[m
+[32m+[m[32m *   model → tool calls? → permission check → execute → observe → repeat[m
+[32m+[m[32m *       ↓[m
+[32m+[m[32m *   task-alignment check → final answer[m
+  *[m
+[31m- * One loop serves every role and every provider. It never learns a provider's[m
+[31m- * dialect (tool calls arrive already normalized) and never executes a tool[m
+[31m- * itself — execution goes through an injected executor that owns the permission[m
+[31m- * engine, so the loop cannot become a way to bypass authorization.[m
+[32m+[m[32m * The loop never executes tools directly. Execution goes through the injected[m
+[32m+[m[32m * ToolExecutor, which remains the authorization boundary.[m
+[32m+[m[32m *[m
+[32m+[m[32m * Important design rule: tool output is evidence for the current task; it does[m
+[32m+[m[32m * not replace the current task. The current user request remains authoritative[m
+[32m+[m[32m * until the run ends.[m
+  */[m
+ [m
+ export interface LoopToolResult {[m
+[31m-  /** Text handed back to the model as the tool's observation. */[m
+[32m+[m[32m  /** Text handed back to the model as the tool observation. */[m
+   output: string;[m
+   success: boolean;[m
+   /** Set when the permission engine refused; the model is told, not lied to. */[m
+   denied?: boolean;[m
+   error?: string;[m
+[31m-  /** Objective evidence produced by the tool layer, for the training trace. */[m
+[32m+[m[32m  /** Objective evidence produced by the tool layer, for training/audit traces. */[m
+   evidence?: Array<{ kind: string; summary: string; detail?: Record<string, unknown> }>;[m
+ }[m
+ [m
+[36m@@ -46,7 +66,7 @@[m [mexport type LoopStopReason =[m
+   | 'tool-budget';[m
+ [m
+ export interface LoopEvent {[m
+[31m-  type: 'model_response' | 'tool_call' | 'tool_result' | 'error';[m
+[32m+[m[32m  type: 'model_response' | 'tool_call' | 'tool_result' | 'error' | 'context_compaction' | 'context_refresh' | 'reasoning_mode' | 'validation';[m
+   turn: number;[m
+   content?: string;[m
+   toolCall?: NormalizedToolCall;[m
+[36m@@ -59,36 +79,73 @@[m [mexport interface AgentLoopOptions {[m
+   model: string;[m
+   capabilities: ProviderCapabilities;[m
+   executor: ToolExecutor;[m
+[31m-  /** The task. Seeds the conversation as the opening user message. */[m
+[32m+[m
+[32m+[m[32m  /** The current user request. This remains the authoritative goal for the run. */[m
+   prompt: string;[m
+[32m+[m
+[32m+[m[32m  /**[m
+[32m+[m[32m   * Recent conversation that occurred BEFORE `prompt`.[m
+[32m+[m[32m   *[m
+[32m+[m[32m   * This is what lets a follow-up such as "what is that from?" resolve "that"[m
+[32m+[m[32m   * against the previous assistant message instead of starting a fresh task.[m
+[32m+[m[32m   * The caller should scope this history per chat/session/user.[m
+[32m+[m[32m   */[m
+[32m+[m[32m  history?: CompletionMessage[];[m
+[32m+[m
+[32m+[m[32m  /** Maximum history messages admitted before the current request. */[m
+[32m+[m[32m  maxHistoryMessages?: number;[m
+[32m+[m
+   systemPrompt?: string;[m
+   temperature?: number;[m
+   /** Reasoning models: disable the thinking pass for latency where supported. */[m
+   think?: boolean;[m
+   maxTurns?: number;[m
+   maxToolCalls?: number;[m
+[32m+[m[32m  /** Maximum provider context window requested for this run. */[m
+[32m+[m[32m  maxContextTokens?: number;[m
+[32m+[m[32m  /** Planner output injected into the working state. */[m
+[32m+[m[32m  initialPlan?: string;[m
+[32m+[m[32m  /** Initial retrieved/repository context supplied by the orchestration layer. */[m
+[32m+[m[32m  initialContext?: string;[m
+[32m+[m[32m  /** Auto selects FAST/STANDARD/DEEP reasoning, or pins a mode. */[m
+[32m+[m[32m  reasoningMode?: ReasoningPreference;[m
+[32m+[m[32m  /** Coding runs should validate successful mutations before TASK_COMPLETE. */[m
+[32m+[m[32m  requireValidationAfterMutation?: boolean;[m
+[32m+[m[32m  /** Mutation-intent coding goals cannot complete before a mutation tool succeeds. */[m
+[32m+[m[32m  requireMutationForMutationIntent?: boolean;[m
+[32m+[m[32m  /** Refreshes RAG/memory/repository context from current structured state. */[m
+[32m+[m[32m  contextProvider?: (snapshot: AgentLoopContextSnapshot) => Promise<string | undefined>;[m
+[32m+[m
+   /**[m
+[31m-   * Consecutive turns that execute nothing before the loop gives up. One is[m
+[31m-   * too strict: an unknown-tool or duplicate-call rejection is corrective[m
+[31m-   * feedback, and models routinely recover on the next turn. Repeating the[m
+[31m-   * same unproductive turn twice, though, means it is stuck.[m
+[32m+[m[32m   * Consecutive turns that execute nothing before the loop gives up. One is too[m
+[32m+[m[32m   * strict because unknown-tool/duplicate-call rejection is corrective feedback.[m
+    */[m
+   maxUnproductiveTurns?: number;[m
+[32m+[m
+   /**[m
+[31m-   * Refuses a final answer until the model has actually looked at something.[m
+[31m-   *[m
+[31m-   * Observed failure this exists for: asked which file defines the permission[m
+[31m-   * tiers, a worker ran one search, got a single weak match in a test file, and[m
+[31m-   * answered from prior knowledge without opening anything — citing a file it[m
+[31m-   * had never read. A prompt saying "cite what you opened" does not prevent[m
+[31m-   * that; requiring a successful call to an inspecting tool does.[m
+[32m+[m[32m   * Refuses a final answer until the model has actually inspected evidence.[m
+    */[m
+[32m+[m[32m  completionSignalRequired?: boolean;[m
+[32m+[m
+   evidenceRequirement?: {[m
+[31m-    /** Any one of these having succeeded satisfies the requirement. */[m
+[32m+[m[32m    /** Any one successful tool in this set satisfies the requirement. */[m
+     tools: string[];[m
+     /** How many times to push back before accepting the answer anyway. */[m
+     maxNudges?: number;[m
+   };[m
+[32m+[m
+[32m+[m[32m  /**[m
+[32m+[m[32m   * Lightweight guard against the common local-model failure mode where the[m
+[32m+[m[32m   * model forgets the user's question and summarizes the last file it opened.[m
+[32m+[m[32m   *[m
+[32m+[m[32m   * This is intentionally heuristic, not a second LLM judge.[m
+[32m+[m[32m   */[m
+[32m+[m[32m  taskAlignment?: {[m
+[32m+[m[32m    enabled?: boolean;[m
+[32m+[m[32m    /** Maximum corrective prompts per run. */[m
+[32m+[m[32m    maxNudges?: number;[m
+[32m+[m[32m  };[m

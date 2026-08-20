@@ -1,0 +1,14 @@
+node_modules
+.pnpm-store
+.env
+.env.local
+*.log
+coverage
+.DS_Store
+**/dist
+**/build
+**/.vite
+**/.cache
+**/.turbo
+**/tmp
+**/.pytest_cache

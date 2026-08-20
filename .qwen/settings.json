@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(dacaisolution.com)",
+      "Read(//path/to/your/**)"
+    ]
+  },
+  "$version": 4
+}

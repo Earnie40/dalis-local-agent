@@ -1,0 +1,132 @@
+ M .env.example
+ D .github/agents/adversarial-twin-simulator.agent.md
+ D .github/agents/tomahawk1.agent.md
+ M AGENTS.md
+ M DacaiLocalAgent.code-workspace
+ M apps/server/package.json
+ M apps/server/src/index.ts
+ M apps/server/src/routes/agent.ts
+ M apps/server/src/routes/chat.ts
+ M apps/server/src/routes/defensive.ts
+ M apps/server/src/routes/security.ts
+ M apps/server/src/routes/tasks.ts
+ M apps/web/src/AgentPanel.tsx
+ M apps/web/src/api.ts
+ M apps/web/src/styles.css
+ D config/agents/tomahawk1.yaml
+ M config/models/default.yaml
+ M docs/STATUS.md
+ M package.json
+ M packages/agent-core/src/agent-loop.ts
+ M packages/agent-core/src/index.ts
+ M packages/agent-core/src/interfaces.ts
+ M packages/agent-core/src/types.ts
+ M packages/agents/src/adversarial-agent.ts
+ M packages/agents/src/defensive-agent.ts
+ M packages/agents/src/index.ts
+RM packages/agents/src/red-team-blocking-demo.ts -> packages/agents/src/red-team-blocking-verification.ts
+ M packages/agents/src/registry.ts
+ M packages/agents/src/roles.ts
+ M packages/memory/src/index.ts
+ M packages/providers/src/anthropic-provider.ts
+ M packages/providers/src/capability-store.ts
+ M packages/providers/src/index.ts
+ M packages/providers/src/ollama-provider.ts
+ M packages/providers/src/provider-registry.ts
+ M packages/rag/src/index.ts
+ M packages/security/src/anonymized-source-detector.ts
+ M packages/security/src/command-classifier.ts
+ M packages/security/src/defensive-testing-types.ts
+ M packages/security/src/index.ts
+ M packages/security/src/live-validation-types.ts
+ M packages/security/src/red-team-types.ts
+ M packages/security/src/types.ts
+ M packages/shared/src/config.ts
+ M packages/shared/src/db/red-team-stores.ts
+ M packages/shared/src/index.ts
+ M packages/shared/src/model-aliases.ts
+ M packages/tools/package.json
+ M packages/tools/src/diff.ts
+ M packages/tools/src/filesystem-tools.ts
+ M packages/tools/src/index.ts
+ M packages/tools/src/shell-tools.ts
+ M packages/tools/src/tool-registry.ts
+ M packages/training-traces/src/loop-recorder.ts
+ M packages/training-traces/src/trace-store.ts
+ M packages/training-traces/src/types.ts
+ M packages/workspace/src/types.ts
+ M packages/workspace/src/workspace-registry.ts
+ M pnpm-lock.yaml
+ M tests/provider-registry.test.ts
+?? .dacai/
+?? .github/agents/apply-coding-agent.agent.md
+?? .github/agents/apply-coding-completion-gate.ps1
+?? .github/agents/dacai-local-coding-agent.agent.md
+?? .github/agents/dacai-local-coding-agent1.md
+?? .qwen/
+?? AGENTS.md.backup-20260819
+?? "agent-coresrcagent-loop.ts `"
+?? "agent-coresrcagent-loop.ts, `"
+?? agent-distribute-docs.json
+?? agent-docs-import/
+?? agent-full-codex-upgrade.json
+?? agent-runtime-check.json
+?? agent-test.json
+?? apply-coding-completion-gate-v2.ps1
+?? apply-coding-completion-gate.ps1
+?? apply-coding-completion-gate.py
+?? apps/server/src/codex-tools.ts
+?? apps/server/src/coding-agent-graph.ts
+?? apps/server/src/routes/agent.ts.bak
+?? apps/server/src/routes/agent.ts.bak-before-completion-gate
+?? apps/server/src/routes/agent.ts.bak-completion-20260819-132626
+?? apps/server/src/routes/memory.ts
+?? config/models/default.yaml.bak
+?? docs/ADVERSARIAL_CAPABILITY_PLAN.md
+?? memories/
+?? packages/agent-core/src/agent-loop.test.ts
+?? packages/agent-core/src/agent-loop.ts.bak-before-completion-gate
+?? packages/agent-core/src/agent-loop.ts.bak-completion-20260819-132626
+?? packages/agent-core/src/runtime-state.test.ts
+?? packages/agent-core/src/runtime-state.ts
+?? packages/agents/src/defensive-control-inspector.ts
+?? packages/agents/src/defensive-regression-verifier.ts
+?? packages/agents/src/security-scenario-registry.ts
+?? packages/context/
+?? packages/providers/src/huggingface-provider.ts
+?? packages/repository-index/
+?? packages/security/src/adversarial-harness.ts
+?? packages/security/src/anonymized-source-feeds.ts
+?? packages/security/src/anonymized-source-refresher.ts
+?? packages/shared/src/db/memory-store.ts
+?? packages/shared/src/db/migrations/007_adversarial_test_status.sql
+?? packages/shared/src/db/migrations/009_provider_capability_detail.sql
+?? packages/shared/src/db/migrations/010_code_symbols.sql
+?? packages/skills/
+?? packages/tools/src/adversarial-simulation-tools.ts
+?? packages/tools/src/code-tools.ts
+?? packages/tools/src/git-mutation-tools.ts
+?? packages/tools/src/host-tools.ts
+?? packages/tools/src/mcp-tools.ts
+?? packages/tools/src/quality-tools.ts
+?? packages/tools/src/skill-tools.ts
+?? packages/tools/src/vision-tools.ts
+?? packages/tools/src/web-tools.ts
+?? packages/tools/src/worktree-tools.ts
+?? run-full-codex-upgrade.ps1
+?? scripts/ci-watch.ps1
+?? scripts/dacai-maintenance.ps1
+?? scripts/enable-local-vision.ps1
+?? scripts/index-repository-auto.ps1
+?? scripts/install-ci-watch-task.ps1
+?? scripts/install-dacai-maintenance-task.ps1
+?? scripts/smoke-test-subagents.ps1
+?? scripts/verify-repository-index.ts
+?? tests/adversarial-agent.test.ts
+?? tests/adversarial-harness.test.ts
+?? tests/anonymized-source-detector.test.ts
+?? tests/context-manager.test.ts
+?? tests/defensive-agent-real.test.ts
+?? tests/repository-indexer.test.ts
+?? tests/symbol-extractor.test.ts
+?? tests/web-tools.test.ts

@@ -1,0 +1,212 @@
+# Role aliases → { provider instance, model, generation settings }.
+#
+# An alias selects both a provider INSTANCE and a model.
+# This allows the same logical role to move between:
+#   - local CPU inference
+#   - local GPU inference
+#   - remote GPU inference
+#   - Hugging Face inference
+# without changing agent configuration elsewhere.
+#
+# IMPORTANT:
+# Capability is determined by runtime probes, not assumptions in this file.
+#
+# Current measured capabilities:
+#
+#   qwen3:8b
+#     - tool calling VERIFIED
+#     - structured tool channel VERIFIED
+#     - multi-turn agent loop VERIFIED
+#     - primary local autonomous agent
+#
+#   qwen2.5-coder
+#     - tool calling VERIFIED through text-json
+#     - good single-turn coding/completion
+#     - unreliable for sustained multi-turn tool loops
+#
+#   phi4-mini
+#     - advertises tool support
+#     - malformed tool calls observed
+#     - advisory only
+#
+#   phi3:mini
+#     - no usable tool support
+#     - advisory only
+#
+# Tool-driven roles MUST be rejected by the agent runtime unless their selected
+# provider/model combination passes the required capability probe.
+#
+# Advisory models may analyze supplied context but MUST NOT be allowed to execute
+# filesystem, shell, database, browser, network, or mutation tools.
+
+models:
+
+  # ---------------------------------------------------------------------------
+  # PRIMARY AUTONOMOUS AGENT
+  # ---------------------------------------------------------------------------
+  #
+  # Default model for real multi-turn agent work.
+  #
+  # This role should:
+  #   1. understand the user's goal
+  #   2. inspect relevant context
+  #   3. make a short internal plan
+  #   4. use tools
+  #   5. observe results
+  #   6. continue until the task is complete
+  #   7. verify its work
+  #   8. answer the user's actual question
+  #
+  # Do not replace this with an advisory-only model.
+  agent:
+    provider: local_ollama
+    model: qwen3:8b
+    temperature: 0.15
+
+  # ---------------------------------------------------------------------------
+  # PLANNER / REASONER
+  # ---------------------------------------------------------------------------
+  #
+  # Used before complex execution and when the executor encounters ambiguity,
+  # unexpected results, test failures, or architectural decisions.
+  #
+  # Slightly higher temperature allows consideration of multiple plausible
+  # approaches without making the output excessively random.
+  planner:
+    provider: local_ollama
+    model: qwen3:8b
+    temperature: 0.25
+
+  reasoner:
+    provider: local_ollama
+    model: qwen3:8b
+    temperature: 0.25
+
+  # ---------------------------------------------------------------------------
+  # CODING EXECUTOR
+  # ---------------------------------------------------------------------------
+  #
+  # Handles tool-driven repository work:
+  #   - filesystem inspection
+  #   - code edits
+  #   - tests
+  #   - lint/typecheck
+  #   - targeted debugging
+  #
+  # Keep temperature low. Coding execution should favor established repository
+  # patterns over creative invention.
+  coder:
+    provider: local_ollama
+    model: qwen3:8b
+    temperature: 0.08
+
+  # Explicit alias for tool-loop execution when the caller specifically needs
+  # verified structured tool calls.
+  structured_agent:
+    provider: local_ollama
+    model: qwen3:8b
+    temperature: 0.05
+
+  # ---------------------------------------------------------------------------
+  # REVIEWER / CRITIC
+  # ---------------------------------------------------------------------------
+  #
+  # Reviews work AFTER implementation.
+  #
+  # The reviewer should receive:
+  #   - original task
+  #   - relevant architecture/rules
+  #   - changed files
+  #   - git diff
+  #   - test results
+  #
+  # A slightly different sampling profile from the coder helps reduce identical
+  # reasoning paths during self-review.
+  reviewer:
+    provider: local_ollama
+    model: qwen3:8b
+    temperature: 0.22
+
+  # ---------------------------------------------------------------------------
+  # CHAT
+  # ---------------------------------------------------------------------------
+  #
+  # Fast conversational/default completion role.
+  #
+  # qwen2.5-coder is retained because it performs well for short questions and
+  # ordinary code explanations. It MUST NOT automatically receive autonomous
+  # multi-turn tool-loop authority.
+  chat:
+    provider: local_ollama
+    model: qwen2.5-coder:latest
+    temperature: 0.2
+
+  # ---------------------------------------------------------------------------
+  # FAST ADVISORY MODEL
+  # ---------------------------------------------------------------------------
+  #
+  # Cheap classification, summarization, extraction, routing suggestions,
+  # lightweight commentary.
+  #
+  # NO TOOL EXECUTION.
+  fast:
+    provider: local_ollama
+    model: phi3:mini
+    temperature: 0.25
+
+  # ---------------------------------------------------------------------------
+  # RESEARCH / SECOND-OPINION ADVISORY MODEL
+  # ---------------------------------------------------------------------------
+  #
+  # Can inspect supplied results and produce analysis, but should never enter
+  # the autonomous execution loop until a capability probe proves correct tool
+  # calling.
+  research:
+    provider: local_ollama
+    model: phi4-mini:latest
+    temperature: 0.35
+
+
+  # ---------------------------------------------------------------------------
+  # HUGGING FACE ADVISORY / FALLBACK ROLES
+  # ---------------------------------------------------------------------------
+  #
+  # These are advisory by default.
+  #
+  # They MUST NOT receive tool authority merely because the underlying model
+  # family supports tools elsewhere. The configured provider adapter itself
+  # must pass the project's capability contract.
+
+  hf_reasoner:
+    provider: huggingface
+    model: ${HF_DEFAULT_MODEL}
+    # Disabled: HF_PROVIDER_ENABLED=false and no API key configured. Leaving this
+    # enabled surfaces it in the UI model picker, where manual-provider-selection
+    # routing then rejects every chat request with a 400.
+    enabled: false
+    temperature: 0.25
+
+  hf_llama:
+    provider: huggingface
+    model: meta-llama/Llama-3.1-8B-Instruct
+    temperature: 0.25
+
+  hf_qwen3:
+    provider: huggingface
+    model: Qwen/Qwen3-8B
+    temperature: 0.2
+
+  hf_qwen3_coder:
+    provider: huggingface
+    model: Qwen/Qwen3-Coder-Next
+    temperature: 0.1
+
+  hf_deepseek:
+    provider: huggingface
+    model: deepseek-ai/DeepSeek-R1
+    temperature: 0.15
+
+  hf_gemma:
+    provider: huggingface
+    model: google/gemma-4-31B-it
+    temperature: 0.25

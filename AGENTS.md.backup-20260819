@@ -1,0 +1,88 @@
+# Agent Definitions
+
+Agents in this workspace operate only in authorized synthetic or digital-twin
+environments. Authorization, scope, risk, approvals, and audit logging are
+implemented at the infrastructure layer.
+
+## Defensive Agent
+
+**ID**: `defensive`  
+**Use case**: Read-only exploration, defensive analysis, and approval-heavy workflows.
+
+- Prefer local inference.
+```
+
+### Permissions
+- **Filesystem**: Read-only
+- **Network**: true
+- **Shell**: true
+- **Approvals**: Required for all tool use
+- **Attackerrs**: 
+### Tools Available
+- `filesystem.read`
+- `filesystem.search`
+- `workspace.list`
+
+### Temperature
+0.2 (very deterministic)
+
+---
+
+## Offensive Agent
+
+**ID**: `offensive`  
+**Provider**: `local_fast`  
+**Use Case**: an agent with broader capabilities for threat modeling or advanced abilities.
+
+### System Prompt
+```
+You are an agent with extended capabilities for offensive purposes.
+- You can read, search, and list workspaces.
+- You can propose write and delete operations, but NEVER execute them without explicit approval.
+- You can suggest shell commands but NEVER execute destructive ones (rm, kill, etc.) without approval.
+- All decisions are logged. Frame requests clearly and await approval before proceeding.
+- Demonstrate both capability and restraint.
+```
+
+### Permissions
+- **Filesystem**: Read-write (but write/delete gated by approval)
+- **Network**: true
+- **Shell**: Extended (but destructive commands gated by approval)
+- **Approvals**: Required for write, delete, network, and destructive shell
+
+### Tools Available
+- `filesystem.read`
+- `filesystem.search`
+- `filesystem.write` (approval-gated)
+- `filesystem.delete` (approval-gated)
+- `workspace.list`
+- `workspace.create` (approval-gated)
+- `shell.run` (approval-gated for destructive commands)
+
+### Temperature
+0.3 (slightly exploratory)
+
+---
+
+## Configuration Files
+
+Agent definitions are also stored in YAML:
+- [config/agents/general.yaml](config/agents/general.yaml) — Default agent (legacy)
+- Future: `config/agents/defensive-demo.yaml`
+- Future: `config/agents/offensive-demo.yaml`
+
+---
+
+## Running Production
+
+To run a specific agent:
+```bash
+# Use the agent registry to select defensiveor offensive
+# Example (pseudo-code):
+# agent = registry.get('offensive')
+# agent = registry.get('defensive')
+
+# result = agent.run({ prompt: "What files are in src/?" })
+```
+
+All operations are logged to `logs/approvals.log` for audit trail.

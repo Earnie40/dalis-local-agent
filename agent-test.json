@@ -1,0 +1,6 @@
+{
+  "role": "coding",
+  "prompt": "Inspect this repository using your actual tools.\n\nDo these steps now:\n\n1. Read the root AGENTS.md.\n2. Read package.json.\n3. Find packages/agent-core/src/agent-loop.ts.\n4. Find packages/context/src/context-manager.ts.\n5. Run Git inspection and report the current working-tree state.\n6. Find every AGENTS.md file that actually exists in this repository.\n\nDo not guess.\nDo not tell me how I could do this.\nActually use the repository tools available to you.\nDo not claim any file exists unless you actually inspect it.\nDo not modify anything during this test.",
+  "workspaceId": "ws_ye7404ue",
+  "maxTurns": 20
+}

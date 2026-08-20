@@ -1,0 +1,37 @@
+{
+  "name": "dacai-local-agent",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@9.15.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "bin": {
+    "tomahawk": "scripts/tomahawk.mjs"
+  },
+  "scripts": {
+    "dev": "concurrently \"pnpm --filter @dacai-local-agent/server dev\" \"pnpm --filter @dacai-local-agent/web dev\"",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r exec tsc --noEmit",
+    "test": "vitest run",
+    "lint": "pnpm -r exec eslint . --ext .ts,.tsx",
+    "tomahawk": "node scripts/tomahawk.mjs",
+    "test:providers:live": "node --import tsx scripts/live-provider-check.mjs"
+  },
+  "devDependencies": {
+    "@stryker-mutator/core": "8.7.1",
+    "@stryker-mutator/vitest-runner": "8.7.1",
+    "@types/node": "^22.15.24",
+    "@typescript-eslint/eslint-plugin": "^8.17.0",
+    "@typescript-eslint/parser": "^8.17.0",
+    "concurrently": "^9.1.2",
+    "eslint": "^9.22.0",
+    "fast-check": "^4.9.0",
+    "globals": "^14.0.0",
+    "playwright-core": "^1.62.1",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.8"
+  }
+}

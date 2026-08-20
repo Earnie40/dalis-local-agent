@@ -1,0 +1,17 @@
+{
+  "defaultMode": "read-only",
+  "defaultEscalationMode": "ask",
+  "dangerousCommands": [
+    "rm -rf",
+    "git push --force",
+    "kubectl delete",
+    "aws .* delete",
+    "docker system prune -a"
+  ],
+  "approvalRequired": [
+    "destructive shell",
+    "force push",
+    "cloud deletion",
+    "credential modification"
+  ]
+}

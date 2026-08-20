@@ -1,0 +1,936 @@
+{
+  "version": 1,
+  "generatedFor": "DacaiLocalAgent",
+  "excludedAlreadyImplemented": [
+    62,
+    63,
+    64,
+    65,
+    66,
+    67,
+    68,
+    69
+  ],
+  "capabilities": [
+    {
+      "id": 1,
+      "name": "Autonomous Git branching/worktree agents",
+      "slug": "001-autonomous-git-branching-worktree-agents",
+      "category": "engineering-and-release",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": [
+        "git"
+      ]
+    },
+    {
+      "id": 2,
+      "name": "Multi-agent merge arbitration",
+      "slug": "002-multi-agent-merge-arbitration",
+      "category": "engineering-and-release",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": [
+        "git",
+        "agent.delegate"
+      ]
+    },
+    {
+      "id": 3,
+      "name": "Automatic conflict resolution",
+      "slug": "003-automatic-conflict-resolution",
+      "category": "engineering-and-release",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": [
+        "git"
+      ]
+    },
+    {
+      "id": 4,
+      "name": "Patch ranking / best-of-N coding",
+      "slug": "004-patch-ranking-best-of-n-coding",
+      "category": "engineering-and-release",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": [
+        "git",
+        "agent.delegate"
+      ]
+    },
+    {
+      "id": 5,
+      "name": "Self-training from successful coding traces",
+      "slug": "005-self-training-from-successful-coding-traces",
+      "category": "engineering-and-release",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": []
+    },
+    {
+      "id": 6,
+      "name": "Automatic prompt evolution",
+      "slug": "006-automatic-prompt-evolution",
+      "category": "engineering-and-release",
+      "mode": "proposal_only",
+      "already_added": false,
+      "prerequisites": []
+    },
+    {
+      "id": 7,
+      "name": "Self-modifying agent architecture",
+      "slug": "007-self-modifying-agent-architecture",
+      "category": "engineering-and-release",
+      "mode": "proposal_only",
+      "already_added": false,
+      "prerequisites": []
+    },
+    {
+      "id": 8,
+      "name": "Automatic tool creation",
+      "slug": "008-automatic-tool-creation",
+      "category": "engineering-and-release",
+      "mode": "proposal_only",
+      "already_added": false,
+      "prerequisites": []
+    },
+    {
+      "id": 9,
+      "name": "Dynamic plugin installation",
+      "slug": "009-dynamic-plugin-installation",
+      "category": "engineering-and-release",
+      "mode": "proposal_only",
+      "already_added": false,
+      "prerequisites": []
+    },
+    {
+      "id": 10,
+      "name": "Automatic package upgrades",
+      "slug": "010-automatic-package-upgrades",
+      "category": "engineering-and-release",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": []
+    },
+    {
+      "id": 11,
+      "name": "Automatic framework migrations",
+      "slug": "011-automatic-framework-migrations",
+      "category": "engineering-and-release",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": []
+    },
+    {
+      "id": 12,
+      "name": "Autonomous database migrations",
+      "slug": "012-autonomous-database-migrations",
+      "category": "engineering-and-release",
+      "mode": "proposal_only",
+      "already_added": false,
+      "prerequisites": []
+    },
+    {
+      "id": 13,
+      "name": "Automatic database repair",
+      "slug": "013-automatic-database-repair",
+      "category": "engineering-and-release",
+      "mode": "proposal_only",
+      "already_added": false,
+      "prerequisites": []
+    },
+    {
+      "id": 14,
+      "name": "Automatic infrastructure provisioning",
+      "slug": "014-automatic-infrastructure-provisioning",
+      "category": "engineering-and-release",
+      "mode": "proposal_only",
+      "already_added": false,
+      "prerequisites": [
+        "explicit external authorization"
+      ]
+    },
+    {
+      "id": 15,
+      "name": "Autonomous deployment",
+      "slug": "015-autonomous-deployment",
+      "category": "engineering-and-release",
+      "mode": "proposal_only",
+      "already_added": false,
+      "prerequisites": [
+        "explicit external authorization"
+      ]
+    },
+    {
+      "id": 16,
+      "name": "Automatic CI/CD modification",
+      "slug": "016-automatic-ci-cd-modification",
+      "category": "engineering-and-release",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": [
+        "explicit external authorization"
+      ]
+    },
+    {
+      "id": 17,
+      "name": "Autonomous PR publishing/merging",
+      "slug": "017-autonomous-pr-publishing-merging",
+      "category": "engineering-and-release",
+      "mode": "proposal_only",
+      "already_added": false,
+      "prerequisites": [
+        "explicit external authorization"
+      ]
+    },
+    {
+      "id": 18,
+      "name": "Production rollback orchestration",
+      "slug": "018-production-rollback-orchestration",
+      "category": "engineering-and-release",
+      "mode": "proposal_only",
+      "already_added": false,
+      "prerequisites": [
+        "explicit external authorization"
+      ]
+    },
+    {
+      "id": 19,
+      "name": "Continuous production monitoring agent",
+      "slug": "019-continuous-production-monitoring-agent",
+      "category": "system-and-operations",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": [
+        "explicit external authorization"
+      ]
+    },
+    {
+      "id": 20,
+      "name": "Automatic incident-response agent",
+      "slug": "020-automatic-incident-response-agent",
+      "category": "system-and-operations",
+      "mode": "proposal_only",
+      "already_added": false,
+      "prerequisites": [
+        "explicit external authorization"
+      ]
+    },
+    {
+      "id": 21,
+      "name": "Autonomous security remediation",
+      "slug": "021-autonomous-security-remediation",
+      "category": "system-and-operations",
+      "mode": "proposal_only",
+      "already_added": false,
+      "prerequisites": [
+        "explicit external authorization"
+      ]
+    },
+    {
+      "id": 22,
+      "name": "Automatic secret rotation",
+      "slug": "022-automatic-secret-rotation",
+      "category": "system-and-operations",
+      "mode": "proposal_only",
+      "already_added": false,
+      "prerequisites": [
+        "explicit external authorization"
+      ]
+    },
+    {
+      "id": 23,
+      "name": "Credential discovery/recovery agent",
+      "slug": "023-credential-discovery-recovery-agent",
+      "category": "system-and-operations",
+      "mode": "proposal_only",
+      "already_added": false,
+      "prerequisites": []
+    },
+    {
+      "id": 24,
+      "name": "Unrestricted browser/computer-use agent",
+      "slug": "024-unrestricted-browser-computer-use-agent",
+      "category": "system-and-operations",
+      "mode": "proposal_only",
+      "already_added": false,
+      "prerequisites": []
+    },
+    {
+      "id": 25,
+      "name": "Public-web browser automation",
+      "slug": "025-public-web-browser-automation",
+      "category": "system-and-operations",
+      "mode": "proposal_only",
+      "already_added": false,
+      "prerequisites": [
+        "explicit external authorization"
+      ]
+    },
+    {
+      "id": 26,
+      "name": "Autonomous account operations",
+      "slug": "026-autonomous-account-operations",
+      "category": "system-and-operations",
+      "mode": "proposal_only",
+      "already_added": false,
+      "prerequisites": [
+        "explicit external authorization"
+      ]
+    },
+    {
+      "id": 27,
+      "name": "General filesystem-cleanup agent",
+      "slug": "027-general-filesystem-cleanup-agent",
+      "category": "system-and-operations",
+      "mode": "proposal_only",
+      "already_added": false,
+      "prerequisites": []
+    },
+    {
+      "id": 28,
+      "name": "System-administration agent",
+      "slug": "028-system-administration-agent",
+      "category": "system-and-operations",
+      "mode": "proposal_only",
+      "already_added": false,
+      "prerequisites": []
+    },
+    {
+      "id": 29,
+      "name": "Automatic process killing beyond owned processes",
+      "slug": "029-automatic-process-killing-beyond-owned-processes",
+      "category": "system-and-operations",
+      "mode": "proposal_only",
+      "already_added": false,
+      "prerequisites": []
+    },
+    {
+      "id": 30,
+      "name": "Privilege escalation helper",
+      "slug": "030-privilege-escalation-helper",
+      "category": "system-and-operations",
+      "mode": "proposal_only",
+      "already_added": false,
+      "prerequisites": []
+    },
+    {
+      "id": 31,
+      "name": "Automatic Docker/container orchestration",
+      "slug": "031-automatic-docker-container-orchestration",
+      "category": "system-and-operations",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": []
+    },
+    {
+      "id": 32,
+      "name": "Automatic local service provisioning",
+      "slug": "032-automatic-local-service-provisioning",
+      "category": "system-and-operations",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": []
+    },
+    {
+      "id": 33,
+      "name": "Full autonomous environment recreation",
+      "slug": "033-full-autonomous-environment-recreation",
+      "category": "system-and-operations",
+      "mode": "proposal_only",
+      "already_added": false,
+      "prerequisites": []
+    },
+    {
+      "id": 34,
+      "name": "Distributed multi-machine agent execution",
+      "slug": "034-distributed-multi-machine-agent-execution",
+      "category": "compute-and-model-routing",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": []
+    },
+    {
+      "id": 35,
+      "name": "GPU-aware heterogeneous scheduling",
+      "slug": "035-gpu-aware-heterogeneous-scheduling",
+      "category": "compute-and-model-routing",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": []
+    },
+    {
+      "id": 36,
+      "name": "Automatic cloud bursting",
+      "slug": "036-automatic-cloud-bursting",
+      "category": "compute-and-model-routing",
+      "mode": "proposal_only",
+      "already_added": false,
+      "prerequisites": [
+        "explicit external authorization"
+      ]
+    },
+    {
+      "id": 37,
+      "name": "Cross-provider model auctions",
+      "slug": "037-cross-provider-model-auctions",
+      "category": "compute-and-model-routing",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": [
+        "agent.delegate"
+      ]
+    },
+    {
+      "id": 38,
+      "name": "Speculative parallel inference",
+      "slug": "038-speculative-parallel-inference",
+      "category": "compute-and-model-routing",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": [
+        "agent.delegate"
+      ]
+    },
+    {
+      "id": 39,
+      "name": "Model ensemble voting for ordinary decisions",
+      "slug": "039-model-ensemble-voting-for-ordinary-decisions",
+      "category": "compute-and-model-routing",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": [
+        "agent.delegate"
+      ]
+    },
+    {
+      "id": 40,
+      "name": "Automatic model benchmarking/routing",
+      "slug": "040-automatic-model-benchmarking-routing",
+      "category": "compute-and-model-routing",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": [
+        "agent.delegate"
+      ]
+    },
+    {
+      "id": 41,
+      "name": "Token-budget marketplace",
+      "slug": "041-token-budget-marketplace",
+      "category": "compute-and-model-routing",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": []
+    },
+    {
+      "id": 42,
+      "name": "Agent economic accounting",
+      "slug": "042-agent-economic-accounting",
+      "category": "compute-and-model-routing",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": []
+    },
+    {
+      "id": 43,
+      "name": "Long-term autonomous memory consolidation",
+      "slug": "043-long-term-autonomous-memory-consolidation",
+      "category": "memory-and-codebase-intelligence",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": []
+    },
+    {
+      "id": 44,
+      "name": "Cross-project knowledge transfer",
+      "slug": "044-cross-project-knowledge-transfer",
+      "category": "memory-and-codebase-intelligence",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": []
+    },
+    {
+      "id": 45,
+      "name": "Organization-wide codebase federation",
+      "slug": "045-organization-wide-codebase-federation",
+      "category": "memory-and-codebase-intelligence",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": []
+    },
+    {
+      "id": 46,
+      "name": "Cross-repository autonomous refactoring",
+      "slug": "046-cross-repository-autonomous-refactoring",
+      "category": "memory-and-codebase-intelligence",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": [
+        "git"
+      ]
+    },
+    {
+      "id": 47,
+      "name": "Automatic architecture refactoring",
+      "slug": "047-automatic-architecture-refactoring",
+      "category": "memory-and-codebase-intelligence",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": []
+    },
+    {
+      "id": 48,
+      "name": "Continuous code-quality agent",
+      "slug": "048-continuous-code-quality-agent",
+      "category": "memory-and-codebase-intelligence",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": []
+    },
+    {
+      "id": 49,
+      "name": "Continuous dependency-vulnerability remediation",
+      "slug": "049-continuous-dependency-vulnerability-remediation",
+      "category": "memory-and-codebase-intelligence",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": []
+    },
+    {
+      "id": 50,
+      "name": "Fuzz-testing generation",
+      "slug": "050-fuzz-testing-generation",
+      "category": "verification-and-quality",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": [
+        "appropriate local analysis/testing toolchain"
+      ]
+    },
+    {
+      "id": 51,
+      "name": "Mutation-testing orchestration",
+      "slug": "051-mutation-testing-orchestration",
+      "category": "verification-and-quality",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": [
+        "appropriate local analysis/testing toolchain"
+      ]
+    },
+    {
+      "id": 52,
+      "name": "Large-scale adversarial testing of the coding agent itself",
+      "slug": "052-large-scale-adversarial-testing-of-the-coding-agent-itself",
+      "category": "verification-and-quality",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": [
+        "appropriate local analysis/testing toolchain"
+      ]
+    },
+    {
+      "id": 53,
+      "name": "Formal verification integration",
+      "slug": "053-formal-verification-integration",
+      "category": "verification-and-quality",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": [
+        "appropriate local analysis/testing toolchain"
+      ]
+    },
+    {
+      "id": 54,
+      "name": "Symbolic execution",
+      "slug": "054-symbolic-execution",
+      "category": "verification-and-quality",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": [
+        "appropriate local analysis/testing toolchain"
+      ]
+    },
+    {
+      "id": 55,
+      "name": "Static taint-analysis engine integration",
+      "slug": "055-static-taint-analysis-engine-integration",
+      "category": "verification-and-quality",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": [
+        "appropriate local analysis/testing toolchain"
+      ]
+    },
+    {
+      "id": 56,
+      "name": "Runtime instrumentation/profiling agent",
+      "slug": "056-runtime-instrumentation-profiling-agent",
+      "category": "verification-and-quality",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": [
+        "appropriate local analysis/testing toolchain"
+      ]
+    },
+    {
+      "id": 57,
+      "name": "Automatic performance optimization",
+      "slug": "057-automatic-performance-optimization",
+      "category": "verification-and-quality",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": []
+    },
+    {
+      "id": 58,
+      "name": "Load-test orchestration",
+      "slug": "058-load-test-orchestration",
+      "category": "verification-and-quality",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": [
+        "appropriate local analysis/testing toolchain"
+      ]
+    },
+    {
+      "id": 59,
+      "name": "Synthetic-user/browser fleets",
+      "slug": "059-synthetic-user-browser-fleets",
+      "category": "verification-and-quality",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": [
+        "browser/test environment"
+      ]
+    },
+    {
+      "id": 60,
+      "name": "Accessibility automation beyond targeted checks",
+      "slug": "060-accessibility-automation-beyond-targeted-checks",
+      "category": "verification-and-quality",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": [
+        "browser/test environment"
+      ]
+    },
+    {
+      "id": 61,
+      "name": "Visual pixel-diff baseline system",
+      "slug": "061-visual-pixel-diff-baseline-system",
+      "category": "verification-and-quality",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": [
+        "browser/test environment"
+      ]
+    },
+    {
+      "id": 70,
+      "name": "Contract-test federation",
+      "slug": "070-contract-test-federation",
+      "category": "contracts-release-and-documentation",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": []
+    },
+    {
+      "id": 71,
+      "name": "Data-generation agent",
+      "slug": "071-data-generation-agent",
+      "category": "contracts-release-and-documentation",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": []
+    },
+    {
+      "id": 72,
+      "name": "Test-user lifecycle management",
+      "slug": "072-test-user-lifecycle-management",
+      "category": "contracts-release-and-documentation",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": [
+        "browser/test environment"
+      ]
+    },
+    {
+      "id": 73,
+      "name": "Automatic feature-flag management",
+      "slug": "073-automatic-feature-flag-management",
+      "category": "contracts-release-and-documentation",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": []
+    },
+    {
+      "id": 74,
+      "name": "Release-readiness scoring",
+      "slug": "074-release-readiness-scoring",
+      "category": "contracts-release-and-documentation",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": []
+    },
+    {
+      "id": 75,
+      "name": "Autonomous release notes/changelog generation as a gate",
+      "slug": "075-autonomous-release-notes-changelog-generation-as-a-gate",
+      "category": "contracts-release-and-documentation",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": []
+    },
+    {
+      "id": 76,
+      "name": "Automatic documentation synchronization",
+      "slug": "076-automatic-documentation-synchronization",
+      "category": "contracts-release-and-documentation",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": []
+    },
+    {
+      "id": 77,
+      "name": "Automatic ADR generation",
+      "slug": "077-automatic-adr-generation",
+      "category": "contracts-release-and-documentation",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": []
+    },
+    {
+      "id": 78,
+      "name": "Code ownership inference",
+      "slug": "078-code-ownership-inference",
+      "category": "agent-orchestration",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": []
+    },
+    {
+      "id": 79,
+      "name": "Developer-behavior modeling",
+      "slug": "079-developer-behavior-modeling",
+      "category": "agent-orchestration",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": []
+    },
+    {
+      "id": 80,
+      "name": "Predictive failure prevention",
+      "slug": "080-predictive-failure-prevention",
+      "category": "agent-orchestration",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": []
+    },
+    {
+      "id": 81,
+      "name": "Monte Carlo planning",
+      "slug": "081-monte-carlo-planning",
+      "category": "agent-orchestration",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": []
+    },
+    {
+      "id": 82,
+      "name": "Hierarchical manager-of-managers agents",
+      "slug": "082-hierarchical-manager-of-managers-agents",
+      "category": "agent-orchestration",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": [
+        "agent.delegate"
+      ]
+    },
+    {
+      "id": 83,
+      "name": "Persistent autonomous agent teams",
+      "slug": "083-persistent-autonomous-agent-teams",
+      "category": "agent-orchestration",
+      "mode": "proposal_only",
+      "already_added": false,
+      "prerequisites": []
+    },
+    {
+      "id": 84,
+      "name": "Agent negotiation protocols",
+      "slug": "084-agent-negotiation-protocols",
+      "category": "agent-orchestration",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": [
+        "agent.delegate"
+      ]
+    },
+    {
+      "id": 85,
+      "name": "Agent reputation/scoring",
+      "slug": "085-agent-reputation-scoring",
+      "category": "agent-orchestration",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": [
+        "agent.delegate"
+      ]
+    },
+    {
+      "id": 86,
+      "name": "Automatic specialist generation",
+      "slug": "086-automatic-specialist-generation",
+      "category": "agent-orchestration",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": [
+        "agent.delegate"
+      ]
+    },
+    {
+      "id": 87,
+      "name": "Self-healing orchestration topology",
+      "slug": "087-self-healing-orchestration-topology",
+      "category": "agent-orchestration",
+      "mode": "proposal_only",
+      "already_added": false,
+      "prerequisites": []
+    },
+    {
+      "id": 88,
+      "name": "Full event-sourced agent runtime",
+      "slug": "088-full-event-sourced-agent-runtime",
+      "category": "runtime-trust-and-interface",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": [
+        "durable checkpoint/event storage"
+      ]
+    },
+    {
+      "id": 89,
+      "name": "Workflow replay/time travel",
+      "slug": "089-workflow-replay-time-travel",
+      "category": "runtime-trust-and-interface",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": [
+        "durable checkpoint/event storage"
+      ]
+    },
+    {
+      "id": 90,
+      "name": "Forkable run histories",
+      "slug": "090-forkable-run-histories",
+      "category": "runtime-trust-and-interface",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": [
+        "git",
+        "durable checkpoint/event storage"
+      ]
+    },
+    {
+      "id": 91,
+      "name": "Human-approval policy learning",
+      "slug": "091-human-approval-policy-learning",
+      "category": "runtime-trust-and-interface",
+      "mode": "proposal_only",
+      "already_added": false,
+      "prerequisites": []
+    },
+    {
+      "id": 92,
+      "name": "Automatic permission expansion",
+      "slug": "092-automatic-permission-expansion",
+      "category": "runtime-trust-and-interface",
+      "mode": "proposal_only",
+      "already_added": false,
+      "prerequisites": []
+    },
+    {
+      "id": 93,
+      "name": "Organization/tenant policy learning",
+      "slug": "093-organization-tenant-policy-learning",
+      "category": "runtime-trust-and-interface",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": []
+    },
+    {
+      "id": 94,
+      "name": "Blockchain/evidence anchoring of coding runs",
+      "slug": "094-blockchain-evidence-anchoring-of-coding-runs",
+      "category": "runtime-trust-and-interface",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": [
+        "explicit external authorization"
+      ]
+    },
+    {
+      "id": 95,
+      "name": "Cryptographic attestation of agent output",
+      "slug": "095-cryptographic-attestation-of-agent-output",
+      "category": "runtime-trust-and-interface",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": [
+        "configured signing/attestation identity"
+      ]
+    },
+    {
+      "id": 96,
+      "name": "Remote attested execution",
+      "slug": "096-remote-attested-execution",
+      "category": "runtime-trust-and-interface",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": [
+        "explicit external authorization",
+        "configured signing/attestation identity"
+      ]
+    },
+    {
+      "id": 97,
+      "name": "Autonomous billing/metering for agent labor",
+      "slug": "097-autonomous-billing-metering-for-agent-labor",
+      "category": "runtime-trust-and-interface",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": []
+    },
+    {
+      "id": 98,
+      "name": "Full IDE-control agent",
+      "slug": "098-full-ide-control-agent",
+      "category": "runtime-trust-and-interface",
+      "mode": "proposal_only",
+      "already_added": false,
+      "prerequisites": []
+    },
+    {
+      "id": 99,
+      "name": "Voice-driven coding-agent interface",
+      "slug": "099-voice-driven-coding-agent-interface",
+      "category": "runtime-trust-and-interface",
+      "mode": "bounded_execution",
+      "already_added": false,
+      "prerequisites": [
+        "configured speech input/output provider"
+      ]
+    },
+    {
+      "id": 100,
+      "name": "General-purpose computer agent mode",
+      "slug": "100-general-purpose-computer-agent-mode",
+      "category": "runtime-trust-and-interface",
+      "mode": "proposal_only",
+      "already_added": false,
+      "prerequisites": []
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "tools": [
+    "filesystem.list",
+    "filesystem.read",
+    "filesystem.search",
+    "filesystem.stat"
+  ],
+  "role": "coding",
+  "prompt": "Read packages/shared/src/config.ts, apps/server/src/routes/tasks.ts, and packages/orchestrator/src/task-runner.ts. Identify exactly where delegated-agent concurrency is configured and enforced. Do not modify anything. Finish with TASK_COMPLETE.",
+  "workspaceId": "ws_ye7404ue",
+  "maxToolCalls": 8,
+  "reasoningMode": "fast"
+}

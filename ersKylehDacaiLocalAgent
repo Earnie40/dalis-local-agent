@@ -1,0 +1,14 @@
+[1mdiff --git a/tests/model-aliases.test.ts b/tests/model-aliases.test.ts[m
+[1mindex b98d48c..8a8a9b0 100644[m
+[1m--- a/tests/model-aliases.test.ts[m
+[1m+++ b/tests/model-aliases.test.ts[m
+[36m@@ -50,7 +50,8 @@[m [mdescribe('model alias loading', () => {[m
+     const { models, warnings } = loadModelAliases(path, {});[m
+ [m
+     expect(models.hf_reasoner.enabled).toBe(false);[m
+[31m-    expect(warnings[0]).toContain('HF_DEFAULT_MODEL is not set');[m
+[32m+[m[32m    expect(warnings[0]).toContain('HF_DEFAULT_MODEL');[m
+[32m+[m[32m    expect(warnings[0]).toContain('not set');[m
+   });[m
+ [m
+   it('warns rather than crashing when the file is missing', () => {[m
