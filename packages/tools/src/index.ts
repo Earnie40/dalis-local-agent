@@ -10,6 +10,7 @@ export * from './web-tools';
 export * from './mcp-tools';
 export * from './code-tools';
 export * from './host-tools';
+export * from './wsl-tools';
 export * from './skill-tools';
 export * from './worktree-tools';
 export * from './git-mutation-tools';

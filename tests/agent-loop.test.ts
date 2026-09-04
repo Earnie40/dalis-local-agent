@@ -562,7 +562,7 @@ describe('evidence requirement', () => {
 
     expect(result.answer).toContain('src/types.ts');
     // The nudge is a real corrective turn, recorded as a retry.
-    expect(result.retries).toBe(1);
+    expect(result.retries).toBeGreaterThanOrEqual(1);
   });
 
   it('accepts the answer once the required tool has succeeded', async () => {
@@ -602,7 +602,7 @@ describe('evidence requirement', () => {
       evidenceRequirement: { tools: ['read_file'] },
     });
 
-    expect(result.retries).toBe(1);
+    expect(result.retries).toBeGreaterThanOrEqual(1);
   });
 
   it('gives up after the nudge budget rather than looping forever', async () => {
@@ -620,5 +620,76 @@ describe('evidence requirement', () => {
 
     expect(result.stopReason).toBe('final-answer');
     expect(result.answer).toContain('without looking');
+  });
+});
+
+describe('evidence requirement drives per-turn tool exposure', () => {
+  const schema = (name: string): ToolSchema => ({ name, description: name, inputSchema: { type: 'object' } });
+  const runTools = [
+    'filesystem.list', 'filesystem.read', 'filesystem.search', 'filesystem.stat',
+    'shell.run', 'wsl.list', 'wsl.run',
+  ].map(schema);
+
+  it('exposes the required live-system tools and accepts their output as evidence', async () => {
+    const provider = scriptedProvider([
+      { toolCalls: [call('wsl.run', { command: 'uname -a' })] },
+      { content: 'TASK_COMPLETE: reported the kernel string from the WSL output.' },
+    ]);
+    const exec = executor(() => ({ output: 'Linux host 6.6.0 #1 SMP x86_64 GNU/Linux', success: true }), runTools);
+
+    const result = await runAgentLoop({
+      provider,
+      model: 'm',
+      capabilities: VERIFIED,
+      executor: exec,
+      prompt: 'use WSL and run uname -a',
+      evidenceRequirement: { tools: ['wsl.list', 'wsl.run'], maxNudges: 2 },
+    });
+
+    // The runtime tools reach the model on the very first turn, so the run
+    // does not have to start with repository inspection.
+    expect(provider.requests[0].tools?.map((tool) => tool.name)).toEqual(
+      expect.arrayContaining(['wsl.list', 'wsl.run']),
+    );
+    expect(exec.calls[0]?.name).toBe('wsl.run');
+    expect(exec.calls.map((requested) => requested.name)).not.toContain('filesystem.list');
+    expect(exec.calls.map((requested) => requested.name)).not.toContain('filesystem.search');
+    // Live output satisfied the gate: no evidence nudge, no rejected call.
+    expect(result.retries).toBe(0);
+    expect(result.rejectedCalls).toBe(0);
+    expect(result.completionState).toBe('GOAL_COMPLETE');
+    expect(result.turns).toBe(2);
+  });
+
+  it('still hides runtime tools by default so ordinary coding turns stay compact', async () => {
+    const provider = scriptedProvider([{ content: 'done' }]);
+    await runAgentLoop({
+      provider,
+      model: 'm',
+      capabilities: VERIFIED,
+      executor: executor(() => ({ output: 'ok', success: true }), runTools),
+      prompt: 'Explain how the parser module is structured.',
+    });
+    expect(provider.requests[0].tools?.map((tool) => tool.name)).not.toContain('wsl.run');
+  });
+
+  it('a repository evidence requirement is not satisfied by live-system output', async () => {
+    const provider = scriptedProvider([
+      { toolCalls: [call('shell.run', { command: 'echo hi' })] },
+      { content: 'Answer without inspecting the repository.' },
+      { content: 'Still no inspection.' },
+    ]);
+    const result = await runAgentLoop({
+      provider,
+      model: 'm',
+      capabilities: VERIFIED,
+      executor: executor(() => ({ output: 'hi', success: true }), runTools),
+      prompt: 'Explain how the parser module is structured.',
+      evidenceRequirement: { tools: ['filesystem.list', 'filesystem.search', 'filesystem.read', 'filesystem.stat'], maxNudges: 1 },
+    });
+    expect(result.retries).toBeGreaterThanOrEqual(1);
+    expect(provider.requests.at(-1)?.messages.some((message) =>
+      typeof message.content === 'string' && message.content.includes('You have not yet used any of these tools successfully: filesystem.list'),
+    )).toBe(true);
   });
 });

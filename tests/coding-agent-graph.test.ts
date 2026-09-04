@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { normalizeExecutionPlan } from '../apps/server/src/coding-agent-graph';
+import { fallbackPlan, normalizeExecutionPlan } from '../apps/server/src/coding-agent-graph';
 
 describe('coding graph planning contract', () => {
   it('rejects invented final summaries and returns an all-pending execution plan', () => {
@@ -41,5 +41,27 @@ describe('coding graph planning contract', () => {
 
     expect(plan).not.toContain('my-package');
     expect(plan).toContain('PENDING — inspect repository instructions and relevant implementation');
+  });
+});
+
+describe('coding graph task profiles', () => {
+  it('an operational fallback plan does not begin with repository inspection', () => {
+    const plan = fallbackPlan('use WSL and run uname -a', 'operational');
+    const [first] = plan.split('\n');
+    expect(first).toMatch(/^PENDING — run the requested operation through the required live-system tool/);
+    expect(plan).not.toMatch(/inspect repository|repository work|diagnostics\/tests/);
+    expect(plan).toContain('GOAL — use WSL and run uname -a');
+  });
+
+  it('a repository fallback plan keeps the inspect → edit → validate workflow', () => {
+    const plan = fallbackPlan('fix the parser bug');
+    expect(plan.split('\n')[0]).toBe('PENDING — inspect repository instructions and relevant implementation');
+    expect(plan).toContain('PENDING — validate mutations with diagnostics/tests');
+  });
+
+  it('an invalid planner draft for an operational goal falls back to the operational checklist', () => {
+    const plan = normalizeExecutionPlan('Final Summary: the command was run and succeeded.', 'use WSL and run uname -a', 'operational');
+    expect(plan.split('\n')[0]).toMatch(/^PENDING — run the requested operation/);
+    expect(plan).not.toContain('inspect repository instructions');
   });
 });

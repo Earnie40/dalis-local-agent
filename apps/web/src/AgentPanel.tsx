@@ -284,6 +284,9 @@ export function AgentPanel({ aliases }: { aliases: ModelAlias[] }) {
           appendActivity(activeSessionId, event.activity);
           return;
         }
+        if (event.type === 'approval_resolved' && event.id) {
+          setAnswered((current) => ({ ...current, [event.id!]: event.approved === true }));
+        }
         setEvents((current) => {
           const next = [...current, event];
           setSessions((saved) => saved.map((item) => item.id === activeSessionId
@@ -322,8 +325,14 @@ export function AgentPanel({ aliases }: { aliases: ModelAlias[] }) {
     // Recorded before the request so a double-click cannot send two answers.
     setAnswered((current) => ({ ...current, [id]: approved }));
     try {
-      await api.approve(id, approved);
+      const result = await api.approve(id, approved);
+      setAnswered((current) => ({ ...current, [id]: result.approved }));
     } catch (e) {
+      setAnswered((current) => {
+        const next = { ...current };
+        delete next[id];
+        return next;
+      });
       setError(e instanceof Error ? e.message : String(e));
     }
   }, []);
@@ -894,5 +903,4 @@ function AgentArtifactPreview({ artifact, workspaceId }: { artifact: AgentArtifa
     </figure>
   );
 }
-
 

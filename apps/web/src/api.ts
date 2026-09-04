@@ -319,7 +319,7 @@ export interface RunLiveValidationBody {
 
 export const api = {
   approve: (id: string, approved: boolean) =>
-    json<{ ok: boolean }>(`/api/approvals/${id}`, {
+    json<{ ok: boolean; approved: boolean; reason?: 'expired' }>(`/api/approvals/${id}`, {
       method: 'POST',
       body: JSON.stringify({ approved }),
     }),

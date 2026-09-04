@@ -180,7 +180,11 @@ export interface AgentLoopOptions {
   } | undefined>;
 
   evidenceRequirement?: {
-    /** Any one successful tool in this set satisfies the requirement. */
+    /**
+     * Any one successful tool in this set satisfies the requirement. These
+     * tools are exposed to the model on every turn, so list only tools the
+     * executor actually offers.
+     */
     tools: string[];
     /** How many times to push back before accepting the answer anyway. */
     maxNudges?: number;
@@ -372,8 +376,16 @@ function looksLikeMissingPath(result: LoopToolResult): boolean {
  * Keep each model turn focused without weakening the executor boundary. Hidden
  * tools remain unavailable to the model for that turn, but PermissionEngine is
  * still authoritative for every tool that is actually executed.
+ *
+ * Tools the caller requires as evidence are always exposed: the loop refuses a
+ * final answer until one of them succeeds, so hiding them would make the run
+ * unsatisfiable and push the model toward whatever repository tool remained.
  */
-function selectToolsForTurn(tools: ToolSchema[], snapshot: AgentLoopContextSnapshot): ToolSchema[] {
+function selectToolsForTurn(
+  tools: ToolSchema[],
+  snapshot: AgentLoopContextSnapshot,
+  requiredEvidenceTools: readonly string[] = [],
+): ToolSchema[] {
   const goal = snapshot.goal.toLowerCase();
   const names = new Set<string>();
   const addPrefix = (prefix: string) => {
@@ -382,6 +394,8 @@ function selectToolsForTurn(tools: ToolSchema[], snapshot: AgentLoopContextSnaps
   const add = (...wanted: string[]) => {
     for (const name of wanted) if (tools.some((tool) => tool.name === name)) names.add(name);
   };
+
+  add(...requiredEvidenceTools);
 
   // Repository understanding is useful on every coding turn.
   add('filesystem.list', 'filesystem.read', 'filesystem.search', 'filesystem.stat');
@@ -642,7 +656,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       }
     }
 
-    const toolsForTurn = selectToolsForTurn(tools, snapshot);
+    const toolsForTurn = selectToolsForTurn(tools, snapshot, options.evidenceRequirement?.tools);
     const workingStateContext = buildWorkingStateContext(snapshot);
     const turnSystemPrompt = [
       baseSystemPrompt,

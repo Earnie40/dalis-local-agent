@@ -24,12 +24,26 @@ export interface CodingGraphEvent {
   detail?: Record<string, unknown>;
 }
 
+export type GraphTaskKind = 'repository' | 'operational';
+
+/**
+ * What the run is about and what proves it. The graph defaults to repository
+ * work; an operational profile keeps the same plan → execute → review shape
+ * but lets live-system output stand as evidence and does not demand a
+ * repository mutation that the goal never asked for.
+ */
+export interface GraphTaskProfile {
+  kind: GraphTaskKind;
+  evidenceRequirement?: { tools: string[]; maxNudges?: number };
+}
+
 export interface CodingAgentGraphInput {
   threadId: string;
   workspaceId: string;
   goal: string;
   history?: CompletionMessage[];
   systemPrompt: string;
+  taskProfile?: GraphTaskProfile;
   executor: ToolExecutor;
   coder: ResolvedModel;
   planner?: ResolvedModel;
@@ -82,14 +96,22 @@ function stripTaskMarker(answer: string): string {
   return answer.replace(/^\s*TASK_(?:COMPLETE|BLOCKED):\s*/i, '').trim();
 }
 
-export function fallbackPlan(goal: string): string {
-  return [
-    'PENDING — inspect repository instructions and relevant implementation',
-    'PENDING — execute the requested repository work with exact observed paths',
-    'PENDING — validate mutations with diagnostics/tests',
-    'PENDING — inspect results/diff and finish only when the goal is verified',
-    `GOAL — ${goal.slice(0, 1800)}`,
-  ].join('\n');
+const REPOSITORY_EVIDENCE_TOOLS = ['filesystem.list', 'filesystem.search', 'filesystem.read', 'filesystem.stat'];
+
+export function fallbackPlan(goal: string, kind: GraphTaskKind = 'repository'): string {
+  const steps = kind === 'operational'
+    ? [
+        'PENDING — run the requested operation through the required live-system tool and runtime',
+        'PENDING — inspect the actual command output for errors or missing capabilities',
+        'PENDING — verify the requested outcome from observed output and finish only when it is established',
+      ]
+    : [
+        'PENDING — inspect repository instructions and relevant implementation',
+        'PENDING — execute the requested repository work with exact observed paths',
+        'PENDING — validate mutations with diagnostics/tests',
+        'PENDING — inspect results/diff and finish only when the goal is verified',
+      ];
+  return [...steps, `GOAL — ${goal.slice(0, 1800)}`].join('\n');
 }
 
 const PLAN_ACTION = /^(?:analyze|check|compare|determine|edit|identify|inspect|locate|make|read|review|run|search|test|update|use|validate|verify)\b/i;
@@ -102,8 +124,8 @@ const PLAN_REPOSITORY_CLAIM = /\b(?:is|are|was|were|has|have|had|contains?|found
  * the executor has observed anything. Invalid or mixed prose falls back to a
  * deterministic, all-pending checklist.
  */
-export function normalizeExecutionPlan(candidate: string, goal: string): string {
-  const fallback = fallbackPlan(goal);
+export function normalizeExecutionPlan(candidate: string, goal: string, kind: GraphTaskKind = 'repository'): string {
+  const fallback = fallbackPlan(goal, kind);
   const trimmed = candidate.trim();
   if (!trimmed || PLAN_COMPLETION_CLAIM.test(trimmed)) return fallback;
 
@@ -217,22 +239,30 @@ export class DurableCodingAgentGraph {
       return { phase: 'plan' as const, initialContext };
     });
 
+    const taskKind: GraphTaskKind = input.taskProfile?.kind ?? 'repository';
+    const operational = taskKind === 'operational';
+
     const plan = RunnableLambda.from(async (state: CodingGraphState) => {
       emitPhase('plan', 'Building a compact execution checklist.');
-      let nextPlan = fallbackPlan(state.goal);
+      let nextPlan = fallbackPlan(state.goal, taskKind);
       try {
         const planned = await advisoryCall(
           input.planner,
           [
             'You are the planning pass for a coding agent.',
+            operational
+              ? 'This goal is a live system/network operation, not repository work: plan steps that execute on the running machine through the required runtime and read real output. Do not plan repository listing, searching, or source inspection unless the goal itself asks for it.'
+              : '',
             'Return only 3-12 concise checklist lines in the exact form: PENDING — <future action>.',
             'Do not emit headings, Final Summary, results, evidence, repository facts, COMPLETE, or BLOCKED.',
-            'The plan is intent only: the executor must inspect, mutate, and validate before any completion claim.',
-          ].join('\n'),
+            operational
+              ? 'The plan is intent only: the executor must run the operation and observe its output before any completion claim.'
+              : 'The plan is intent only: the executor must inspect, mutate, and validate before any completion claim.',
+          ].filter(Boolean).join('\n'),
           `GOAL:\n${state.goal}\n\nCURATED CONTEXT:\n${state.initialContext.slice(0, 14000)}`,
           input.signal,
         );
-        if (planned) nextPlan = normalizeExecutionPlan(planned, state.goal);
+        if (planned) nextPlan = normalizeExecutionPlan(planned, state.goal, taskKind);
       } catch {
         // Planner is advisory. Executor remains able to work from deterministic fallback.
       }
@@ -241,7 +271,12 @@ export class DurableCodingAgentGraph {
     });
 
     const execute = RunnableLambda.from(async (state: CodingGraphState) => {
-      emitPhase('execute', state.cycle > 0 ? 'Re-entering execution after reviewer feedback.' : 'Executing repository task.');
+      emitPhase(
+        'execute',
+        state.cycle > 0
+          ? 'Re-entering execution after reviewer feedback.'
+          : operational ? 'Executing live-system task.' : 'Executing repository task.',
+      );
       const reviewFeedback = state.review && !state.reviewPassed ? `\n\nREVIEW FEEDBACK TO CORRECT:\n${state.review}` : '';
 
       const contextProvider = async (snapshot: AgentLoopContextSnapshot): Promise<string> => {
@@ -280,15 +315,24 @@ export class DurableCodingAgentGraph {
         runMode: input.runMode,
         synthesisReserveTurns: input.synthesisReserveTurns,
         completionSignalRequired: true,
+        // A repository goal that says "fix"/"add" must produce a file mutation.
+        // An operational goal with the same verbs ("install", "add a route")
+        // acts on the live system, where no repository mutation is expected.
+        requireMutationForMutationIntent: !operational,
         requireValidationAfterMutation: true,
         reasoningMode: state.cycle > 0 ? 'deep' : input.reasoningMode ?? 'auto',
         initialPlan: state.plan,
         initialContext: state.initialContext,
         contextProvider,
-        evidenceRequirement: {
-          tools: ['filesystem.list', 'filesystem.search', 'filesystem.read', 'filesystem.stat'],
-          maxNudges: 2,
-        },
+        // The profile decides what counts as evidence: repository inspection
+        // for repository work, live-system output for operational work. A
+        // profile that names no tool leaves the evidence gate off rather than
+        // demanding a tool the model cannot call.
+        evidenceRequirement: input.taskProfile
+          ? input.taskProfile.evidenceRequirement
+            ? { maxNudges: 2, ...input.taskProfile.evidenceRequirement }
+            : undefined
+          : { tools: REPOSITORY_EVIDENCE_TOOLS, maxNudges: 2 },
         signal: input.signal,
         onEvent: input.onLoopEvent,
       });
