@@ -1,0 +1,71 @@
+[
+  {
+    "evaluationCaseId": "ho-01",
+    "sourceHash": "e0e9561bc8e5e53cc80625978e116189a2ae54337f2e950ceec5c34d905ae9ee",
+    "model": "qwen3:8b",
+    "provider": {
+      "instance": "local_ollama",
+      "alias": "coder"
+    },
+    "promptConfig": {
+      "mode": "llm-only",
+      "temperature": 0.08,
+      "jsonFormat": true
+    },
+    "retrievedEvidence": null,
+    "deterministicEvidence": null,
+    "modelResponse": {
+      "contractId": "ho-01",
+      "findings": [
+        {
+          "id": "REENTRANCY-1",
+          "category": "reentrancy",
+          "severity": "high",
+          "confidence": 1,
+          "evidence": "External call to msg.sender occurs before state update",
+          "sourceLines": [
+            22,
+            23,
+            24,
+            25,
+            26,
+            27,
+            28
+          ],
+          "functionName": "claimReward",
+          "rationale": "The external call to msg.sender is made before the rewards[msg.sender] is set to 0, allowing a malicious contract to re-enter and claim rewards multiple times",
+          "remediation": "Update the state (set rewards to 0) before making the external call to prevent reentrancy",
+          "status": "confirmed",
+          "basis": "MODEL_INFERENCE",
+          "unsupported": false
+        }
+      ],
+      "safeAreas": [
+        "The credit function is protected by the onlyOperator modifier and does not contain external calls",
+        "The operator address is set as immutable and cannot be modified"
+      ],
+      "limitations": [
+        "The contract is explicitly marked as a deliberately vulnerable fixture",
+        "No external calls are made in the credit function"
+      ],
+      "overallRisk": "high"
+    },
+    "groundTruth": [
+      {
+        "category": "reentrancy",
+        "functionName": "claimReward",
+        "severity": "high"
+      }
+    ],
+    "score": {
+      "truePositives": 1,
+      "falsePositives": 0,
+      "falseNegatives": 0,
+      "severityCorrect": 1,
+      "hallucinatedFindingCount": 0
+    },
+    "validationEvidence": [],
+    "status": "AWAITING_HUMAN_APPROVAL",
+    "reason": "model detected a held-out vulnerability with no false positive"
+  }
+]

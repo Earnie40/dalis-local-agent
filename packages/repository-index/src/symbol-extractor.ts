@@ -33,17 +33,86 @@ interface Line {
   number: number;
 }
 
-/** Last line index of a brace-delimited block starting at startIndex. */
-function braceEnd(lines: Line[], startIndex: number): number {
+interface BraceLocation {
+  line: number;
+  column: number;
+}
+
+/** Finds the matching brace when the exact opening position is known. */
+function braceEndAt(lines: Line[], startLine: number, startColumn: number): BraceLocation {
   let depth = 0;
-  let seen = false;
-  for (let i = startIndex; i < lines.length; i += 1) {
-    for (const ch of lines[i].text) {
-      if (ch === '{') { depth += 1; seen = true; }
-      else if (ch === '}') { depth -= 1; if (seen && depth === 0) return i; }
+  for (let i = startLine; i < lines.length; i += 1) {
+    const from = i === startLine ? startColumn : 0;
+    for (let column = from; column < lines[i].text.length; column += 1) {
+      const character = lines[i].text[column];
+      if (character === '{') depth += 1;
+      else if (character === '}') {
+        depth -= 1;
+        if (depth === 0) return { line: i, column };
+      }
     }
   }
-  return lines.length - 1;
+  return { line: lines.length - 1, column: lines.at(-1)?.text.length ?? 0 };
+}
+
+/** Last line index of a brace-delimited block starting at startIndex. */
+function braceEnd(lines: Line[], startIndex: number): number {
+  for (let i = startIndex; i < lines.length; i += 1) {
+    const opening = lines[i].text.indexOf('{');
+    if (opening >= 0) return braceEndAt(lines, i, opening).line;
+  }
+  return startIndex;
+}
+
+/**
+ * Finds a declaration body whose opening brace is on a later line. Parameter
+ * lists may themselves span lines, so only a brace seen after parentheses have
+ * balanced can begin the body. Ambient/overload declarations stop at `;`.
+ * Object-shaped TypeScript return types are skipped before choosing the
+ * function body. This remains a deterministic scanner; the TypeScript AST is
+ * the long-term authority for comments, strings, and exotic conditional types.
+ */
+function declarationBlockEnd(lines: Line[], startIndex: number, type: SymbolType): number {
+  if (!['function', 'class', 'interface', 'enum'].includes(type)) {
+    return lines[startIndex].text.includes('{') ? braceEnd(lines, startIndex) : startIndex;
+  }
+
+  let parentheses = 0;
+  let returnType = false;
+  let significant = '';
+  let i = startIndex;
+  let column = 0;
+
+  while (i < lines.length) {
+    const text = lines[i].text.split('//')[0];
+    while (column < text.length) {
+      const character = text[column];
+      if (character === '(') parentheses += 1;
+      else if (character === ')') parentheses = Math.max(0, parentheses - 1);
+      else if (character === ':' && parentheses === 0 && type === 'function') returnType = true;
+      else if (character === '{' && parentheses === 0) {
+        const previous = significant.at(-1) ?? '';
+        const previousTwo = significant.slice(-2);
+        const opensObjectReturnType = type === 'function' && returnType && (
+          ':|&<,[='.includes(previous) || previousTwo === '=>'
+        );
+        if (opensObjectReturnType) {
+          const end = braceEndAt(lines, i, column);
+          i = end.line;
+          column = end.column + 1;
+          significant = `${significant}}`;
+          continue;
+        }
+        return braceEndAt(lines, i, column).line;
+      } else if (character === ';' && parentheses === 0) return i;
+
+      if (!/\s/.test(character)) significant = `${significant}${character}`.slice(-8);
+      column += 1;
+    }
+    i += 1;
+    column = 0;
+  }
+  return startIndex;
 }
 
 /** Last line index of an indentation-delimited block for Python-like languages. */
@@ -216,10 +285,52 @@ function matchTopDecl(line: string, language: string): DeclMatch | null {
 }
 
 /** Within-file call references: for each callable symbol, scan its own lines. */
+interface ImportedCallBinding {
+  localName: string;
+  targetName: string;
+}
+
+/** Named/default ESM bindings that can connect a call site to another file. */
+function detectImportedCallBindings(source: string): ImportedCallBinding[] {
+  const bindings: ImportedCallBinding[] = [];
+  const seen = new Set<string>();
+  const imports = source.matchAll(/\bimport\s+(?!type\b)([\s\S]*?)\s+from\s+['"][^'"]+['"]\s*;?/g);
+
+  const add = (localName: string, targetName: string) => {
+    if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(localName)) return;
+    if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(targetName)) return;
+    const key = `${localName}\u0000${targetName}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    bindings.push({ localName, targetName });
+  };
+
+  for (const match of imports) {
+    const clause = match[1].trim();
+    if (!clause || clause.length > 4_000) continue;
+
+    const named = clause.match(/\{([\s\S]*?)\}/);
+    if (named) {
+      for (const rawPart of named[1].split(',')) {
+        const part = rawPart.trim().replace(/^type\s+/, '');
+        if (!part) continue;
+        const alias = part.split(/\s+as\s+/i).map((value) => value.trim());
+        add(alias[1] ?? alias[0], alias[0]);
+      }
+    }
+
+    // The identifier before a comma or named-binding block is a default import.
+    const beforeNamed = clause.split(/[,{]/, 1)[0]?.trim();
+    if (beforeNamed && !beforeNamed.startsWith('*')) add(beforeNamed, beforeNamed);
+  }
+  return bindings;
+}
+
 function detectCalls(
   filePath: string,
   lines: Line[],
   callables: Array<{ name: string; start: number; end: number }>,
+  importedBindings: readonly ImportedCallBinding[],
 ): CodeEdge[] {
   const names = callables.map((c) => c.name);
   const edges: CodeEdge[] = [];
@@ -229,6 +340,18 @@ function detectCalls(
       for (const name of names) {
         if (name === callee.name) continue;
         if (matchesCall(text, name)) edges.push({ filePath, source: callee.name, target: name, relationship: 'CALLS', line: i });
+      }
+      for (const binding of importedBindings) {
+        if (binding.targetName === callee.name) continue;
+        if (matchesCall(text, binding.localName)) {
+          edges.push({
+            filePath,
+            source: callee.name,
+            target: binding.targetName,
+            relationship: 'CALLS',
+            line: i,
+          });
+        }
       }
     }
   }
@@ -257,6 +380,7 @@ export function extractSymbols(filePath: string, source: string): ExtractionResu
   const symbols: CodeSymbol[] = [];
   const edges: CodeEdge[] = [];
   const callables: Array<{ name: string; start: number; end: number }> = [];
+  const importedCallBindings = detectImportedCallBindings(source);
 
   const emit = (name: string, type: SymbolType, start: number, end: number, extra?: { signature?: string; extendsNames?: string[]; implementsNames?: string[] }) => {
     symbols.push({ filePath, language, name, type, signature: extra?.signature, startLine: start, endLine: end, content: sliceSymbol(lines, start, end) });
@@ -288,7 +412,7 @@ export function extractSymbols(filePath: string, source: string): ExtractionResu
       const decl = matchTopDecl(line.text, language);
       if (!decl) continue;
 
-      const end = opens > 0 ? braceEnd(lines, i) : i;
+      const end = declarationBlockEnd(lines, i, decl.type);
       emit(decl.name, decl.type, line.number, end + 1, { signature: decl.signature, extendsNames: decl.extendsNames, implementsNames: decl.implementsNames });
       if (decl.type === 'function' || decl.type === 'variable') {
         callables.push({ name: decl.name, start: line.number, end: end + 1 });
@@ -308,6 +432,6 @@ export function extractSymbols(filePath: string, source: string): ExtractionResu
   }
 
   for (const e of detectImports(filePath, lines)) edges.push(e);
-  for (const e of detectCalls(filePath, lines, callables)) edges.push(e);
+  for (const e of detectCalls(filePath, lines, callables, importedCallBindings)) edges.push(e);
   return { symbols, edges };
 }

@@ -5,6 +5,10 @@ import {
   symbolCallees,
   dependencyImpact,
   getRepositoryArchitectureMap,
+  renderPathDiagram,
+  traceRepositoryPaths,
+  type PathDiagramFormat,
+  type RelationshipType,
 } from '@dacai-local-agent/repository-index';
 
 import {
@@ -50,6 +54,23 @@ function optionalNumber(
   }
 
   return Math.max(1, Math.floor(value));
+}
+
+const TRACE_RELATIONSHIPS = new Set<RelationshipType>([
+  'CALLS', 'IMPORTS', 'IMPLEMENTS', 'EXTENDS', 'DEPENDS_ON', 'TESTED_BY',
+  'CONFIGURES', 'READS_FROM', 'WRITES_TO', 'SUPERSEDES', 'RELATED_TO',
+  'FAILS_WITH', 'FIXED_BY',
+]);
+
+function traceRelationships(input: Record<string, unknown>): RelationshipType[] | undefined {
+  if (input.relationships === undefined) return undefined;
+  if (!Array.isArray(input.relationships) || !input.relationships.length) {
+    throw new Error('relationships must be a non-empty array when supplied.');
+  }
+  const values = [...new Set(input.relationships.map((value) => String(value).toUpperCase()))];
+  const invalid = values.find((value) => !TRACE_RELATIONSHIPS.has(value as RelationshipType));
+  if (invalid) throw new Error(`Unsupported relationship "${invalid}".`);
+  return values as RelationshipType[];
 }
 
 export const REPOSITORY_INTELLIGENCE_TOOLS = [
@@ -118,12 +139,12 @@ export const REPOSITORY_INTELLIGENCE_TOOLS = [
       additionalProperties: false,
     },
 
-    execute: async (input: Record<string, unknown>) => {
+    execute: async (input: Record<string, unknown>, ctx: { workspaceRoot?: string }) => {
       const symbol = stringArg(input, 'symbol');
 
       return {
         symbol,
-        references: await symbolEdges(symbol),
+        references: await symbolEdges(symbol, ctx.workspaceRoot),
       };
     },
   },
@@ -147,12 +168,12 @@ export const REPOSITORY_INTELLIGENCE_TOOLS = [
       additionalProperties: false,
     },
 
-    execute: async (input: Record<string, unknown>) => {
+    execute: async (input: Record<string, unknown>, ctx: { workspaceRoot?: string }) => {
       const symbol = stringArg(input, 'symbol');
 
       return {
         symbol,
-        callers: await symbolCallers(symbol),
+        callers: await symbolCallers(symbol, ctx.workspaceRoot),
       };
     },
   },
@@ -176,12 +197,12 @@ export const REPOSITORY_INTELLIGENCE_TOOLS = [
       additionalProperties: false,
     },
 
-    execute: async (input: Record<string, unknown>) => {
+    execute: async (input: Record<string, unknown>, ctx: { workspaceRoot?: string }) => {
       const symbol = stringArg(input, 'symbol');
 
       return {
         symbol,
-        callees: await symbolCallees(symbol),
+        callees: await symbolCallees(symbol, ctx.workspaceRoot),
       };
     },
   },
@@ -209,6 +230,66 @@ export const REPOSITORY_INTELLIGENCE_TOOLS = [
       const symbol = stringArg(input, 'symbol');
 
       return await dependencyImpact(symbol);
+    },
+  },
+
+  {
+    ...READ_ONLY_BASE,
+
+    name: 'code.path.trace',
+
+    description:
+      'Trace bounded indexed symbol paths from A to B and return file/line evidence plus Mermaid or DOT graph source. This is static indexed evidence, not a runtime trace.',
+
+    inputSchema: {
+      type: 'object',
+      properties: {
+        from: {
+          type: 'string',
+          description: 'Exact indexed source symbol name. Use code.symbol.search first when uncertain.',
+        },
+        to: {
+          type: 'string',
+          description: 'Exact indexed destination symbol name.',
+        },
+        relationships: {
+          type: 'array',
+          items: { type: 'string', enum: [...TRACE_RELATIONSHIPS] },
+          description: 'Indexed edge types to traverse. Defaults to CALLS.',
+        },
+        maxDepth: { type: 'number', minimum: 1, maximum: 24, description: 'Maximum edges in a path. Defaults to 8.' },
+        maxPaths: { type: 'number', minimum: 1, maximum: 25, description: 'Maximum paths to return. Defaults to 5.' },
+        maxVisited: { type: 'number', minimum: 1, maximum: 50000, description: 'Maximum queued paths to inspect. Defaults to 5000.' },
+        format: { type: 'string', enum: ['mermaid', 'dot'], description: 'Graph source format. Defaults to mermaid.' },
+      },
+      required: ['from', 'to'],
+      additionalProperties: false,
+    },
+
+    execute: async (input: Record<string, unknown>, ctx: { workspaceRoot?: string }) => {
+      if (!ctx.workspaceRoot) throw new Error('A workspace is required.');
+      const from = stringArg(input, 'from');
+      const to = stringArg(input, 'to');
+      const relationships = traceRelationships(input);
+      const maxDepth = Math.min(optionalNumber(input, 'maxDepth', 8), 24);
+      const maxPaths = Math.min(optionalNumber(input, 'maxPaths', 5), 25);
+      const maxVisited = Math.min(optionalNumber(input, 'maxVisited', 5_000), 50_000);
+      const format: PathDiagramFormat = input.format === 'dot' ? 'dot' : 'mermaid';
+      if (input.format !== undefined && input.format !== 'dot' && input.format !== 'mermaid') {
+        throw new Error('format must be "mermaid" or "dot".');
+      }
+
+      const trace = await traceRepositoryPaths(ctx.workspaceRoot, from, to, {
+        relationships,
+        maxDepth,
+        maxPaths,
+        maxVisited,
+      });
+      return {
+        ...trace,
+        diagramFormat: format,
+        diagram: renderPathDiagram(trace, format),
+      };
     },
   },
 

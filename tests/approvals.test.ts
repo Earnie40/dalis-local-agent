@@ -87,6 +87,19 @@ describe('ApprovalRegistry', () => {
     await expect(pending).resolves.toBe(false);
   });
 
+  it('approves current and future requests for one run only', async () => {
+    const registry = new ApprovalRegistry();
+    const first = registry.request({ runId: 'run_all', toolName: 'shell.run', decision, input: {} });
+    expect(registry.approveAll('run_all')).toBe(1);
+    await expect(first).resolves.toBe(true);
+
+    await expect(registry.request({ runId: 'run_all', toolName: 'tests.run', decision, input: {} })).resolves.toBe(true);
+    const other = registry.request({ runId: 'run_other', toolName: 'shell.run', decision, input: {} });
+    expect(registry.pending()).toHaveLength(1);
+    registry.decide(registry.pending()[0].id, false);
+    await expect(other).resolves.toBe(false);
+  });
+
   it('issues unguessable ids', () => {
     const registry = new ApprovalRegistry();
     const ids = new Set<string>();
@@ -154,6 +167,34 @@ describe('executor honours the gate', () => {
     expect(result.output).toContain('requires explicit approval');
   });
 
+  it('runs a trusted bounded mutation without opening the approval gate', async () => {
+    const registry = new ToolRegistry();
+    const execute = vi.fn(async () => ({ path: 'generated/image.png' }));
+    registry.register({
+      name: 'image.generate',
+      description: 'generate image',
+      inputSchema: { type: 'object' },
+      permissionTier: 'mutation',
+      autoApprove: true,
+      requiresRead: true,
+      requiresWrite: true,
+      timeoutMs: 5_000,
+      execute,
+    });
+    const approvals = { request: vi.fn(async () => false) };
+    const executor = new PermissionedToolExecutor({
+      registry,
+      capabilities: { read: true, write: true, shell: false, network: false },
+      context: {},
+      approvals,
+    });
+
+    await expect(executor.execute({ id: 'image', name: 'image.generate', arguments: {} }))
+      .resolves.toMatchObject({ success: true });
+    expect(execute).toHaveBeenCalledOnce();
+    expect(approvals.request).not.toHaveBeenCalled();
+  });
+
   it('never asks for a call the engine already denied outright', async () => {
     const registry = new ToolRegistry();
     registry.register(dangerous);
@@ -176,5 +217,28 @@ describe('executor honours the gate', () => {
     // Workspace capability denial is final and not appealable to a human.
     expect(result.denied).toBe(true);
     expect(asked).toBe(0);
+  });
+
+  it('redacts secrets from tool errors before returning them', async () => {
+    const registry = new ToolRegistry();
+    registry.register({
+      name: 'safe.failure',
+      description: 'synthetic failure',
+      inputSchema: { type: 'object' },
+      permissionTier: 'safe',
+      timeoutMs: 5_000,
+      execute: async () => {
+        throw new Error('request failed: RUNPOD_API_KEY=rpa_syntheticcredential12345');
+      },
+    });
+    const executor = new PermissionedToolExecutor({
+      registry,
+      capabilities: { read: true, write: false, shell: false, network: false },
+      context: {},
+    });
+    const result = await executor.execute({ id: 'failure', name: 'safe.failure', arguments: {} });
+    expect(result.success).toBe(false);
+    expect(result.output).toContain('[REDACTED]');
+    expect(result.output).not.toContain('rpa_syntheticcredential12345');
   });
 });

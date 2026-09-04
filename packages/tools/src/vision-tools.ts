@@ -43,6 +43,8 @@ export const visionInspectTool: ToolDefinition = {
     additionalProperties: false,
   },
   permissionTier: 'safe',
+  requiresRead: true,
+  requiresNetwork: true,
   timeoutMs: 180_000,
   async execute(input, ctx) {
     const model = process.env.DACAI_VISION_MODEL?.trim();

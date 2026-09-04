@@ -83,6 +83,44 @@ const call = (name: string, args: Record<string, unknown> = {}, id = 'c1'): Norm
 });
 
 describe('agent loop', () => {
+  it('omits thinking for an unsupported model in automatic reasoning mode', async () => {
+    const provider = scriptedProvider([{ content: 'done' }]);
+
+    await runAgentLoop({
+      provider,
+      model: 'qwen3-coder:30b',
+      capabilities: {
+        ...VERIFIED,
+        configurableThinking: 'unsupported',
+      },
+      executor: executor(() => ({ output: 'ok', success: true })),
+      prompt: 'Inspect the workspace.',
+      reasoningMode: 'auto',
+    });
+
+    expect(provider.requests[0].think).toBeUndefined();
+    expect(provider.requests[0].thinkingCapability).toBe('unsupported');
+  });
+
+  it('keeps thinking available for a verified thinking model', async () => {
+    const provider = scriptedProvider([{ content: 'done' }]);
+
+    await runAgentLoop({
+      provider,
+      model: 'qwen3:8b',
+      capabilities: {
+        ...VERIFIED,
+        configurableThinking: 'verified',
+      },
+      executor: executor(() => ({ output: 'ok', success: true })),
+      prompt: 'Inspect the workspace.',
+      reasoningMode: 'deep',
+    });
+
+    expect(provider.requests[0].think).toBe(true);
+    expect(provider.requests[0].thinkingCapability).toBe('verified');
+  });
+
   it('returns the answer when the model stops calling tools', async () => {
     const result = await runAgentLoop({
       provider: scriptedProvider([{ content: 'The answer is 42.' }]),
@@ -96,6 +134,92 @@ describe('agent loop', () => {
     expect(result.stopReason).toBe('final-answer');
     expect(result.turns).toBe(1);
     expect(result.toolCalls).toBe(0);
+    expect(result.completionState).toBe('GOAL_COMPLETE');
+  });
+
+  it('preserves server-authorized engineering tools through per-turn selection', async () => {
+    const provider = scriptedProvider([{ content: 'TASK_BLOCKED: capability inventory only.' }]);
+    const toolNames = [
+      'filesystem.list', 'filesystem.read', 'filesystem.search', 'filesystem.stat',
+      'engineering.capabilities.inspect', 'engineering.artifact.inspect',
+      'cad.execute', 'bim.execute', 'scene.render',
+    ];
+    await runAgentLoop({
+      provider,
+      model: 'm',
+      capabilities: VERIFIED,
+      executor: executor(() => ({ output: 'ok', success: true }), toolNames.map((name) => ({
+        name, description: name, inputSchema: { type: 'object' },
+      }))),
+      prompt: 'Generate a parametric CAD part.',
+    });
+    expect(provider.requests[0].tools?.map((tool) => tool.name)).toEqual(expect.arrayContaining([
+      'engineering.capabilities.inspect', 'engineering.artifact.inspect',
+      'cad.execute', 'bim.execute', 'scene.render',
+    ]));
+  });
+
+  it('starts distinct read-only repository calls concurrently while preserving result order', async () => {
+    const readOnlyTools: ToolSchema[] = ['filesystem.read', 'filesystem.search'].map((name) => ({
+      name,
+      description: name,
+      inputSchema: { type: 'object', properties: { path: { type: 'string' } } },
+    }));
+    const started: string[] = [];
+    let release: (() => void) | undefined;
+    let bothStarted: (() => void) | undefined;
+    const executionGate = new Promise<void>((resolve) => { release = resolve; });
+    const allStarted = new Promise<void>((resolve) => { bothStarted = resolve; });
+
+    const run = runAgentLoop({
+      provider: scriptedProvider([
+        { toolCalls: [call('filesystem.read', { path: 'a.ts' }, 'read'), call('filesystem.search', { path: 'src' }, 'search')] },
+        { content: 'Evidence collected.' },
+      ]),
+      model: 'm', capabilities: VERIFIED,
+      executor: executor(async (requested) => {
+        started.push(requested.name);
+        if (started.length === 2) bothStarted?.();
+        await executionGate;
+        return { output: requested.name, success: true };
+      }, readOnlyTools),
+      prompt: 'Inspect the repository.',
+    });
+
+    await Promise.race([
+      allStarted,
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('read-only calls were not batched')), 250)),
+    ]);
+    release?.();
+    const result = await run;
+
+    expect(started).toEqual(['filesystem.read', 'filesystem.search']);
+    expect(result.toolCalls).toBe(2);
+    expect(result.answer).toBe('Evidence collected.');
+  });
+
+  it('honors explicit waiting and blocked terminal states', async () => {
+    const waiting = await runAgentLoop({
+      provider: scriptedProvider([{ content: 'TASK_WAITING_FOR_USER: choose a deployment target.' }]),
+      model: 'm', capabilities: VERIFIED, executor: executor(() => ({ output: 'ok', success: true })), prompt: 'Deploy it',
+    });
+    const blocked = await runAgentLoop({
+      provider: scriptedProvider([{ content: 'TASK_BLOCKED: credentials are unavailable.' }]),
+      model: 'm', capabilities: VERIFIED, executor: executor(() => ({ output: 'ok', success: true })), prompt: 'Deploy it',
+    });
+    expect(waiting.completionState).toBe('WAITING_FOR_USER');
+    expect(blocked.completionState).toBe('BLOCKED');
+  });
+
+  it('announces and uses a synthesis reserve near a deep audit ceiling', async () => {
+    const events: string[] = [];
+    await runAgentLoop({
+      provider: scriptedProvider([{ toolCalls: [call('echo', { n: 1 })] }, { content: 'TASK_COMPLETE: report complete.' }]),
+      model: 'm', capabilities: VERIFIED, executor: executor(() => ({ output: 'evidence', success: true })),
+      prompt: 'Audit', maxTurns: 4, synthesisReserveTurns: 3, runMode: 'repository_audit',
+      onEvent: (event) => { if (event.type === 'budget') events.push(event.message ?? ''); },
+    });
+    expect(events.some((message) => message.includes('Broad discovery is closing'))).toBe(true);
   });
 
   it('feeds a tool result back and continues to a final answer', async () => {
@@ -279,7 +403,7 @@ describe('malformed and wasteful calls', () => {
 });
 
 describe('bounds', () => {
-  it('stops at maxTurns and keeps the last thing the model said', async () => {
+  it('reports hard budget exhaustion rather than treating the last model text as success', async () => {
     let turn = 0;
     const result = await runAgentLoop({
       provider: {
@@ -306,7 +430,9 @@ describe('bounds', () => {
 
     expect(result.stopReason).toBe('max-turns');
     expect(result.turns).toBe(3);
-    expect(result.answer).toBe('still working');
+    expect(result.completionState).toBe('HARD_BUDGET_EXHAUSTED');
+    expect(result.answer).toContain('HARD_BUDGET_EXHAUSTED');
+    expect(result.answer).toContain('still working');
   });
 
   it('stops when the tool-call budget is spent', async () => {
@@ -410,7 +536,7 @@ describe('event stream', () => {
       onEvent: (event) => events.push(event.type),
     });
 
-    expect(events).toEqual(['model_response', 'tool_call', 'tool_result', 'model_response']);
+    expect(events).toEqual(['budget', 'model_request', 'model_response', 'tool_call', 'tool_result', 'budget', 'model_request', 'model_response']);
   });
 });
 

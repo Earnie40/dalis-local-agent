@@ -1,0 +1,28 @@
+services:
+  server:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: server
+    env_file:
+      - ../.env.production
+    environment:
+      NODE_ENV: production
+      DACAI_SERVER_HOST: 0.0.0.0
+      DACAI_MEDIA_TRANSPORT: https
+      DACAI_MEDIA_AUTOSTART: "false"
+    expose:
+      - "3001"
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: web
+    depends_on:
+      server:
+        condition: service_healthy
+    ports:
+      - "8080:80"
+    restart: unless-stopped

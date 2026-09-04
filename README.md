@@ -43,6 +43,24 @@ pnpm dev
 6. Open the web app at http://localhost:5173 and the API at http://localhost:3001/health.
    `GET /api/providers` reports which inference instances are configured.
 
+Image/video generation uses a server-managed Runpod connection in development
+and authenticated HTTPS in production. See
+[Image and video generation deployment](docs/MEDIA_GENERATION_DEPLOYMENT.md).
+
+### Default low-refusal Qwen model
+
+Install the community `huihui_ai/qwen3-abliterated:8b` checkpoint with:
+
+```powershell
+pnpm model:install:qwen-uncensored
+```
+
+The `chat` and `coder` aliases use this checkpoint by default. The explicit
+`qwen_uncensored` alias remains available in the model picker as well. The
+checkpoint does not bypass DACAIS tool permissions, workspace containment,
+approvals, or audit logging. Tool-loop use is admitted only after the existing
+runtime capability probe verifies the model's tool-call behavior.
+
 PostgreSQL is required — the server fails fast with a clear configuration error
 rather than falling back to a second persistence layer.
 

@@ -321,13 +321,25 @@ function chooseSpecialist(
     validation?.required ===
     true;
 
+  const diagnostics =
+    validation?.['code.diagnostics'];
+  const diagnosticsRecord =
+    diagnostics && typeof diagnostics === 'object'
+      ? (diagnostics as Record<string, unknown>)
+      : undefined;
+
+  const tests =
+    validation?.['tests.run'];
+  const testsRecord =
+    tests && typeof tests === 'object'
+      ? (tests as Record<string, unknown>)
+      : undefined;
+
   const diagnosticsPassed =
-    validation?.['code.diagnostics']
-      ?.success === true;
+    diagnosticsRecord?.success === true;
 
   const testsPassed =
-    validation?.['tests.run']
-      ?.success === true;
+    testsRecord?.success === true;
 
   if (
     validationRequired &&
@@ -343,8 +355,8 @@ function chooseSpecialist(
   }
 
   const changedFiles =
-    state?.changedFiles ??
-    state?.changed_files;
+    stateRecord?.changedFiles ??
+    stateRecord?.changed_files;
 
   if (
     arrayLength(changedFiles) > 0 &&

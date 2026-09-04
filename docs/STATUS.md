@@ -571,6 +571,40 @@ Verified by running `pnpm exec vitest run tests/web-tools.test.ts` → 12/12 pas
 
 ---
 
+## Domain intelligence · operational · LIVE VERIFIED
+
+Domain-scoped RAG over the existing pgvector corpus (migration 013), an ingestion service
+with mandatory licence + secret redaction, persistence for the domain layer (migrations
+012/014), and `smart-contract` taken end to end: 9-document corpus ingested with real
+embeddings, deterministic static analyzer, and a held-out 6-case evaluation suite.
+
+The analyzer is registered as agent tools (`smartcontract.analyze` / `.report`, tier
+`safe`, no address or RPC parameter). A real training resource gate exists and blocks on
+measured RAM/disk/VRAM, fail-closed on anything unmeasurable.
+
+Live: domain scoping proven to change results (`robotics` scope returns nothing where
+`smart-contract` returns the answer with provenance). Adapter training gates: **8/11 —
+BLOCKED. No fine-tuning attempted.**
+
+Operational ladder is the single source of truth in `taxonomy.ts`: **`smart-contract` is
+EVALUATED; every other domain is REGISTERED.** No domain is ADAPTER_TRAINED.
+
+Full detail and the explicit not-implemented list: [docs/DOMAIN_INTELLIGENCE.md](DOMAIN_INTELLIGENCE.md).
+
+### Earlier: foundation pass · TEST VERIFIED (57 tests) + schema LIVE VALIDATED
+
+Domain taxonomy, dataset lineage, temporal integrity, provenance, prediction records,
+the adapter registry, and the learning-loop gate. Four new packages
+(`domain-knowledge`, `datasets`, `market-intelligence`, `model-registry`) plus additive
+migration `012_domain_intelligence.sql`, whose CHECK constraints were verified against
+real PostgreSQL inside a rolled-back transaction.
+
+Foundation only: **no ingestion, no retrieval wiring, no persistence, no trained
+adapter, no on-chain anchoring.** Full scope and the explicit not-implemented list are
+in [docs/DOMAIN_INTELLIGENCE.md](DOMAIN_INTELLIGENCE.md).
+
+---
+
 ## Everything else · NOT IMPLEMENTED
 
 Unchanged from the audit above, and sequenced per the revised plan:

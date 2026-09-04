@@ -1,7 +1,10 @@
 node_modules
 .pnpm-store
+# Every .env variant is secret-bearing, including the timestamped backups the
+# RunPod reconnect writes. Only the credential-free template is tracked.
 .env
-.env.local
+.env.*
+!.env.example
 *.log
 coverage
 .DS_Store
@@ -12,3 +15,5 @@ coverage
 **/.turbo
 **/tmp
 **/.pytest_cache
+runpodssh.txt
+runpodssh.txt.pub

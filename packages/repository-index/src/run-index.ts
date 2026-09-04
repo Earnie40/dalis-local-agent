@@ -1,11 +1,30 @@
 import { execFileSync } from 'node:child_process';
-import { resolve } from 'node:path';
+import { realpathSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createId } from '@dacai-local-agent/shared';
 import { RepositoryIndexer } from './indexer.js';
 import { SymbolStore, createPostgresClient } from './repository-store.js';
 
 async function main(): Promise<void> {
-  const rootPath = resolve(process.cwd(), '../..');
+  const defaultRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
+  const requestedRoot = process.env.DACAIS_REPOSITORY_ROOT?.trim() || defaultRoot;
+  const rootPath = realpathSync(resolve(requestedRoot));
+
+  let gitRoot: string;
+  try {
+    gitRoot = realpathSync(execFileSync(
+      'git',
+      ['rev-parse', '--show-toplevel'],
+      { cwd: rootPath, encoding: 'utf8' },
+    ).trim());
+  } catch {
+    throw new Error(`Refusing to index a non-Git directory: ${rootPath}`);
+  }
+
+  if (gitRoot.toLowerCase() !== rootPath.toLowerCase()) {
+    throw new Error(`Refusing to index ${rootPath}; the repository root is ${gitRoot}`);
+  }
 
   let branch: string | undefined;
   let headCommit: string | undefined;

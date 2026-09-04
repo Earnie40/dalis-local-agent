@@ -8,6 +8,7 @@ import type {
   ToolExecutor,
   ToolSchema,
 } from '@dacai-local-agent/agent-core';
+import { isMutationTool } from '@dacai-local-agent/agent-core';
 
 import {
   loadWorkingState,
@@ -76,14 +77,6 @@ interface DiffValidationPlan {
 
   updatedAt: string;
 }
-
-const MUTATION_TOOLS =
-  new Set([
-    'filesystem.edit',
-    'filesystem.write',
-    'filesystem.move',
-    'filesystem.copy',
-  ]);
 
 const PLAN_SCHEMA = {
   type: 'object',
@@ -1022,9 +1015,7 @@ function realMutation(
     LoopToolResult,
 ): boolean {
   if (
-    !MUTATION_TOOLS.has(
-      call.name,
-    ) ||
+    !isMutationTool(call.name) ||
     !result.success ||
     result.denied
   ) {

@@ -1,5 +1,7 @@
 import pg from 'pg';
 
+export type { PoolClient } from 'pg';
+
 const { Pool } = pg;
 
 let pool: pg.Pool | undefined;

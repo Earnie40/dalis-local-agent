@@ -32,6 +32,9 @@ importers:
       fast-check:
         specifier: ^4.9.0
         version: 4.9.0
+      fastify:
+        specifier: ^5.4.0
+        version: 5.11.3
       globals:
         specifier: ^14.0.0
         version: 14.0.0
@@ -47,6 +50,9 @@ importers:
       vitest:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@22.20.1)
+      zod:
+        specifier: ^3.25.0
+        version: 3.25.76
 
   apps/server:
     dependencies:
@@ -59,6 +65,12 @@ importers:
       '@dacai-local-agent/context':
         specifier: workspace:*
         version: link:../../packages/context
+      '@dacai-local-agent/domain-knowledge':
+        specifier: workspace:*
+        version: link:../../packages/domain-knowledge
+      '@dacai-local-agent/investor-intelligence':
+        specifier: workspace:*
+        version: link:../../packages/investor-intelligence
       '@dacai-local-agent/memory':
         specifier: workspace:*
         version: link:../../packages/memory
@@ -209,6 +221,70 @@ importers:
         specifier: ^5.7.3
         version: 5.9.3
 
+  packages/datasets:
+    dependencies:
+      '@dacai-local-agent/domain-knowledge':
+        specifier: workspace:*
+        version: link:../domain-knowledge
+      '@dacai-local-agent/shared':
+        specifier: workspace:*
+        version: link:../shared
+    devDependencies:
+      typescript:
+        specifier: ^5.7.3
+        version: 5.9.3
+
+  packages/domain-knowledge:
+    dependencies:
+      '@dacai-local-agent/shared':
+        specifier: workspace:*
+        version: link:../shared
+    devDependencies:
+      typescript:
+        specifier: ^5.7.3
+        version: 5.9.3
+
+  packages/investor-intelligence:
+    dependencies:
+      '@dacai-local-agent/domain-knowledge':
+        specifier: workspace:*
+        version: link:../domain-knowledge
+      '@dacai-local-agent/providers':
+        specifier: workspace:*
+        version: link:../providers
+      '@dacai-local-agent/rag':
+        specifier: workspace:*
+        version: link:../rag
+      '@dacai-local-agent/security':
+        specifier: workspace:*
+        version: link:../security
+      '@dacai-local-agent/shared':
+        specifier: workspace:*
+        version: link:../shared
+      zod:
+        specifier: ^3.25.0
+        version: 3.25.76
+    devDependencies:
+      typescript:
+        specifier: ^5.7.3
+        version: 5.9.3
+
+  packages/market-intelligence:
+    dependencies:
+      '@dacai-local-agent/datasets':
+        specifier: workspace:*
+        version: link:../datasets
+      '@dacai-local-agent/domain-knowledge':
+        specifier: workspace:*
+        version: link:../domain-knowledge
+      '@dacai-local-agent/shared':
+        specifier: workspace:*
+        version: link:../shared
+    devDependencies:
+      typescript:
+        specifier: ^5.7.3
+        version: 5.9.3
+
   packages/mcp:
     dependencies:
       '@dacai-local-agent/shared':
@@ -227,6 +303,22 @@ importers:
 
   packages/memory:
     dependencies:
+      '@dacai-local-agent/shared':
+        specifier: workspace:*
+        version: link:../shared
+    devDependencies:
+      typescript:
+        specifier: ^5.7.3
+        version: 5.9.3
+
+  packages/model-registry:
+    dependencies:
+      '@dacai-local-agent/datasets':
+        specifier: workspace:*
+        version: link:../datasets
+      '@dacai-local-agent/domain-knowledge':
+        specifier: workspace:*
+        version: link:../domain-knowledge
       '@dacai-local-agent/shared':
         specifier: workspace:*
         version: link:../shared
@@ -281,6 +373,12 @@ importers:
 
   packages/rag:
     dependencies:
+      '@dacai-local-agent/domain-knowledge':
+        specifier: workspace:*
+        version: link:../domain-knowledge
+      '@dacai-local-agent/security':
+        specifier: workspace:*
+        version: link:../security
       '@dacai-local-agent/shared':
         specifier: workspace:*
         version: link:../shared
@@ -343,6 +441,25 @@ importers:
         specifier: ^5.7.3
         version: 5.9.3
 
+  packages/smart-contract:
+    dependencies:
+      '@dacai-local-agent/domain-knowledge':
+        specifier: workspace:*
+        version: link:../domain-knowledge
+      '@dacai-local-agent/rag':
+        specifier: workspace:*
+        version: link:../rag
+      '@dacai-local-agent/shared':
+        specifier: workspace:*
+        version: link:../shared
+      zod:
+        specifier: ^3.25.0
+        version: 3.25.76
+    devDependencies:
+      typescript:
+        specifier: ^5.7.3
+        version: 5.9.3
+
   packages/telemetry:
     dependencies:
       '@dacai-local-agent/shared':
@@ -379,6 +496,9 @@ importers:
       '@dacai-local-agent/skills':
         specifier: workspace:*
         version: link:../skills
+      '@dacai-local-agent/smart-contract':
+        specifier: workspace:*
+        version: link:../smart-contract
       zod:
         specifier: ^3.25.0
         version: 3.25.76

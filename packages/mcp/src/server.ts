@@ -27,9 +27,10 @@ export interface McpServerOptions {
 
 interface TaskRecord {
   id: string;
-  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | 'blocked' | 'waiting_for_user' | 'interrupted';
   objective: string;
   agentId: string;
+  modelAlias?: string;
   model: string;
   providerInstanceId: string;
   result?: string;
@@ -140,20 +141,34 @@ export function createDacaiMcpServer(options: McpServerOptions = {}): McpServer 
   }
 
   function formatTask(task: TaskRecord): string {
-    const lines = [`task: ${task.id}`, `status: ${task.status}`, `worker: ${task.agentId} · ${task.model} (local)`];
+    const usage = task.usage ?? {};
+    const usageClass = typeof usage.usageClass === 'string' ? usage.usageClass : undefined;
+    const onRunPod = usageClass === 'REMOTE_GPU_OLLAMA' || task.providerInstanceId === 'remote_gpu_ollama';
+    const onLocal = usageClass === 'LOCAL_OLLAMA' || task.providerInstanceId === 'local_ollama';
+    const providerLabel = onRunPod ? 'RunPod GPU' : onLocal ? 'local Ollama' : task.providerInstanceId;
+    const lines = [
+      `task: ${task.id}`,
+      `status: ${task.status}`,
+      `worker: ${task.agentId} · ${task.model} · ${providerLabel}`,
+    ];
 
     if (task.status === 'queued' || task.status === 'running') {
       lines.push('', 'Still running. Poll with local_agent.get_task, or stop it with local_agent.cancel_task.');
       return lines.join('\n');
     }
 
-    const usage = task.usage ?? {};
     if (usage.turns !== undefined) {
+      const billing = onRunPod
+        ? 'RunPod pod billing applies'
+        : onLocal
+          ? '$0 incremental (local inference)'
+          : `provider billing: ${task.providerInstanceId}`;
       lines.push(
         `cost: ${usage.turns} turns · ${usage.toolCalls ?? 0} tool calls · ` +
-          `${usage.inputTokens ?? 0} in / ${usage.outputTokens ?? 0} out tokens · $0 (local inference)`,
+          `${usage.inputTokens ?? 0} in / ${usage.outputTokens ?? 0} out tokens · ${billing}`,
       );
     }
+    if (typeof usage.routingNote === 'string') lines.push(`routing: ${usage.routingNote}`);
     if (usage.traceId) lines.push(`trace: ${usage.traceId}`);
 
     if (task.status === 'failed' || task.status === 'cancelled') {
@@ -188,42 +203,42 @@ export function createDacaiMcpServer(options: McpServerOptions = {}): McpServer 
     {
       name: 'local_agent.explore_repo',
       role: 'repo-explorer',
-      title: 'Explore a repository locally',
+      title: 'Explore a repository with DACAIS',
       description:
-        'Delegate repository exploration to a local model. Use for orienting in unfamiliar code, ' +
+        'Delegate repository exploration to a DACAIS worker. Use for orienting in unfamiliar code, ' +
         'locating where something lives, or summarising structure — instead of reading many files yourself. ' +
-        'Read-only. Runs on local inference at no API cost.',
+        'Read-only. Uses the preferred RunPod GPU when it is usable and reports when it falls back locally.',
     },
     {
       name: 'local_agent.debug_task',
       role: 'debugger',
-      title: 'Diagnose a failure locally',
+      title: 'Diagnose a failure with DACAIS',
       description:
-        'Delegate first-pass debugging to a local model: reproduce, read the error, trace it to the code. ' +
+        'Delegate first-pass debugging to a DACAIS worker: reproduce, read the error, trace it to the code. ' +
         'Returns a diagnosis with file and line. Does not apply fixes. Read-only.',
     },
     {
       name: 'local_agent.code_task',
       role: 'coder',
-      title: 'Make a bounded code change locally',
+      title: 'Make a bounded code change with DACAIS',
       description:
-        'Delegate a small, well-specified code change to a local model. It reads surrounding code, edits, ' +
+        'Delegate a small, well-specified code change to a DACAIS worker. It reads surrounding code, edits, ' +
         'and runs the tests. Requires a workspace with write access. Keep the objective narrow.',
     },
     {
       name: 'local_agent.review_task',
       role: 'reviewer',
-      title: 'Review changes locally',
+      title: 'Review changes with DACAIS',
       description:
-        'Delegate a correctness review of the current diff to a local model. Returns findings with file ' +
+        'Delegate a correctness review of the current diff to a DACAIS worker. Returns findings with file ' +
         'and line, or says plainly that it found nothing substantive. Read-only.',
     },
     {
       name: 'local_agent.test_task',
       role: 'test-engineer',
-      title: 'Run tests locally',
+      title: 'Run tests with DACAIS',
       description:
-        'Delegate running the project test suite to a local model and report exact pass/fail counts and ' +
+        'Delegate running the project test suite to a DACAIS worker and report exact pass/fail counts and ' +
         'exit code. Requires a workspace with shell access.',
     },
   ];

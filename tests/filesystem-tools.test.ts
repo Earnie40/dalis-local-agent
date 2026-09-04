@@ -23,6 +23,23 @@ beforeEach(() => {
   writeFileSync(join(root, 'src', 'config.ts'), 'export const PORT = 8080;\nexport const RETRIES = 3;\n');
   writeFileSync(join(root, 'src', 'server.ts'), "import { PORT } from './config';\n");
   writeFileSync(join(root, 'README.md'), '# Demo\n');
+  writeFileSync(
+    join(root, '.env'),
+    'DEEPBRAIN_APP_ID=synthetic-app-id\nDEEPBRAIN_USER_KEY=synthetic-user-key\nRUNPOD_CONNECTION=ssh synthetic-host\n',
+  );
+  writeFileSync(join(root, '.env.backup'), 'OPENAI_API_KEY=sk-syntheticbackupcredential123456789\n');
+  writeFileSync(
+    join(root, 'id_ed25519'),
+    '-----BEGIN OPENSSH PRIVATE KEY-----\nsynthetic-private-material\n-----END OPENSSH PRIVATE KEY-----\n',
+  );
+  writeFileSync(
+    join(root, 'src', 'references.ts'),
+    'export const key = process.env.DEEPBRAIN_USER_KEY;\nexport const PORT = 3001;\n',
+  );
+  writeFileSync(
+    join(root, 'src', 'leaky.log'),
+    'RUNPOD_API_KEY=rpa_syntheticcredential12345\npostgresql://user:syntheticDbPassword@db.example/test\n',
+  );
   writeFileSync(join(root, 'node_modules', 'junk', 'huge.js'), 'PORT = 1;\n');
   ctx = { workspaceRoot: root };
 });
@@ -32,6 +49,18 @@ describe('filesystem.list', () => {
     const result = (await listFilesTool.execute({}, ctx)) as { entries: string[] };
     expect(result.entries).toContain('README.md');
     expect(result.entries).toContain('src/');
+  });
+
+  it('maps / and /workspace to the selected workspace root', async () => {
+    const rootResult = (await listFilesTool.execute({ path: '/' }, ctx)) as { path: string };
+    const workspaceResult = (await listFilesTool.execute({ path: '/workspace' }, ctx)) as { path: string };
+    expect(rootResult.path).toBe('.');
+    expect(workspaceResult.path).toBe('.');
+  });
+
+  it('maps POSIX absolute-looking child paths into the workspace', async () => {
+    const result = (await listFilesTool.execute({ path: '/src' }, ctx)) as { path: string };
+    expect(result.path).toBe('src');
   });
 
   it('walks subdirectories when asked', async () => {
@@ -70,6 +99,36 @@ describe('filesystem.read', () => {
   it('refuses a directory with a usable message', async () => {
     await expect(readFileTool.execute({ path: 'src' }, ctx)).rejects.toThrow(/directory/i);
   });
+
+  it('returns only safe metadata and variable names for .env files', async () => {
+    const result = (await readFileTool.execute({ path: '.env' }, ctx)) as {
+      path: string;
+      protected: boolean;
+      variables: string[];
+      content?: string;
+    };
+    expect(result).toMatchObject({ path: '.env', protected: true });
+    expect(result.variables).toEqual(['DEEPBRAIN_APP_ID', 'DEEPBRAIN_USER_KEY', 'RUNPOD_CONNECTION']);
+    expect(result.content).toBeUndefined();
+    expect(JSON.stringify(result)).not.toMatch(/synthetic-(?:app|user|host)/);
+  });
+
+  it.each(['.env.backup', 'id_ed25519'])('protects %s without returning its contents', async (path) => {
+    const result = await readFileTool.execute({ path }, ctx);
+    expect(result).toMatchObject({ path, protected: true });
+    expect(JSON.stringify(result)).not.toMatch(/synthetic|BEGIN OPENSSH/);
+  });
+
+  it('redacts secret values in an ordinary file while preserving normal code', async () => {
+    const leaked = (await readFileTool.execute({ path: 'src/leaky.log' }, ctx)) as { content: string };
+    expect(leaked.content).not.toContain('rpa_syntheticcredential12345');
+    expect(leaked.content).not.toContain('syntheticDbPassword');
+    expect(leaked.content).toContain('[REDACTED]');
+
+    const references = (await readFileTool.execute({ path: 'src/references.ts' }, ctx)) as { content: string };
+    expect(references.content).toContain('process.env.DEEPBRAIN_USER_KEY');
+    expect(references.content).toContain('PORT = 3001');
+  });
 });
 
 describe('filesystem.search', () => {
@@ -96,6 +155,29 @@ describe('filesystem.search', () => {
 
   it('reports an invalid regex instead of crashing', async () => {
     await expect(searchTool.execute({ pattern: '([' }, ctx)).rejects.toThrow(/Invalid regular expression/);
+  });
+
+  it('searches protected files using variable names without exposing values', async () => {
+    const result = (await searchTool.execute({ pattern: 'DEEPBRAIN|RUNPOD' }, ctx)) as {
+      matches: Array<{ path: string; line: number; variable?: string; value?: string; text?: string }>;
+    };
+    const envMatches = result.matches.filter((match) => match.path === '.env');
+    expect(envMatches).toEqual([
+      { path: '.env', line: 1, variable: 'DEEPBRAIN_APP_ID', value: '[REDACTED]' },
+      { path: '.env', line: 2, variable: 'DEEPBRAIN_USER_KEY', value: '[REDACTED]' },
+      { path: '.env', line: 3, variable: 'RUNPOD_CONNECTION', value: '[REDACTED]' },
+    ]);
+    expect(JSON.stringify(result)).not.toMatch(/synthetic-(?:app|user|host)/);
+  });
+
+  it('redacts secret-like matches from ordinary files', async () => {
+    const result = (await searchTool.execute({ pattern: 'RUNPOD_API_KEY|postgresql' }, ctx)) as {
+      matches: Array<{ path: string; text?: string }>;
+    };
+    const serialized = JSON.stringify(result.matches.filter((match) => match.path === 'src/leaky.log'));
+    expect(serialized).not.toContain('rpa_syntheticcredential12345');
+    expect(serialized).not.toContain('syntheticDbPassword');
+    expect(serialized).toContain('[REDACTED]');
   });
 });
 

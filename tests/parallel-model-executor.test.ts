@@ -67,6 +67,15 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
 }
 
 describe('parallel model executor', () => {
+  it('maps legacy worker packets by stop reason when completionState is absent', () => {
+    const current = participant('coder');
+    const collector = new EvidencePacketCollector(current, 'inspect', roleForParallelParticipant(current.alias));
+    expect(collector.complete(loopResult('legacy success')).status).toBe('completed');
+    expect(collector.complete(loopResult('legacy cancellation', 'cancelled')).status).toBe('cancelled');
+    expect(collector.complete(loopResult('legacy failure', 'provider-error')).status).toBe('failed');
+    expect(collector.complete(loopResult('legacy partial', 'max-turns')).status).toBe('partial');
+  });
+
   it('starts independent read-only participants concurrently with Promise.allSettled', async () => {
     const sol = participant('sol');
     const claude = participant('claude');
@@ -91,6 +100,47 @@ describe('parallel model executor', () => {
     const result = await execution;
     expect(result.participants.map((entry) => entry.participant.alias)).toEqual(['sol', 'claude', 'coder']);
     expect(result.participants.every((entry) => entry.packet.status === 'completed')).toBe(true);
+  });
+
+  it('accepts coder, gpu_coder, sol, and claude together with participant provenance', async () => {
+    const participants = ['coder', 'gpu_coder', 'sol', 'claude'].map(participant);
+    expect(normalizeParallelParticipants(participants.map(({ alias }) => alias))).toEqual({
+      participants: ['coder', 'gpu_coder', 'sol', 'claude'],
+      writerAlias: undefined,
+    });
+
+    const result = await executeParallelParticipants({
+      participants,
+      objective: 'inspect the repository',
+      runReadOnly: async (current) => completed(current),
+    });
+
+    expect(result.participants.map(({ packet }) => ({
+      alias: packet.participant,
+      providerInstanceId: packet.providerInstanceId,
+      model: packet.model,
+    }))).toEqual(participants.map(({ alias, providerInstanceId, model }) => ({ alias, providerInstanceId, model })));
+  });
+
+  it('keeps local evidence when gpu_coder is unavailable without invoking another participant', async () => {
+    const invoked: string[] = [];
+    const result = await executeParallelParticipants({
+      participants: [participant('coder'), participant('gpu_coder')],
+      objective: 'inspect the repository',
+      runReadOnly: async (current) => {
+        invoked.push(current.alias);
+        if (current.alias === 'gpu_coder') throw new Error('RunPod unavailable');
+        return completed(current, 'local coder remains functional');
+      },
+    });
+
+    expect(invoked).toEqual(['coder', 'gpu_coder']);
+    expect(result.participants.find(({ participant: current }) => current.alias === 'coder')?.packet.findings)
+      .toEqual(['local coder remains functional']);
+    expect(result.participants.find(({ participant: current }) => current.alias === 'gpu_coder')?.packet.status)
+      .toBe('failed');
+    expect(invoked).not.toContain('sol');
+    expect(invoked).not.toContain('claude');
   });
 
   it('retains successful evidence and identities when one participant fails', async () => {
@@ -216,5 +266,15 @@ describe('parallel model executor', () => {
     expect(() => normalizeParallelParticipants(['sol'])).toThrow(/at least two/i);
     expect(() => normalizeParallelParticipants(['sol', 'sol'])).toThrow(/unique/i);
     expect(() => normalizeParallelParticipants(['sol', 'claude'], 'coder')).toThrow(/one of the explicitly selected/i);
+  });
+
+  it.each([
+    ['coder', 'gpu_coder'],
+    ['gpu_coder', 'sol'],
+    ['gpu_coder', 'claude'],
+    ['gpu_coder', 'sol', 'claude'],
+    ['coder', 'gpu_coder', 'sol', 'claude'],
+  ])('accepts the explicit participant combination %j', (...aliases) => {
+    expect(normalizeParallelParticipants(aliases).participants).toEqual(aliases);
   });
 });

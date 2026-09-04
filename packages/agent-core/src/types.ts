@@ -323,6 +323,14 @@ export interface ModelProvider {
     model?: string,
   ): CapabilityStatus;
 
+  /**
+   * Reports whether the provider/model accepts an explicit thinking control.
+   * Providers that do not expose this metadata may leave the method absent.
+   */
+  supportsThinking?(
+    model?: string,
+  ): CapabilityStatus;
+
   listModels(): Promise<ModelDescriptor[]>;
 
   health(): Promise<ProviderHealth>;
@@ -382,18 +390,28 @@ export interface ModelChatRequest {
   think?: boolean;
 
   /**
+   * Capability evidence for serializing `think` at the provider boundary.
+   * An unsupported capability requires the wire property to be omitted.
+   */
+  thinkingCapability?: CapabilityStatus;
+
+  /**
+   * Constrains the provider to emit parseable JSON.
+   *
+   * `'json'` asks for free-form JSON; an object is treated as a JSON Schema by
+   * providers that support schema-constrained decoding. An adapter that cannot
+   * honour either form omits the wire property rather than approximating it, so
+   * a caller needing a guarantee still validates the result itself.
+   */
+  responseFormat?: 'json' | Record<string, unknown>;
+
+  /**
    * Cancels the provider request itself where the adapter supports AbortSignal.
    */
   signal?: AbortSignal;
 }
 
 export interface ModelStreamEvent {
-  /**
-   * thinking intentionally carries no hidden-reasoning content.
-   *
-   * The event only communicates that the provider is still actively processing
-   * the request.
-   */
   type:
     | 'chunk'
     | 'tool_call'
@@ -412,6 +430,9 @@ export interface ModelStreamEvent {
 
 export interface ModelChatResponse {
   content: string;
+
+  /** Provider-emitted reasoning text, when the local model exposes it. */
+  thinking?: string;
 
   toolCalls?: NormalizedToolCall[];
 

@@ -8,6 +8,8 @@ import {
   type LoopEvent,
   type ToolExecutor,
   type ReasoningPreference,
+  type AgentCompletionState,
+  type CompletionMessage,
 } from '@dacai-local-agent/agent-core';
 import type { ResolvedModel } from '@dacai-local-agent/providers';
 import type { ContextManager } from '@dacai-local-agent/context';
@@ -26,6 +28,7 @@ export interface CodingAgentGraphInput {
   threadId: string;
   workspaceId: string;
   goal: string;
+  history?: CompletionMessage[];
   systemPrompt: string;
   executor: ToolExecutor;
   coder: ResolvedModel;
@@ -36,6 +39,8 @@ export interface CodingAgentGraphInput {
   maxTurns: number;
   maxToolCalls: number;
   maxContextTokens: number;
+  runMode?: string;
+  synthesisReserveTurns?: number;
   reasoningMode?: ReasoningPreference;
   signal?: AbortSignal;
   onLoopEvent?: (event: LoopEvent) => void;
@@ -46,6 +51,7 @@ interface StoredExecutionResult {
   taskId: string;
   answer: string;
   stopReason: AgentLoopResult['stopReason'];
+  completionState: AgentCompletionState;
   turns: number;
   toolCalls: number;
   rejectedCalls: number;
@@ -144,6 +150,7 @@ function compactExecution(result: AgentLoopResult): StoredExecutionResult {
     taskId: result.taskId,
     answer: result.answer,
     stopReason: result.stopReason,
+    completionState: result.completionState,
     turns: result.turns,
     toolCalls: result.toolCalls,
     rejectedCalls: result.rejectedCalls,
@@ -261,6 +268,7 @@ export class DurableCodingAgentGraph {
         model: input.coder.model,
         capabilities: input.coder.capabilities,
         executor: input.executor,
+        history: input.history,
         prompt: state.cycle > 0
           ? `${input.goal}\n\nThe previous implementation was reviewed and needs correction:\n${state.review}`
           : input.goal,
@@ -269,6 +277,8 @@ export class DurableCodingAgentGraph {
         maxTurns: input.maxTurns,
         maxToolCalls: input.maxToolCalls,
         maxContextTokens: input.maxContextTokens,
+        runMode: input.runMode,
+        synthesisReserveTurns: input.synthesisReserveTurns,
         completionSignalRequired: true,
         requireValidationAfterMutation: true,
         reasoningMode: state.cycle > 0 ? 'deep' : input.reasoningMode ?? 'auto',
@@ -294,8 +304,8 @@ export class DurableCodingAgentGraph {
       }
 
       // Failed/stalled execution is not magically repaired by an advisory reviewer.
-      if (execution.stopReason !== 'final-answer' || !/^\s*TASK_COMPLETE:/i.test(execution.answer)) {
-        const feedback = `REVIEW_FIX: executor ended with ${execution.stopReason}; completion was not verified. ${stripTaskMarker(execution.answer).slice(0, 1200)}`;
+      if (execution.completionState !== 'GOAL_COMPLETE' && execution.completionState !== 'VERIFICATION_COMPLETE') {
+        const feedback = `REVIEW_FIX: executor ended with ${execution.completionState}; completion was not verified. ${stripTaskMarker(execution.answer).slice(0, 1200)}`;
         input.onGraphEvent?.({ type: 'review', phase: 'review', message: feedback });
         return { phase: state.cycle < 1 ? 'execute' as const : 'finalize' as const, review: feedback, reviewPassed: false, cycle: state.cycle + 1 };
       }
@@ -346,7 +356,7 @@ export class DurableCodingAgentGraph {
     const finalize = RunnableLambda.from(async (state: CodingGraphState) => {
       emitPhase('finalize', 'Finalizing durable coding-agent result.');
       const execution = state.execution;
-      if (execution?.stopReason === 'final-answer' && /^\s*TASK_COMPLETE:/i.test(execution.answer) && state.reviewPassed) {
+      if ((execution?.completionState === 'GOAL_COMPLETE' || execution?.completionState === 'VERIFICATION_COMPLETE') && /^\s*TASK_COMPLETE:/i.test(execution.answer) && state.reviewPassed) {
         await input.memoryStore.saveSafe({
           scope: 'workspace',
           scopeKey: state.workspaceId,
@@ -395,11 +405,12 @@ export class DurableCodingAgentGraph {
     if (!result.execution) {
       throw new Error('Durable coding graph completed without an execution result.');
     }
-    if (!result.reviewPassed && result.execution.stopReason === 'final-answer' && /^\s*TASK_COMPLETE:/i.test(result.execution.answer)) {
+    if (!result.reviewPassed && (result.execution.completionState === 'GOAL_COMPLETE' || result.execution.completionState === 'VERIFICATION_COMPLETE') && /^\s*TASK_COMPLETE:/i.test(result.execution.answer)) {
       return {
         ...result.execution,
         answer: `TASK_BLOCKED: BLOCKED — independent review did not pass after the bounded correction cycle. ${result.review.slice(0, 1200)}`,
         stopReason: 'no-progress',
+        completionState: 'BLOCKED',
       };
     }
     return result.execution;

@@ -16,8 +16,12 @@ export interface ToolAuthorizationRequest {
   command?: string;
   /** Set for network tools. */
   requiresNetwork?: boolean;
+  /** Set for tools that inspect workspace files, metadata, or repository state. */
+  requiresRead?: boolean;
   requiresWrite?: boolean;
   requiresShell?: boolean;
+  /** Trusted, non-shell mutation whose tool contract is safe to run unattended. */
+  autoApprove?: boolean;
 }
 
 /**
@@ -30,6 +34,17 @@ export class PermissionEngine {
 
   authorizeTool(request: ToolAuthorizationRequest): PermissionDecision {
     const { capabilities } = request;
+
+    // Shell and workspace mutation necessarily expose workspace contents or
+    // metadata, even when a particular tool forgot to declare requiresRead.
+    if ((request.requiresRead || request.requiresWrite || request.requiresShell) && !capabilities.read) {
+      return {
+        kind: 'denied',
+        tier: request.tier,
+        reason: 'Workspace does not grant read access.',
+        layer: 'workspace-containment',
+      };
+    }
 
     if (request.requiresWrite && !capabilities.write) {
       return {
@@ -71,6 +86,23 @@ export class PermissionEngine {
       }
       reason = classification.reason;
       layer = classification.layer;
+    }
+
+    // This flag comes from the registered ToolDefinition, never model input.
+    // Keep it deliberately narrow: it cannot waive a workspace capability,
+    // approve a shell command, or downgrade a high-impact operation.
+    if (
+      request.autoApprove &&
+      request.command === undefined &&
+      tier === 'mutation' &&
+      !this.policy.deny.includes(tier)
+    ) {
+      return {
+        kind: 'allowed',
+        tier,
+        reason: `Tool "${request.toolName}" is a bounded auto-approved mutation.`,
+        layer: 'tier-policy',
+      };
     }
 
     return this.applyPolicy(tier, reason, layer);

@@ -1,9 +1,4 @@
-const TRANSACTIONAL_MUTATION_TOOLS = new Set([
-  'filesystem.edit',
-  'filesystem.write',
-  'filesystem.move',
-  'filesystem.copy',
-]);
+import { isMutationTool } from '@dacai-local-agent/agent-core';
 
 interface NamedTool {
   name: string;
@@ -20,7 +15,7 @@ export function selectAgentTools<T extends NamedTool>(
   requestedNames?: readonly string[],
 ): T[] {
   const requested = new Set(requestedNames ?? enabled.map((tool) => tool.name));
-  const needsTransactionalSnapshot = [...requested].some((name) => TRANSACTIONAL_MUTATION_TOOLS.has(name));
+  const needsTransactionalSnapshot = [...requested].some((name) => isMutationTool(name));
   if (needsTransactionalSnapshot && enabled.some((tool) => tool.name === 'shell.run')) {
     requested.add('shell.run');
   }

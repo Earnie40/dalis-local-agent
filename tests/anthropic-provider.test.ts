@@ -229,4 +229,44 @@ describe('Anthropic Messages provider', () => {
       'HTTP 400 (type=invalid_request_error). messages.2.content is invalid',
     );
   });
+
+  it('probes the key with a models listing rather than reporting a blanket unavailable', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', 'test-only-key');
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ data: [{ id: 'claude-sonnet-5' }] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const health = await new AnthropicProvider(instance).health();
+
+    expect(health.status).toBe('connected');
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://api.anthropic.com/v1/models');
+    expect(init.method).toBe('GET');
+    // A health check must never spend a completion.
+    expect(init.body).toBeUndefined();
+  });
+
+  it('separates a missing key from a rejected one', async () => {
+    const health = await new AnthropicProvider(instance).health();
+    expect(health.status).toBe('not configured');
+
+    vi.stubEnv('ANTHROPIC_API_KEY', 'test-only-key');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ error: { type: 'authentication_error', message: 'invalid x-api-key' } }), {
+          status: 401,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      ),
+    );
+
+    const rejected = await new AnthropicProvider(instance).health();
+    expect(rejected.status).toBe('unavailable');
+    expect(rejected.error).toContain('authentication_error');
+  });
 });

@@ -56,6 +56,87 @@ describe('extractSymbols', () => {
     expect(base?.endLine).toBeGreaterThan(base?.startLine ?? 0);
   });
 
+  it('records calls to named imports so indexed paths can cross files', () => {
+    const result = extractSymbols('src/route.ts', [
+      'import {',
+      '  runAgentLoop,',
+      '  authorizeTool as authorize,',
+      "} from './runtime';",
+      "import type { ToolExecutor } from './types';",
+      'export async function handleRequest(): Promise<void> {',
+      '  await authorize();',
+      '  await runAgentLoop();',
+      '}',
+    ].join('\n'));
+
+    expect(result.edges).toContainEqual(expect.objectContaining({
+      source: 'handleRequest', target: 'authorizeTool', relationship: 'CALLS', line: 7,
+    }));
+    expect(result.edges).toContainEqual(expect.objectContaining({
+      source: 'handleRequest', target: 'runAgentLoop', relationship: 'CALLS', line: 8,
+    }));
+    expect(result.edges.some((edge) => edge.target === 'ToolExecutor' && edge.relationship === 'CALLS')).toBe(false);
+  });
+
+  it('covers multiline TypeScript function bodies and their imported calls', () => {
+    const result = extractSymbols('src/routes.ts', [
+      "import { runAgentLoop } from './runtime';",
+      'export function registerAgentRoutes(',
+      '  dependency: unknown,',
+      '): void {',
+      '  void dependency;',
+      '  runAgentLoop();',
+      '}',
+    ].join('\n'));
+
+    expect(result.symbols.find((symbol) => symbol.name === 'registerAgentRoutes')).toMatchObject({
+      startLine: 2,
+      endLine: 7,
+    });
+    expect(result.edges).toContainEqual(expect.objectContaining({
+      source: 'registerAgentRoutes', target: 'runAgentLoop', relationship: 'CALLS', line: 6,
+    }));
+  });
+
+  it('distinguishes an object-shaped return type from the function body', () => {
+    const result = extractSymbols('src/routes.ts', [
+      "import { runAgentLoop } from './runtime';",
+      'export function registerAgentRoutes(',
+      '  dependency: unknown,',
+      '): { registered: boolean } {',
+      '  runAgentLoop();',
+      '  return { registered: true };',
+      '}',
+    ].join('\n'));
+
+    expect(result.symbols.find((symbol) => symbol.name === 'registerAgentRoutes')).toMatchObject({
+      startLine: 2,
+      endLine: 7,
+    });
+    expect(result.edges).toContainEqual(expect.objectContaining({
+      source: 'registerAgentRoutes', target: 'runAgentLoop', relationship: 'CALLS', line: 5,
+    }));
+  });
+
+  it('stops at a multiline overload signature instead of swallowing the implementation', () => {
+    const result = extractSymbols('src/overload.ts', [
+      "import { runAgentLoop } from './runtime';",
+      'export function register(',
+      '  value: string,',
+      '): void;',
+      'export function register(',
+      '  value: string,',
+      '): void {',
+      '  runAgentLoop();',
+      '}',
+    ].join('\n'));
+
+    expect(result.symbols.filter((symbol) => symbol.name === 'register').map((symbol) => symbol.endLine)).toEqual([4, 9]);
+    expect(result.edges).toContainEqual(expect.objectContaining({
+      source: 'register', target: 'runAgentLoop', relationship: 'CALLS', line: 8,
+    }));
+  });
+
   it('extracts SQL declarations', () => {
     const result = extractSymbols('schema.sql', 'CREATE TABLE IF NOT EXISTS users (id INTEGER, name TEXT);\nCREATE VIEW user_names AS SELECT name FROM users;');
     expect(result.symbols.some((s) => s.name === 'users' && s.type === 'schema')).toBe(true);

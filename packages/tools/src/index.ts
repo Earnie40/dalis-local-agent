@@ -15,5 +15,10 @@ export * from './worktree-tools';
 export * from './git-mutation-tools';
 export * from './quality-tools';
 export * from './vision-tools';
+export * from './image-generation-tools';
+export * from './media-connection';
+export * from './video-generation-tools';
+export * from './smart-contract-tools';
+export * from './engineering-tools';
 
 export * from './repository-intelligence-tools';

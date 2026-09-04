@@ -4,6 +4,7 @@ import type {
   ToolExecutor,
   ToolSchema,
 } from '@dacai-local-agent/agent-core';
+import { isMutationTool } from '@dacai-local-agent/agent-core';
 
 import {
   loadWorkingState,
@@ -49,14 +50,6 @@ const EMPTY_SCHEMA = {
   properties: {},
   additionalProperties: false,
 };
-
-const MUTATION_TOOLS =
-  new Set([
-    'filesystem.edit',
-    'filesystem.write',
-    'filesystem.move',
-    'filesystem.copy',
-  ]);
 
 function validationState(
   state: unknown,
@@ -290,9 +283,7 @@ function realMutation(
   result: LoopToolResult,
 ): boolean {
   if (
-    !MUTATION_TOOLS.has(
-      call.name,
-    ) ||
+    !isMutationTool(call.name) ||
     !result.success ||
     result.denied
   ) {

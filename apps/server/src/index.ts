@@ -3,8 +3,13 @@ import Fastify from 'fastify';
 import { config as loadEnv } from 'dotenv';
 import { loadAppConfigResult, redactDatabaseUrl, runMigrations, verifyConnection } from '@dacai-local-agent/shared';
 import type { AppConfigLoadResult } from '@dacai-local-agent/shared';
-import { groupModels, PostgresCapabilityStore, ProviderRegistry } from '@dacai-local-agent/providers';
-import { AnonymizedSourceDetector, AnonymizedSourceFeedRefresher } from '@dacai-local-agent/security';
+import {
+  groupModels,
+  GpuAvailabilityProbe,
+  PostgresCapabilityStore,
+  ProviderRegistry,
+} from '@dacai-local-agent/providers';
+import { AnonymizedSourceDetector, AnonymizedSourceFeedRefresher, type AnonymizedSourceAudit } from '@dacai-local-agent/security';
 import { AnonymizedSourceAuditStore } from '@dacai-local-agent/shared';
 import { registerChatRoutes } from './routes/chat';
 import { registerAgentRoutes } from './routes/agent';
@@ -13,6 +18,12 @@ import { registerSecurityRoutes } from './routes/security';
 import { registerDefensiveRoutes } from './routes/defensive';
 import { registerRagRoutes } from './routes/rag';
 import { registerMemoryRoutes } from './routes/memory';
+import { registerInfrastructureRoutes } from './routes/infrastructure';
+import { registerIntelligenceRoutes } from './routes/intelligence';
+import { registerStudioRoutes } from './routes/studio';
+import { RunpodService } from './infrastructure/runpod-service';
+import { resolveRunpodPodPresence } from './infrastructure/runpod-pod-status';
+import { RunpodMediaManager } from './infrastructure/runpod-media-manager';
 import { ApprovalRegistry } from './approvals';
 
 // Resolved against this file, not the working directory: `pnpm dev` runs the
@@ -70,10 +81,38 @@ server.addHook('onRequest', async (request, reply) => {
   if (request.method === 'OPTIONS') reply.code(204).send();
 });
 
+const runpodService = new RunpodService();
 const registry = new ProviderRegistry(config, new PostgresCapabilityStore());
+
+/**
+ * GPU-first routing. The probe answers "is the pod serving inference right
+ * now", which is the only question that can decide a route: a pod can be
+ * funded and RUNNING while its tunnel or Ollama service is down. When the
+ * answer is no, the registry keeps the run on local Ollama and carries the
+ * reason on the result instead of degrading silently.
+ */
+const gpuAvailabilityProbe = new GpuAvailabilityProbe({
+  instance: config.providerInstances.remote_gpu_ollama,
+  podPresence: () => resolveRunpodPodPresence(),
+  // gpu-preferred is an explicit standing instruction to repair a stale
+  // tunnel to an already-running pod. Other policies keep status probes
+  // read-only and never start or provision billable infrastructure.
+  recoverEndpoint:
+    config.routingPolicy === 'gpu-preferred'
+      ? async () => {
+          await runpodService.initialize();
+        }
+      : undefined,
+});
+registry.setGpuAvailabilityProbe(gpuAvailabilityProbe);
 /** Shared so a pending LIVE_VALIDATION approval (security.ts) surfaces through the same
  *  /api/approvals endpoints the UI already polls for interactive tool-call approvals. */
 const approvals = new ApprovalRegistry();
+const runpodMediaManager = new RunpodMediaManager();
+server.addHook('onClose', async () => {
+  runpodService.stop();
+  runpodMediaManager.stop();
+});
 
 /** Real Tor/datacenter feeds, refreshed on an interval — see anonymized-source-refresher.ts. */
 const anonymizedSourceFeedRefresher = new AnonymizedSourceFeedRefresher({
@@ -106,7 +145,7 @@ server.addHook('onRequest', async (request) => {
     .record({
       sourceIp: request.ip,
       userAgent: request.headers['user-agent'],
-      detectionMethod: result.detectionMethod as any,
+      detectionMethod: result.detectionMethod as AnonymizedSourceAudit['detectionMethod'],
       classification: result.classification,
       endpoint: request.url,
       requestedAt: new Date(),
@@ -164,17 +203,28 @@ server.get('/api/providers', async () => {
 server.get('/api/models', async () => {
   const models = await registry.listModels();
   const inventory = groupModels(models);
+  const aliases = await Promise.all(Object.entries(config.models).map(async ([alias, model]) => {
+    const agentCapability = await registry.getKnownToolCallingStatus(model.providerInstanceId, model.model);
+    return {
+      alias,
+      providerInstanceId: model.providerInstanceId,
+      model: model.model,
+      enabled: model.enabled,
+      agentCapability,
+      agentLoopCapable: agentCapability === 'verified',
+      classification: agentCapability === 'verified'
+        ? 'agent-capable'
+        : agentCapability === 'unsupported'
+          ? 'advisory-class'
+          : 'unverified',
+    };
+  }));
 
   return {
     tagCount: inventory.tagCount,
     baseCount: inventory.baseCount,
     groups: inventory.groups,
-    aliases: Object.entries(config.models).map(([alias, model]) => ({
-      alias,
-      providerInstanceId: model.providerInstanceId,
-      model: model.model,
-      enabled: model.enabled,
-    })),
+    aliases,
   };
 });
 
@@ -214,12 +264,15 @@ server.post<{ Params: { alias: string } }>('/api/models/:alias/reprobe', async (
 });
 
 registerChatRoutes(server, { config, registry });
-registerAgentRoutes(server, { config, registry, approvals });
+registerAgentRoutes(server, { config, registry, approvals, media: runpodMediaManager });
 registerTaskRoutes(server, { config, registry });
 registerSecurityRoutes(server, { config, approvals });
 registerDefensiveRoutes(server, { config, approvals });
 registerRagRoutes(server);
 registerMemoryRoutes(server);
+registerInfrastructureRoutes(server, runpodService, runpodMediaManager, registry);
+registerIntelligenceRoutes(server, { config, registry });
+registerStudioRoutes(server, { registry });
 
 server.get('/api/status', async () => ({
   ok: true,
@@ -243,8 +296,25 @@ const start = async () => {
     // until the next interval.
     void anonymizedSourceFeedRefresher.start();
 
-    await server.listen({ port: config.port, host: '127.0.0.1' });
-    console.log(`DacaiLocalAgent server listening on http://localhost:${config.port}`);
+    const listenHost = process.env.DACAI_SERVER_HOST?.trim() || '127.0.0.1';
+    if (!['127.0.0.1', 'localhost', '0.0.0.0', '::'].includes(listenHost)) {
+      throw new Error('DACAI_SERVER_HOST must be a local bind address.');
+    }
+    await server.listen({ port: config.port, host: listenHost });
+    runpodMediaManager.start();
+    // Report the routing decision once at boot. Under gpu-preferred this probe
+    // also repairs a stale tunnel to an already-running, provisioned pod.
+    void registry.gpuAvailability(true).then((availability) => {
+      if (availability) {
+        server.log.info(
+          { routingPolicy: config.routingPolicy, gpuUsable: availability.usable, reason: availability.reason },
+          availability.detail,
+        );
+      }
+    }).catch(() => {
+      server.log.warn('RunPod startup probe failed; local providers remain active.');
+    });
+    console.log(`DacaiLocalAgent server listening on port ${config.port}`);
   } catch (error) {
     console.error('Failed to start server', error);
     process.exit(1);

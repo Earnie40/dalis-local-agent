@@ -6,6 +6,7 @@ import { ConversationStore, deriveTitle, UsageStore } from '@dacai-local-agent/s
 import { sanitizeText } from '@dacai-local-agent/security';
 import type { ProviderRegistry } from '@dacai-local-agent/providers';
 import { ContextManager } from '@dacai-local-agent/context';
+import { beginSessionActivity, touchSessionActivity } from '../session-preflight';
 
 interface ChatBody {
   conversationId?: string;
@@ -75,6 +76,9 @@ export function registerChatRoutes(
     }
 
     const alias = body.alias ?? 'chat';
+    const sessionKey = body.conversationId ?? `workspace:${body.workspaceId ?? 'default'}`;
+    const sessionBoundary = beginSessionActivity(sessionKey);
+    const runpodPreflight = await deps.registry.gpuAvailability(sessionBoundary.refreshPreflight);
     let resolved;
     try {
       // Chat is advisory work: no tool calling is required, so an
@@ -147,7 +151,14 @@ export function registerChatRoutes(
         providerInstanceId: resolved.instance.id,
         usageClass: resolved.instance.usageClass,
         model: resolved.model,
-        alias,
+        requestedAlias: alias,
+        alias: resolved.alias ?? alias,
+        routingNote: resolved.routingNote,
+        promotedFromAlias: resolved.promotedFromAlias,
+        fellBackFromAlias: resolved.fellBackFromAlias,
+        runpodPreflight: runpodPreflight
+          ? { refreshed: sessionBoundary.refreshPreflight, ...runpodPreflight }
+          : { refreshed: sessionBoundary.refreshPreflight, status: 'unavailable' },
       },
     });
 
@@ -190,7 +201,11 @@ export function registerChatRoutes(
         providerInstanceId: resolved.instance.id,
         usageClass: resolved.instance.usageClass,
         model: resolved.model,
-        alias,
+        requestedAlias: alias,
+        alias: resolved.alias ?? alias,
+        routingNote: resolved.routingNote,
+        promotedFromAlias: resolved.promotedFromAlias,
+        fellBackFromAlias: resolved.fellBackFromAlias,
       }),
     );
 
@@ -220,7 +235,7 @@ export function registerChatRoutes(
         } else if (event.type === 'thinking') {
           // A reasoning model is mid-thought. The client shows an indicator;
           // the reasoning content itself is never sent or stored.
-          reply.raw.write(sseFrame('thinking', {}));
+          reply.raw.write(sseFrame('thinking', { content: event.content }));
         } else if (event.type === 'error') {
           failed = event.error;
           break;
@@ -277,6 +292,8 @@ export function registerChatRoutes(
       );
       reply.raw.end();
     }
+
+    touchSessionActivity(sessionKey);
 
     return reply;
   });

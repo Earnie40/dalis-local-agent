@@ -1,0 +1,8 @@
+1. .env / .env.local / .env.development
+2. DATABASE_URL / POSTGRES_URL environment variables
+3. prisma/schema.prisma
+4. prisma.config.ts
+5. docker-compose.yml / compose.yaml
+6. application DB config
+7. package.json scripts
+8. running services / ports

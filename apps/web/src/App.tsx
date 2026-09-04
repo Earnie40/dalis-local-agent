@@ -1,16 +1,44 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Component, lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
 import { AgentPanel } from './AgentPanel';
+import { ChatMonitor } from './LiveMonitor';
+import { useStickToBottom } from './use-stick-to-bottom';
+import { DelegationPanel } from './DelegationPanel';
+import { IntelligencePanel } from './IntelligencePanel';
 import {
   api,
   streamChat,
   type AliasCapabilities,
   type Conversation,
   type Message,
+  type MediaInfrastructureStatus,
   type ModelAlias,
 } from './api';
+
+const StudioPanel = lazy(() => import('./StudioPanel').then((module) => ({ default: module.StudioPanel })));
+
+class StudioErrorBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
+  state = { failed: false };
+
+  static getDerivedStateFromError(): { failed: boolean } {
+    return { failed: true };
+  }
+
+  render() {
+    if (this.state.failed) {
+      return (
+        <div className="studio-loading studio-load-error" role="alert">
+          <strong>Sandbox Studio could not open.</strong>
+          <span>The rest of DacaiLocalAgent is still available. Retry after checking the browser console.</span>
+          <button type="button" onClick={() => this.setState({ failed: false })}>Retry Studio</button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 interface StreamState {
   text: string;
@@ -18,6 +46,7 @@ interface StreamState {
   active: boolean;
   phase: 'idle' | 'connecting' | 'thinking' | 'generating';
   elapsedMs: number;
+  thinkingText: string;
 }
 
 const EMPTY_STREAM: StreamState = {
@@ -26,6 +55,7 @@ const EMPTY_STREAM: StreamState = {
   active: false,
   phase: 'idle',
   elapsedMs: 0,
+  thinkingText: '',
 };
 
 export function App() {
@@ -38,10 +68,11 @@ export function App() {
   const [input, setInput] = useState('');
   const [stream, setStream] = useState<StreamState>(EMPTY_STREAM);
   const [error, setError] = useState<string | undefined>();
-  const [mode, setMode] = useState<'chat' | 'agent'>('chat');
+  const [mode, setMode] = useState<'chat' | 'agent' | 'delegate' | 'intelligence' | 'studio'>('chat');
+  const [mediaStatus, setMediaStatus] = useState<MediaInfrastructureStatus | undefined>();
 
   const abortRef = useRef<AbortController | undefined>(undefined);
-  const transcriptRef = useRef<HTMLDivElement>(null);
+  const transcriptScroll = useStickToBottom<HTMLDivElement>([messages, stream.text]);
 
   const refreshConversations = useCallback(async () => {
     const { conversations: list } = await api.listConversations();
@@ -55,6 +86,16 @@ export function App() {
       .then(({ aliases: list }) => setAliases(list.filter((entry) => entry.enabled)))
       .catch((e) => setError(String(e)));
   }, [refreshConversations]);
+
+  useEffect(() => {
+    let active = true;
+    const refresh = () => api.mediaStatus().then((status) => {
+      if (active) setMediaStatus(status);
+    }).catch(() => undefined);
+    void refresh();
+    const timer = window.setInterval(refresh, 5_000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, []);
 
   // Capability is fetched per alias so the UI can say plainly whether a model
   // is agent-capable or advisory-class, rather than implying every model is equal.
@@ -75,10 +116,6 @@ export function App() {
   }, [activeId]);
 
   useEffect(() => {
-    transcriptRef.current?.scrollTo({ top: transcriptRef.current.scrollHeight, behavior: 'smooth' });
-  }, [messages, stream.text]);
-
-  useEffect(() => {
     if (!stream.active) return;
     const startedAt = Date.now() - stream.elapsedMs;
     const timer = window.setInterval(() => {
@@ -96,7 +133,7 @@ export function App() {
 
       setError(undefined);
       setInput('');
-      setStream({ text: '', thinking: false, active: true, phase: 'connecting', elapsedMs: 0 });
+      setStream({ text: '', thinking: false, active: true, phase: 'connecting', elapsedMs: 0, thinkingText: '' });
 
       if (!options.retry && text) {
         setMessages((current) => [
@@ -137,8 +174,13 @@ export function App() {
                 thinking: false,
                 text: current.text + chunk,
               })),
-            onThinking: () =>
-              setStream((current) => ({ ...current, phase: 'thinking', thinking: true })),
+            onThinking: (text) =>
+              setStream((current) => ({
+                ...current,
+                phase: 'thinking',
+                thinking: true,
+                thinkingText: text ? `${current.thinkingText}${text}` : current.thinkingText,
+              })),
             onDone: (payload) => {
               if (payload.error) setError(payload.error);
             },
@@ -195,12 +237,40 @@ export function App() {
           <span className="badge local">local-first</span>
         </div>
 
+        {mediaStatus?.configured && (
+          <button
+            type="button"
+            className={`media-infrastructure ${mediaStatus.ready ? 'ready' : mediaStatus.phase === 'error' ? 'failed' : 'starting'}`}
+            title={mediaStatus.error ?? `Media transport: ${mediaStatus.transport ?? 'initializing'}`}
+            onClick={() => {
+              if (!mediaStatus.ready) void api.reconnectMedia().then(setMediaStatus).catch(() => undefined);
+            }}
+          >
+            <span className="media-light" aria-hidden="true" />
+            <span>
+              <strong>GPU media</strong>
+              <small>{mediaStatus.ready
+                ? `Ready · ${mediaStatus.service.imageModel ? 'image' : ''}${mediaStatus.service.imageModel && mediaStatus.service.videoModel ? ' + ' : ''}${mediaStatus.service.videoModel ? 'video' : ''}`
+                : mediaStatus.phase === 'error' ? 'Unavailable · click to retry' : mediaStatus.phase.replaceAll('-', ' ')}</small>
+            </span>
+          </button>
+        )}
+
         <div className="mode-switch">
           <button className={mode === 'chat' ? 'active' : ''} onClick={() => setMode('chat')}>
             Chat
           </button>
           <button className={mode === 'agent' ? 'active' : ''} onClick={() => setMode('agent')}>
             Agent
+          </button>
+          <button className={mode === 'delegate' ? 'active' : ''} onClick={() => setMode('delegate')}>
+            Delegate
+          </button>
+          <button className={mode === 'intelligence' ? 'active' : ''} onClick={() => setMode('intelligence')}>
+            Intelligence
+          </button>
+          <button className={mode === 'studio' ? 'active' : ''} onClick={() => setMode('studio')}>
+            Studio
           </button>
         </div>
 
@@ -262,13 +332,29 @@ export function App() {
         )}
       </aside>
 
-      {mode === 'agent' ? (
+      {mode === 'studio' ? (
+        <main className="studio-host">
+          <StudioErrorBoundary>
+            <Suspense fallback={<div className="studio-loading">Opening Sandbox Studio…</div>}>
+              <StudioPanel aliases={aliases} />
+            </Suspense>
+          </StudioErrorBoundary>
+        </main>
+      ) : mode === 'intelligence' ? (
+        <main className="chat">
+          <IntelligencePanel />
+        </main>
+      ) : mode === 'agent' ? (
         <main className="chat">
           <AgentPanel aliases={aliases} />
         </main>
+      ) : mode === 'delegate' ? (
+        <main className="chat">
+          <DelegationPanel />
+        </main>
       ) : (
       <main className="chat">
-        <div className="transcript" ref={transcriptRef}>
+        <div className="transcript" ref={transcriptScroll.ref} onScroll={transcriptScroll.onScroll}>
           {messages.length === 0 && !stream.active && (
             <div className="empty">
               <h1>Local chat</h1>
@@ -315,6 +401,12 @@ export function App() {
                     <span>{(stream.elapsedMs / 1000).toFixed(1)}s</span>
                   </p>
                 )}
+                {stream.thinkingText && (
+                  <details className="thinking-preview">
+                    <summary>Qwen reasoning preview</summary>
+                    <pre>{stream.thinkingText}</pre>
+                  </details>
+                )}
                 <Markdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
                   {stream.text}
                 </Markdown>
@@ -324,6 +416,14 @@ export function App() {
         </div>
 
         {error && <div className="error">{error}</div>}
+
+        <ChatMonitor
+          active={stream.active}
+          title="DACAIS · Chat monitor"
+          thinking={stream.thinkingText}
+          status={stream.phase === 'connecting' ? 'Connecting to the selected provider…' : stream.phase === 'thinking' ? 'Model is thinking…' : 'Generating response…'}
+          onStop={stop}
+        />
 
         <form
           className="composer"

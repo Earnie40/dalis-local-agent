@@ -13,6 +13,12 @@ export interface ToolDefinition {
   inputSchema: Record<string, unknown>;
   /** Static classification; shell-style tools may be escalated at call time. */
   permissionTier: PermissionTier;
+  /**
+   * Trusted tool definitions may opt a bounded mutation out of the interactive
+   * approval pause. Workspace capability checks still run before execution.
+   */
+  autoApprove?: boolean;
+  requiresRead?: boolean;
   requiresWrite?: boolean;
   requiresShell?: boolean;
   requiresNetwork?: boolean;

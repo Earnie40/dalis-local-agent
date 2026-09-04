@@ -43,7 +43,7 @@ describe('ContextManager', () => {
 
     const formatted = manager.formatContextString(context);
     expect(formatted).toBeDefined();
-    expect(formatted).toContain('SYSTEM RULES');
+    expect(formatted).toContain('SYSTEM / RETRIEVAL BOUNDARY');
     expect(formatted).toContain('Test goal');
     expect(typeof formatted).toBe('string');
   });
@@ -61,14 +61,17 @@ describe('ContextManager', () => {
       options: {
         enableRag: false,
         enableMemory: false,
+        enableSkills: false,
         maxContextTokens: 500,
       },
     });
 
-    expect(context.totalTokens).toBeLessThanOrEqual(600); // Allow some margin
-    if (context.sections.some((s) => s.content.length > 1000)) {
-      expect(context.truncated).toBe(true);
-    }
+    expect(context.totalTokens).toBeLessThanOrEqual(500);
+    expect(context.sections).toEqual(expect.arrayContaining([
+      expect.objectContaining({ priority: 'critical', label: 'SYSTEM / RETRIEVAL BOUNDARY' }),
+      expect.objectContaining({ priority: 'goal' }),
+    ]));
+    expect(context.truncated).toBe(true);
   });
 
   it('includes plan context when provided', async () => {

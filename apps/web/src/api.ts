@@ -1,4 +1,10 @@
-const API = '';
+import type { StudioFiles } from '@dacai-local-agent/shared';
+
+// In development, address the API directly as well as keeping Vite's proxy.
+// This prevents an out-of-date dev server from returning index.html for an
+// /api request (which otherwise surfaces as "Unexpected token '<'"). The
+// production preview stays same-origin and uses the configured reverse proxy.
+const API = import.meta.env.DEV ? 'http://127.0.0.1:3001' : '';
 
 /** SSE framing: frames end with a blank line, fields are one per line. */
 const FRAME_SEPARATOR = '\n\n';
@@ -25,6 +31,9 @@ export interface ModelAlias {
   providerInstanceId: string;
   model: string;
   enabled: boolean;
+  agentCapability?: 'verified' | 'declared' | 'unsupported' | 'unknown';
+  agentLoopCapable?: boolean;
+  classification?: 'agent-capable' | 'advisory-class' | 'unverified';
 }
 
 export interface AliasCapabilities {
@@ -33,6 +42,18 @@ export interface AliasCapabilities {
   capabilities: { toolCalling: string; streaming: string; toolCallChannel?: string };
   agentLoopCapable: boolean;
   classification: 'agent-capable' | 'advisory-class';
+}
+
+export interface MediaInfrastructureStatus {
+  configured: boolean;
+  ready: boolean;
+  phase: 'disabled' | 'initializing' | 'starting-pod' | 'waiting-for-ssh' | 'starting-service' | 'connecting-tunnel' | 'ready' | 'error';
+  transport?: 'ssh-tunnel' | 'loopback' | 'https';
+  autoStart: boolean;
+  pod?: { id: string; name?: string; connected: boolean };
+  service: { healthy: boolean; imageModel: boolean; videoModel: boolean };
+  error?: string;
+  checkedAt: string;
 }
 
 async function json<T>(path: string, init?: RequestInit): Promise<T> {
@@ -79,6 +100,35 @@ export interface AgentEvent {
   model?: string;
   workspace?: string;
   role?: 'coding' | 'adversarial-twin-simulator' | 'tomahawk1';
+  runId?: string;
+  runMode?: 'interactive' | 'coding' | 'repository_audit' | 'deep_research';
+  budget?: { maxTurns: number; maxToolCalls: number; synthesisReserveTurns?: number };
+  completionState?: string;
+  activity?: AgentActivityEvent;
+}
+
+export type AgentActivityType =
+  | 'planning' | 'reasoning_summary' | 'inspection' | 'search' | 'decision'
+  | 'tool_start' | 'tool_progress' | 'tool_result' | 'command' | 'file_read'
+  | 'file_edit' | 'test' | 'verification' | 'warning' | 'error' | 'success'
+  | 'next_step' | 'model' | 'system';
+
+export interface AgentActivityEvent {
+  id: string;
+  workspaceId: string;
+  sessionId?: string;
+  runId: string;
+  sequence: number;
+  timestamp: string;
+  type: AgentActivityType;
+  status: 'running' | 'success' | 'failed' | 'blocked' | 'info';
+  title: string;
+  message?: string;
+  toolName?: string;
+  command?: string;
+  filePath?: string;
+  durationMs?: number;
+  metadata?: Record<string, unknown>;
 }
 
 export interface RedTeamEngagement {
@@ -194,8 +244,12 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ approved }),
     }),
+  approveAll: (runId: string) =>
+    json<{ ok: boolean; approved: number }>(`/api/approvals/run/${encodeURIComponent(runId)}/approve-all`, {
+      method: 'POST',
+    }),
   listWorkspaces: () => json<{ workspaces: Workspace[] }>('/api/workspaces'),
-  createWorkspace: (body: { displayName: string; rootPath: string; write: boolean; shell: boolean }) =>
+  createWorkspace: (body: { displayName: string; rootPath: string; write: boolean; shell: boolean; network?: boolean }) =>
     json<{ workspace: Workspace }>('/api/workspaces', { method: 'POST', body: JSON.stringify(body) }),
   deleteWorkspace: (id: string) => json<{ ok: boolean }>(`/api/workspaces/${id}`, { method: 'DELETE' }),
   listConversations: () => json<{ conversations: Conversation[] }>('/api/conversations'),
@@ -204,9 +258,13 @@ export const api = {
   deleteConversation: (id: string) => json<{ ok: boolean }>(`/api/conversations/${id}`, { method: 'DELETE' }),
   listModels: () => json<{ aliases: ModelAlias[]; tagCount: number; baseCount: number }>('/api/models'),
   capabilities: (alias: string) => json<AliasCapabilities>(`/api/models/${alias}/capabilities`),
+  mediaStatus: () => json<MediaInfrastructureStatus>('/api/infrastructure/media/status'),
+  reconnectMedia: () => json<MediaInfrastructureStatus>('/api/infrastructure/media/reconnect', { method: 'POST' }),
   usage: () => json<{ summary: Array<{ usageClass: string; source: string; requests: number; outputTokens: number }> }>(
     '/api/usage',
   ),
+  agentActivity: (runId: string, after = 0) =>
+    json<{ events: AgentActivityEvent[] }>(`/api/agent/runs/${encodeURIComponent(runId)}/activity?after=${after}`),
 
   // Red-team engagements: authorized targets, categories, and time window.
   listEngagements: (customerId: string) =>
@@ -251,11 +309,142 @@ export const api = {
     ),
 };
 
+// ---------------------------------------------------------------------------
+// Delegated work: agent roles, tasks, and schedules
+// ---------------------------------------------------------------------------
+
+export interface WorkerRole {
+  id: string;
+  alias: string;
+  readOnly: boolean;
+  maxTurns: number;
+}
+
+export type TaskStatus =
+  | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
+  | 'blocked' | 'waiting_for_user' | 'interrupted';
+
+export interface TaskSummary {
+  id: string;
+  agentId: string;
+  objective: string;
+  status: TaskStatus;
+  source: 'ui' | 'mcp' | 'internal';
+  scheduleId?: string;
+  model: string;
+  providerInstanceId: string;
+  result?: string;
+  createdAt: string;
+  completedAt?: string;
+}
+
+export type ScheduleKind = 'once' | 'interval' | 'daily';
+
+export interface Schedule {
+  id: string;
+  name: string;
+  objective: string;
+  role: string;
+  workspaceId: string;
+  alias?: string;
+  kind: ScheduleKind;
+  intervalSeconds?: number;
+  enabled: boolean;
+  nextRunAt: string;
+  lastRunAt?: string;
+  lastTaskId?: string;
+  runCount: number;
+  createdAt: string;
+}
+
+export interface CreateScheduleBody {
+  name?: string;
+  objective: string;
+  role: string;
+  workspaceId: string;
+  alias?: string;
+  kind: ScheduleKind;
+  intervalSeconds?: number;
+  firstRunAt?: string;
+}
+
+export const delegationApi = {
+  roles: () => json<{ roles: WorkerRole[] }>('/api/roles'),
+  workspaces: () => json<{ workspaces: Workspace[] }>('/api/workspaces'),
+
+  tasks: () => json<{ tasks: TaskSummary[] }>('/api/tasks'),
+  task: (id: string) => json<{ task: TaskSummary }>(`/api/tasks/${id}`),
+  createTask: (body: { objective: string; workspaceId: string; role?: string; alias?: string; source?: 'ui' }) =>
+    json<{ task: TaskSummary; queued: number; active: number }>('/api/tasks', {
+      method: 'POST',
+      body: JSON.stringify({ source: 'ui', ...body }),
+    }),
+  cancelTask: (id: string) => json<{ cancelled: boolean }>(`/api/tasks/${id}/cancel`, { method: 'POST' }),
+
+  schedules: () => json<{ schedules: Schedule[] }>('/api/schedules'),
+  createSchedule: (body: CreateScheduleBody) =>
+    json<{ schedule: Schedule }>('/api/schedules', { method: 'POST', body: JSON.stringify(body) }),
+  updateSchedule: (id: string, patch: { enabled?: boolean; name?: string; objective?: string; intervalSeconds?: number }) =>
+    json<{ schedule: Schedule }>(`/api/schedules/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+  deleteSchedule: (id: string) => json<{ deleted: boolean }>(`/api/schedules/${id}`, { method: 'DELETE' }),
+  runScheduleNow: (id: string) =>
+    json<{ task: TaskSummary }>(`/api/schedules/${id}/run-now`, { method: 'POST' }),
+};
+
 export interface StreamHandlers {
   onStart(meta: { conversationId: string; messageId: string; model: string; usageClass: string }): void;
   onChunk(text: string): void;
-  onThinking(): void;
+  onThinking(text?: string): void;
   onDone(payload: { cancelled: boolean; error?: string; durationMs: number }): void;
+}
+
+export interface StudioGenerateRequest {
+  prompt: string;
+  alias: string;
+  revision: number;
+  files: StudioFiles;
+  history: Array<{ role: 'user' | 'assistant'; content: string }>;
+}
+
+export interface StudioGenerateResponse {
+  update: {
+    message: string;
+    files: StudioFiles;
+    changedFiles: string[];
+    baseRevision: number;
+  };
+  generation: {
+    alias: string;
+    model: string;
+    providerInstanceId: string;
+    repaired: boolean;
+    durationMs: number;
+  };
+}
+
+export async function generateStudioProject(
+  body: StudioGenerateRequest,
+  signal: AbortSignal,
+): Promise<StudioGenerateResponse> {
+  const response = await fetch(`${API}/api/studio/generate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal,
+  });
+
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '');
+    let message = detail;
+    try {
+      message = (JSON.parse(detail) as { error?: string }).error ?? detail;
+    } catch {
+      /* retain the bounded server error text */
+    }
+    throw new Error(message || `Studio generation failed with status ${response.status}.`);
+  }
+
+  return response.json() as Promise<StudioGenerateResponse>;
 }
 
 /**
@@ -307,7 +496,7 @@ export async function streamChat(
 
       if (event === 'start') handlers.onStart(data as unknown as Parameters<StreamHandlers['onStart']>[0]);
       else if (event === 'chunk') handlers.onChunk(String(data.content ?? ''));
-      else if (event === 'thinking') handlers.onThinking();
+      else if (event === 'thinking') handlers.onThinking(typeof data.content === 'string' ? data.content : undefined);
       else if (event === 'done' || event === 'error') {
         handlers.onDone(data as unknown as Parameters<StreamHandlers['onDone']>[0]);
       }
@@ -326,7 +515,10 @@ export async function streamAgent(
     workspaceId: string;
     alias: string;
     role: 'coding' | 'adversarial-twin-simulator' | 'tomahawk1';
-    tools: string[];
+    tools?: string[];
+    sessionId?: string;
+    history?: Array<{ role: 'user' | 'assistant'; content: string }>;
+    runMode?: 'interactive' | 'coding' | 'repository_audit' | 'deep_research';
   },
   onEvent: (event: AgentEvent) => void,
   signal: AbortSignal,
@@ -368,7 +560,13 @@ export async function streamAgent(
       if (!eventLine || !dataLine) continue;
 
       try {
-        onEvent({ type: eventLine.slice(7).trim(), ...(JSON.parse(dataLine.slice(6)) as object) });
+        const eventType = eventLine.slice(7).trim();
+        const data = JSON.parse(dataLine.slice(6)) as Record<string, unknown>;
+        // Activity payloads have their own domain `type`; keep the SSE channel
+        // separate so callers never confuse "tool_result" with "activity".
+        onEvent(eventType === 'activity'
+          ? { type: 'activity', activity: data as unknown as AgentActivityEvent }
+          : { type: eventType, ...data });
       } catch {
         continue;
       }

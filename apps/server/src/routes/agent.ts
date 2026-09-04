@@ -1,7 +1,7 @@
 import type { OutgoingHttpHeaders } from 'node:http';
 import type { FastifyInstance } from 'fastify';
 import type { AppConfig } from '@dacai-local-agent/shared';
-import { runAgentLoop, AgentCapabilityError } from '@dacai-local-agent/agent-core';
+import { runAgentLoop, AgentCapabilityError, type CompletionMessage } from '@dacai-local-agent/agent-core';
 import { ContextManager } from '@dacai-local-agent/context';
 import { MemoryStore } from '@dacai-local-agent/memory';
 import type { ProviderRegistry } from '@dacai-local-agent/providers';
@@ -24,6 +24,10 @@ import {
   GITHUB_TOOLS,
   QUALITY_TOOLS,
   VISION_TOOLS,
+  createImageGenerationTools,
+  VIDEO_GENERATION_TOOLS,
+  SMART_CONTRACT_TOOLS,
+  ENGINEERING_TOOLS,
 } from '@dacai-local-agent/tools';
 import { DEFAULT_PERMISSION_POLICY, PermissionEngine } from '@dacai-local-agent/security';
 import type { PermissionPolicy } from '@dacai-local-agent/security';
@@ -68,11 +72,17 @@ import { CompletionManifestExecutor } from '../completion-manifest';
 import { ResourceAwareExecutionExecutor } from '../resource-aware-execution-executor';
 import { ExternalApiDiscoveryExecutor } from '../external-api-discovery-executor';
 import { selectAgentTools } from '../agent-tool-selection';
+import { AgentActivityEmitter, listAgentActivity } from '../agent-activity';
+import { beginSessionActivity, touchSessionActivity } from '../session-preflight';
+import { AgentArtifactError, readAgentArtifact } from '../agent-artifacts';
+import { phaseForAuditTool, repositoryAuditInstructions, resolveAgentRunMode, type RepositoryAuditPhase } from '../agent-run-mode';
 import {
   EvidencePacketCollector,
   executeParallelParticipants,
   normalizeParallelParticipants,
   ReadOnlyToolExecutor,
+  roleForParallelParticipant,
+  synthesizeParallelEvidence,
   type AgentEvidencePacket,
   type ParallelParticipantResult,
 } from '../parallel-model-executor';
@@ -92,14 +102,40 @@ interface AgentBody {
   participants?: string[];
   /** Optional sole mutation owner; every other participant remains read-only. */
   writerAlias?: string;
+  runMode?: 'interactive' | 'coding' | 'repository_audit' | 'deep_research';
+  /** Browser-local conversation identifier used only to group activity replay. */
+  sessionId?: string;
+  /** Visible user/assistant turns from this browser conversation. */
+  history?: Array<{ role: 'user' | 'assistant'; content: string }>;
 }
 
-const DEFAULT_AGENT_TURNS = 50;
+const IMAGE_GENERATION_INTENT =
+  /(?:\b|you)(?:generate|create|make|produce|render|draw|paint|illustrate|design|edit|modify|update|transform)\b[\s\S]{0,160}\b(?:ai\s+)?(?:image|photo|picture|portrait|artwork)\b|\b(?:ai\s+)?(?:image|photo|picture|portrait|artwork)\b[\s\S]{0,160}\b(?:generate|create|make|produce|render|draw|paint|illustrate|design|edit|modify|update|transform)\b|\b(?:image|photo|picture|portrait|artwork)\s+of\b/;
+
+export function isImageGenerationRequest(prompt: string, requestedTools: Iterable<string> = []): boolean {
+  return IMAGE_GENERATION_INTENT.test(prompt.toLowerCase()) || [...requestedTools].includes('image.generate');
+}
+
+export function normalizeAgentConversationHistory(value: AgentBody['history']): CompletionMessage[] {
+  if (!Array.isArray(value)) return [];
+
+  const history = value.flatMap((message) => {
+    if (!message || (message.role !== 'user' && message.role !== 'assistant') || typeof message.content !== 'string') {
+      return [];
+    }
+    const content = message.content.trim().slice(0, 12_000);
+    return content ? [{ role: message.role, content }] : [];
+  }).slice(-16);
+
+  while (history.reduce((total, message) => total + message.content.length, 0) > 48_000) history.shift();
+  return history;
+}
 
 const CODING_PROMPT = `You are a local coding agent working inside a registered workspace.
 
 Rules:
 - Inspect before you answer. Never answer from memory about this project.
+- The active language model is text/tool based. When image.generate is available and the user asks for a photo, photoreal image, portrait, image edit, or raster artwork, call image.generate and report its returned workspace path. When video.generate is available and the user asks for a generated video or to animate an image, call video.generate. For simple diagrams or when raster generation is unavailable, create a real workspace-relative SVG or standalone HTML/canvas artifact with filesystem.write, preferably under output/. The agent chat previews generated images and videos. Never claim media was generated unless a successful tool result proves the artifact exists.
 - For repository-code discovery, prefer code.architecture.context and code.symbol.search before broad recursive filesystem listings.
 - Before modifying an important symbol, use code.symbol.impact to inspect callers, dependencies, references, and related tests.
 - The runtime may return a pre_edit_impact_gate instead of performing the first requested file mutation. When this occurs, the mutation has NOT executed. Review the supplied dependency and test impact, adjust the patch if necessary, then retry the mutation once.
@@ -523,7 +559,12 @@ function policyFor(capabilities: { write: boolean; shell: boolean }): Permission
 
 export function registerAgentRoutes(
   server: FastifyInstance,
-  deps: { config: AppConfig; registry: ProviderRegistry; approvals: ApprovalRegistry },
+  deps: {
+    config: AppConfig;
+    registry: ProviderRegistry;
+    approvals: ApprovalRegistry;
+    media?: { ensureImageReady(): Promise<{ ready: boolean; error?: string }> };
+  },
 ): void {
   const workspaces = new PostgresWorkspaceRegistry();
   const usage = new UsageStore();
@@ -545,15 +586,59 @@ export function registerAgentRoutes(
     async (request, reply) => {
       const approved = request.body?.approved === true;
       if (!approvals.decide(request.params.id, approved)) {
-        return reply.code(404).send({ error: 'No pending approval with that id (it may have timed out).' });
+         return reply.code(404).send({ error: 'No pending approval with that id (it may have timed out).' });
       }
       return { ok: true, approved };
     },
   );
+  server.post<{ Params: { runId: string } }>(
+    '/api/approvals/run/:runId/approve-all',
+    async (request) => ({ ok: true, approved: approvals.approveAll(request.params.runId) }),
+  );
 
   server.get('/api/audit', async () => ({ entries: await auditStore.recent(100) }));
 
+  server.get<{ Params: { runId: string }; Querystring: { after?: string } }>(
+    '/api/agent/runs/:runId/activity',
+    async (request, reply) => {
+      const after = Number(request.query.after ?? 0);
+      if (!Number.isInteger(after) || after < 0) {
+        return reply.code(400).send({ error: 'after must be a non-negative integer.' });
+      }
+      return { events: await listAgentActivity(request.params.runId, after) };
+    },
+  );
+
   server.get('/api/workspaces', async () => ({ workspaces: await workspaces.list() }));
+
+  server.get<{ Params: { id: string }; Querystring: { path?: string } }>(
+    '/api/workspaces/:id/artifact',
+    async (request, reply) => {
+      const workspace = await workspaces.get(request.params.id);
+      if (!workspace) return reply.code(404).send({ error: 'Workspace not found.' });
+
+      try {
+        const artifact = await readAgentArtifact(workspace.rootPath, request.query.path ?? '');
+        const safeName = artifact.fileName.replace(/["\r\n]/g, '_');
+        reply
+          .header('Cache-Control', 'no-store')
+          .header('Content-Disposition', `inline; filename="${safeName}"`)
+          .header('X-Content-Type-Options', 'nosniff')
+          .header(
+            'Content-Security-Policy',
+            "default-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'none'; media-src data: blob:; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'",
+          )
+          .type(artifact.mimeType);
+        return reply.send(artifact.content);
+      } catch (error) {
+        if (error instanceof AgentArtifactError) {
+          return reply.code(error.statusCode).send({ error: error.message });
+        }
+        request.log.error(error, 'Could not load agent artifact');
+        return reply.code(500).send({ error: 'Could not load artifact.' });
+      }
+    },
+  );
 
   server.post<{
     Body: {
@@ -575,7 +660,9 @@ export function registerAgentRoutes(
           read: true,
           write: body.write === true,
           shell: body.shell === true,
-          network: body.network === true,
+          // Public-web research is available by default. Callers can still
+          // explicitly opt out with `network: false`.
+          network: body.network !== false,
         },
       });
       return { workspace };
@@ -596,13 +683,17 @@ export function registerAgentRoutes(
     const current = await workspaces.get(request.params.id);
     if (!current) return reply.code(404).send({ error: 'Workspace not found.' });
     const body = request.body ?? {};
-    const workspace = await workspaces.updateCapabilities(request.params.id, {
-      read: body.read ?? current.capabilities.read,
-      write: body.write ?? current.capabilities.write,
-      shell: body.shell ?? current.capabilities.shell,
-      network: body.network ?? current.capabilities.network,
-    });
-    return { workspace };
+    try {
+      const workspace = await workspaces.updateCapabilities(request.params.id, {
+        read: body.read ?? current.capabilities.read,
+        write: body.write ?? current.capabilities.write,
+        shell: body.shell ?? current.capabilities.shell,
+        network: body.network ?? current.capabilities.network,
+      });
+      return { workspace };
+    } catch (error) {
+      return reply.code(400).send({ error: (error as Error).message });
+    }
   });
 
   /**
@@ -621,6 +712,8 @@ export function registerAgentRoutes(
     const workspace = await workspaces.get(body.workspaceId);
     if (!workspace) return reply.code(400).send({ error: 'Select a workspace first.' });
 
+    const sessionKey = body.sessionId ?? body.threadId ?? `workspace:${workspace.id}`;
+    const sessionBoundary = beginSessionActivity(sessionKey);
     const requestedPrompt =
       body.prompt?.trim() ?? '';
 
@@ -656,6 +749,15 @@ export function registerAgentRoutes(
     const effectivePrompt =
       recoveredRun?.resumePrompt ??
       requestedPrompt;
+    const conversationHistory = normalizeAgentConversationHistory(body.history);
+    const advancedRequested = new Set(body.tools ?? []);
+    const prompt = effectivePrompt.toLowerCase();
+    const imageGenerationRun = isImageGenerationRequest(effectivePrompt, advancedRequested);
+    // Image generation is executed by the media subsystem, so do not make it
+    // wait for or recover the separate Ollama GPU route.
+    const runpodPreflight = imageGenerationRun
+      ? undefined
+      : await deps.registry.gpuAvailability(sessionBoundary.refreshPreflight);
 
     let parallelSelection: { participants: string[]; writerAlias?: string };
     try {
@@ -672,14 +774,17 @@ export function registerAgentRoutes(
     const requestedAliases = parallelSelection.participants.length
       ? parallelSelection.participants
       : [body.alias ?? 'coder'];
+    const isParallel = parallelSelection.participants.length > 0;
 
     let resolvedParticipants: Array<{ alias: string; resolved: Awaited<ReturnType<ProviderRegistry['resolveAlias']>> }>;
-    try {
-      resolvedParticipants = await Promise.all(
-        requestedAliases.map(async (alias) => ({
+    let preflightFailures: ParallelParticipantResult[] = [];
+    const resolutionResults = await Promise.allSettled(
+      requestedAliases.map(async (alias) => ({
           alias,
           resolved: await deps.registry.resolveAlias(alias, {
-            requireToolCalling: true,
+            requireToolCalling: !imageGenerationRun,
+            preferLocal: imageGenerationRun,
+            skipCapabilityProbe: imageGenerationRun,
 
             // A named single alias or an item in the explicit participant list
             // is the only consent signal passed to the manual paid-provider
@@ -687,19 +792,57 @@ export function registerAgentRoutes(
             explicitInstanceRequest: body.alias !== undefined || parallelSelection.participants.includes(alias),
           }),
         })),
-      );
-    } catch (error) {
+    );
+    resolvedParticipants = resolutionResults.flatMap((settlement) =>
+      settlement.status === 'fulfilled' ? [settlement.value] : [],
+    );
+
+    if (!isParallel && resolutionResults[0]?.status === 'rejected') {
       // Includes the advisory-class refusal, which is worth showing verbatim.
-      return reply.code(400).send({ error: (error as Error).message });
+      return reply.code(400).send({ error: (resolutionResults[0].reason as Error).message });
+    }
+
+    if (isParallel) {
+      preflightFailures = resolutionResults.flatMap((settlement, index) => {
+        if (settlement.status === 'fulfilled') return [];
+        const alias = requestedAliases[index];
+        const configured = deps.config.models[alias];
+        const participant = {
+          alias,
+          providerInstanceId: configured?.providerInstanceId ?? 'unresolved',
+          model: configured?.model ?? 'unresolved',
+        };
+        const collector = new EvidencePacketCollector(
+          participant,
+          effectivePrompt,
+          roleForParallelParticipant(alias),
+        );
+        const packet = collector.failed(settlement.reason);
+        return [{ participant, packet, error: packet.unresolvedQuestions[0] }];
+      });
+      if (!resolvedParticipants.length) {
+        return reply.code(400).send({
+          error: 'No selected parallel participant could be resolved.',
+          participants: preflightFailures.map(({ participant, error }) => ({
+            alias: participant.alias,
+            providerInstanceId: participant.providerInstanceId,
+            model: participant.model,
+            error,
+          })),
+        });
+      }
     }
     const resolved = resolvedParticipants[0].resolved;
-    const isParallel = parallelSelection.participants.length > 0;
 
     const tools = new ToolRegistry();
     const simulationTools = body.role === 'adversarial-twin-simulator' ? createAdversarialSimulationTools() : [];
-    const prompt = effectivePrompt.toLowerCase();
     const wantsQuality = /\b(test|property|fuzz|mutation|invariant|coverage)\b/.test(prompt);
     const wantsVision = /\b(image|screenshot|mockup|visual|ui|layout|design)\b/.test(prompt);
+    const wantsVideoGeneration = /\b(generate|create|make|produce|render|animate)\b[\s\S]{0,80}\b(video|clip|animation|footage|image)\b|\b(video|clip|animation|footage)\b[\s\S]{0,80}\b(generate|create|make|produce|render)\b/.test(prompt);
+    const wantsSmartContract =
+      /\b(solidity|smart ?contract|\.sol\b|reentrancy|erc-?(20|721|1155)|evm|delegatecall|onlyowner)\b/.test(prompt);
+    const wantsEngineering =
+      /\b(cad|cadquery|freecad|openscad|blender|bim|ifc|3d model|parametric|engineering|architecture|aerospace|simulation|robotics|finite element|cfd)\b/.test(prompt);
     const wantsGitMutation = /\b(commit|branch|push|pull request|\bpr\b|worktree)\b/.test(prompt);
     const wantsGithub = workspace.capabilities.network && /\b(github|pull request|\bpr\b|ci|actions|checks)\b/.test(prompt);
     const codexServerTools = createCodexServerTools(deps.config.port);
@@ -707,7 +850,6 @@ export function registerAgentRoutes(
     // Keep the ordinary turn toolset compact. Skills and delegation are always
     // available to coding runs; specialized expensive/remote tools appear only
     // when the prompt makes them relevant or the caller explicitly requests them.
-    const advancedRequested = new Set(body.tools ?? []);
     const enabled = [
       ...(workspace.capabilities.write ? FILESYSTEM_TOOLS : READ_ONLY_FILESYSTEM_TOOLS),
       ...(workspace.capabilities.shell ? SHELL_TOOLS : READ_ONLY_SHELL_TOOLS),
@@ -734,9 +876,41 @@ export function registerAgentRoutes(
       ...((wantsVision || [...advancedRequested].some((name) => name.startsWith('vision.')))
         ? VISION_TOOLS
         : []),
+      ...(imageGenerationRun
+        ? createImageGenerationTools()
+        : []),
+      ...((wantsVideoGeneration || advancedRequested.has('video.generate')) && workspace.capabilities.read && workspace.capabilities.write && workspace.capabilities.network
+        ? VIDEO_GENERATION_TOOLS
+        : []),
+      // Read-only static review. Needs no capability beyond the read access every
+      // run already has: it opens a .sol file inside the workspace and queries the
+      // local knowledge store. It never compiles, deploys, or contacts a chain.
+      ...((wantsSmartContract || [...advancedRequested].some((name) => name.startsWith('smartcontract.')))
+        ? SMART_CONTRACT_TOOLS
+        : []),
+      ...(wantsEngineering || [...advancedRequested].some((name) =>
+        name.startsWith('engineering.') || name.startsWith('cad.') || name.startsWith('bim.') || name.startsWith('scene.'),
+      )
+        ? ENGINEERING_TOOLS.filter((tool) =>
+            (!tool.requiresRead || workspace.capabilities.read) &&
+            (!tool.requiresShell || workspace.capabilities.shell) &&
+            (!tool.requiresWrite || workspace.capabilities.write),
+          )
+        : []),
     ];
-    const selected = selectAgentTools(enabled, body.tools);
+    const selected = selectAgentTools(
+      enabled,
+      imageGenerationRun && body.tools ? [...new Set([...body.tools, 'image.generate'])] : body.tools,
+    );
     for (const tool of selected) tools.register(tool);
+    const resolvedRunMode = resolveAgentRunMode({
+      requestedMode: body.runMode,
+      prompt: effectivePrompt,
+      role: body.role,
+      config: deps.config,
+      maxTurns: body.maxTurns,
+      maxToolCalls: body.maxToolCalls,
+    });
 
     const headers: OutgoingHttpHeaders = {
       'Content-Type': 'text/event-stream',
@@ -758,6 +932,12 @@ export function registerAgentRoutes(
     const write = (event: string, data: unknown) => {
       if (!reply.raw.writableEnded) reply.raw.write(sseFrame(event, data));
     };
+    const activity = new AgentActivityEmitter({
+      workspaceId: workspace.id,
+      runId,
+      sessionId: body.sessionId,
+      onEvent: (event) => write('activity', event),
+    });
 
     for (
       const tool of createFinalReviewTools({
@@ -792,11 +972,19 @@ export function registerAgentRoutes(
     const threadId = body.threadId?.trim() || runId;
 
     write('start', {
+      runId,
+      runMode: resolvedRunMode.mode,
+      budget: resolvedRunMode.budget,
       role: body.role ?? 'coding',
       workspace: workspace.displayName,
       model: resolved.model,
+      alias: resolved.alias,
       providerInstanceId: resolved.instance.id,
       usageClass: resolved.instance.usageClass,
+      // Where this run is executing, and when it is not the GPU pod, why.
+      routingNote: resolved.routingNote,
+      promotedFromAlias: resolved.promotedFromAlias,
+      fellBackFromAlias: resolved.fellBackFromAlias,
       toolCallChannel: resolved.capabilities.toolCallChannel,
       participants: isParallel
         ? resolvedParticipants.map(({ alias, resolved: participant }) => ({
@@ -816,7 +1004,45 @@ export function registerAgentRoutes(
       contextSources: curatedContext.sources,
       contextEntries: curatedContext.entries,
       contextCharacters: curatedContext.totalCharacters,
+      runpodPreflight: runpodPreflight
+        ? { refreshed: sessionBoundary.refreshPreflight, ...runpodPreflight }
+        : { refreshed: sessionBoundary.refreshPreflight, status: 'unavailable' },
     });
+    if (resolved.routingNote) {
+      // A run that stayed local because the pod is stopped must say so rather
+      // than look like an ordinary local run.
+      await activity.emit({
+        type: 'system',
+        status: resolved.instance.usageClass === 'REMOTE_GPU_OLLAMA' ? 'success' : 'info',
+        title:
+          resolved.instance.usageClass === 'REMOTE_GPU_OLLAMA'
+            ? 'Running on the RunPod GPU'
+            : 'Running on local inference',
+        message: resolved.routingNote,
+        metadata: {
+          alias: resolved.alias,
+          model: resolved.model,
+          providerInstanceId: resolved.instance.id,
+          promotedFromAlias: resolved.promotedFromAlias,
+          fellBackFromAlias: resolved.fellBackFromAlias,
+        },
+      });
+    }
+    await activity.emit({
+      type: 'planning',
+      status: 'running',
+      title: `Mode: ${resolvedRunMode.mode}`,
+      message: `Budget: ${resolvedRunMode.budget.maxTurns} turns, ${resolvedRunMode.budget.maxToolCalls} tool calls${resolvedRunMode.budget.synthesisReserveTurns ? `, with ${resolvedRunMode.budget.synthesisReserveTurns} turns reserved for synthesis and verification` : ''}.`,
+      metadata: resolvedRunMode.budget,
+    });
+    let auditPhase: RepositoryAuditPhase | undefined;
+    if (resolvedRunMode.mode === 'repository_audit') {
+      auditPhase = 'Define target capability model';
+      await activity.emit({
+        type: 'planning', status: 'running', title: `Phase: ${auditPhase}`,
+        message: 'Defining the capability model and audit criteria before inventorying the repository.',
+      });
+    }
 
     const recorder = new LoopTraceRecorder({ source: 'ui' });
 
@@ -842,6 +1068,13 @@ export function registerAgentRoutes(
             tier: entry.decision.tier,
             reason: entry.decision.reason,
           });
+          void activity.emit({
+            type: entry.decision.kind === 'allowed' ? 'tool_progress' : 'warning',
+            status: entry.decision.kind === 'allowed' ? 'running' : 'blocked',
+            title: `${entry.decision.kind === 'allowed' ? 'Allowed' : 'Permission check'} ${entry.toolName}`,
+            message: entry.decision.reason,
+            toolName: entry.toolName,
+          });
           await auditStore.record({
             workspaceId: workspace.id,
             taskId: runId,
@@ -860,7 +1093,7 @@ export function registerAgentRoutes(
             toolName,
             decision,
             input,
-            onRequested: (approval) =>
+            onRequested: (approval) => {
               // The UI shows the exact command and blocks until answered.
               write('approval_request', {
                 id: approval.id,
@@ -868,10 +1101,26 @@ export function registerAgentRoutes(
                 tier: approval.tier,
                 reason: approval.reason,
                 input: approval.input,
-              }),
+              });
+              void activity.emit({
+                type: 'warning',
+                status: 'blocked',
+                title: `Approval required for ${approval.toolName}`,
+                message: approval.reason,
+                toolName: approval.toolName,
+                metadata: approval.input,
+              });
+            },
           });
 
           write('approval_resolved', { tool: toolName, approved });
+          void activity.emit({
+            type: approved ? 'decision' : 'warning',
+            status: approved ? 'success' : 'blocked',
+            title: approved ? `Approved ${toolName}` : `Denied ${toolName}`,
+            message: approved ? 'Approval received; execution may continue.' : 'Approval was denied or expired.',
+            toolName,
+          });
           await auditStore.record({
             workspaceId: workspace.id,
             taskId: runId,
@@ -1072,8 +1321,8 @@ export function registerAgentRoutes(
 
     try {
       const role = body.role ?? 'coding';
-      const maxTurns = Math.min(body.maxTurns ?? DEFAULT_AGENT_TURNS, deps.config.limits.maxAgentTurns);
-      const maxToolCalls = Math.max(8, Math.min(body.maxToolCalls ?? 96, 160));
+      const maxTurns = resolvedRunMode.budget.maxTurns;
+      const maxToolCalls = Math.max(8, Math.min(resolvedRunMode.budget.maxToolCalls, 240));
       const maxContextTokens = resolved.capabilities.contextWindow
         ? Math.max(4096, Math.min(resolved.capabilities.contextWindow, 32768))
         : 32768;
@@ -1081,6 +1330,24 @@ export function registerAgentRoutes(
       const onLoopEvent = (event: Parameters<LoopTraceRecorder['record']>[0]) => {
         recorder.record(event);
         void stateTracker.record(event);
+        void activity.emitLoopEvent(event);
+        if (resolvedRunMode.mode === 'repository_audit') {
+          const nextPhase = event.type === 'budget' && event.budget && (event.budget.maxTurns - event.budget.turns) < (event.budget.reserveTurns ?? 0)
+            ? 'Architecture synthesis'
+            : event.type === 'validation'
+              ? 'Verification'
+              : event.type === 'tool_call' && event.toolCall
+                ? phaseForAuditTool(event.toolCall.name)
+                : undefined;
+          if (nextPhase && nextPhase !== auditPhase) {
+            auditPhase = nextPhase;
+            void activity.emit({
+              type: 'planning', status: 'running', title: `Phase: ${nextPhase}`,
+              message: `Repository audit is now in ${nextPhase.toLowerCase()}.`,
+              metadata: { mode: resolvedRunMode.mode, phase: nextPhase, turn: `${event.turn}/${maxTurns}` },
+            });
+          }
+        }
         write(event.type, {
           turn: event.turn,
           content: event.content,
@@ -1095,7 +1362,108 @@ export function registerAgentRoutes(
 
       let parallelExecution: Awaited<ReturnType<typeof executeParallelParticipants>> | undefined;
       let result;
-      if (isParallel) {
+      if (imageGenerationRun && !isParallel) {
+        const imageTool = 'image.generate';
+        if (!permissionedExecutor.listTools().some((tool) => tool.name === imageTool)) {
+          throw new Error('Image generation is unavailable because image.generate was removed by explicit tool selection.');
+        }
+        const outputPath = `generated/image-${runId}.png`;
+        const cleanedImagePrompt = effectivePrompt.replace(/^yougenerate\b/i, 'generate');
+        const realismRequested = /\b(realistic|photorealistic|photoreal|lifelike|true[- ]to[- ]life)\b/i.test(cleanedImagePrompt);
+        const call = {
+          id: `image-${runId}`,
+          name: imageTool,
+          arguments: {
+            prompt: realismRequested
+              ? `${cleanedImagePrompt}. Photorealistic editorial photography, natural skin texture, realistic pores and fine facial details, physically accurate lighting, authentic anatomy, subtle imperfections, professional lens depth of field, high dynamic range.`
+              : cleanedImagePrompt,
+            negativePrompt: realismRequested
+              ? 'cartoon, illustration, CGI, 3D render, plastic skin, airbrushed skin, waxy face, oversmoothed texture, distorted anatomy, extra fingers, asymmetrical eyes, duplicate features, text, watermark, logo, blur, low detail'
+              : undefined,
+            width: 1024,
+            height: 1024,
+            steps: realismRequested ? 40 : 28,
+            guidance: realismRequested ? 7.5 : 7,
+            quality: 'high',
+            outputPath,
+          },
+        } as const;
+        const turn = 1;
+        write('tool_call', { turn, tool: call.name, arguments: call.arguments });
+        void activity.emit({
+          type: 'file_edit',
+          status: 'running',
+          title: 'Starting AI image generation',
+          message: 'The image request was recognized and is being sent to the configured GPU media backend.',
+          toolName: imageTool,
+          filePath: outputPath,
+          metadata: { backend: process.env.DACAI_IMAGE_BACKEND ?? 'unconfigured', provider: resolved.instance.id },
+        });
+        if (process.env.DACAI_IMAGE_BACKEND?.trim().toLowerCase() === 'dacais-media') {
+          // Await the supervisor already started at server boot. This closes the
+          // race where the first image request arrived while the pod, service,
+          // or private SSH tunnel was still being restored.
+          const mediaStatus = await deps.media?.ensureImageReady();
+          if (mediaStatus && !mediaStatus.ready) {
+            void activity.emit({
+              type: 'warning',
+              status: 'running',
+              title: 'Media recovery is still converging',
+              message: mediaStatus.error ?? 'The image tool will retry the private media endpoint.',
+              toolName: imageTool,
+            });
+          }
+        }
+        // Generated media is an output artifact, not a repository source edit.
+        // Execute through the permission boundary directly so source-code
+        // transaction, impact-analysis, shell, and validation gates cannot
+        // misclassify this bounded image write and stop it before the backend.
+        const imageResult = await permissionedExecutor.execute(call, controller.signal);
+        write('tool_result', {
+          turn,
+          tool: call.name,
+          arguments: call.arguments,
+          success: imageResult.success,
+          denied: imageResult.denied,
+          output: imageResult.output.slice(0, 4000),
+          message: imageResult.error,
+        });
+        await activity.emit({
+          type: imageResult.success ? 'success' : imageResult.denied ? 'warning' : 'error',
+          status: imageResult.success ? 'success' : imageResult.denied ? 'blocked' : 'failed',
+          title: imageResult.success ? 'AI image generated' : 'AI image generation failed',
+          message: imageResult.success
+            ? `Image saved to ${outputPath}.`
+            : imageResult.error ?? 'The image backend did not produce an image.',
+          toolName: imageTool,
+          filePath: outputPath,
+        });
+        result = {
+          taskId: runId,
+          answer: imageResult.success
+            ? `TASK_COMPLETE: Generated image saved to ${outputPath}.`
+            : `TASK_BLOCKED: ${imageResult.output || imageResult.error || 'Image generation failed.'}`,
+          stopReason: 'final-answer' as const,
+          completionState: imageResult.success ? 'GOAL_COMPLETE' as const : imageResult.denied ? 'BLOCKED' as const : 'FAILED' as const,
+          turns: 1,
+          toolCalls: 1,
+          rejectedCalls: 0,
+          deniedCalls: imageResult.denied ? 1 : 0,
+          retries: 0,
+          durationMs: 0,
+          usage: { inputTokens: 0, outputTokens: 0 },
+          workingState: {
+            reasoningMode: 'standard' as const,
+            knownPaths: [outputPath],
+            changedFiles: imageResult.success ? [outputPath] : [],
+            validationResults: imageResult.success ? ['image.generate verified PNG output'] : [],
+            rollingSummary: undefined,
+            contextCompactions: 0,
+            mutationGeneration: imageResult.success ? 1 : 0,
+            validatedMutationGeneration: imageResult.success ? 1 : 0,
+          },
+        };
+      } else if (isParallel) {
         const resolvedByAlias = new Map(resolvedParticipants.map(({ alias, resolved: participant }) => [alias, participant]));
         const readOnlyExecutor = new ReadOnlyToolExecutor(executor);
         const participantTools = readOnlyExecutor.listTools().map((tool) => tool.name);
@@ -1116,6 +1484,10 @@ export function registerAgentRoutes(
             role: participantRole,
             mode: 'read-only',
           });
+          void activity.emit({
+            type: 'system', status: 'running', title: `Parallel participant ${participant.alias} started`,
+            message: `Running read-only ${participantRole} work.`,
+          });
           recorder.recordRuntimeEvent({
             event: 'phase',
             phase: 'parallel',
@@ -1128,7 +1500,11 @@ export function registerAgentRoutes(
             capabilities: participantResolved.capabilities,
             executor: readOnlyExecutor,
             prompt: effectivePrompt,
-            systemPrompt: parallelSpecialistPrompt(participantRole, participantTools),
+            history: conversationHistory,
+            systemPrompt: [
+              parallelSpecialistPrompt(participantRole, participantTools),
+              resolvedRunMode.mode === 'repository_audit' ? repositoryAuditInstructions() : '',
+            ].filter(Boolean).join('\n\n'),
             temperature: participantResolved.temperature ?? 0.1,
             maxTurns: Math.min(maxTurns, 16),
             maxToolCalls: Math.min(maxToolCalls, 40),
@@ -1136,6 +1512,8 @@ export function registerAgentRoutes(
               ? Math.max(4096, Math.min(participantResolved.capabilities.contextWindow, 32768))
               : 32768,
             reasoningMode: body.reasoningMode ?? 'auto',
+            runMode: resolvedRunMode.mode,
+            synthesisReserveTurns: 0,
             completionSignalRequired: false,
             requireMutationForMutationIntent: false,
             initialContext: curatedContext.text,
@@ -1148,6 +1526,7 @@ export function registerAgentRoutes(
               collector.record(event);
               recorder.record(event);
               void stateTracker.record(event);
+              void activity.emitLoopEvent(event);
               write('participant_event', {
                 participant: participant.alias,
                 turn: event.turn,
@@ -1168,6 +1547,12 @@ export function registerAgentRoutes(
             status: packet.status,
             toolCalls: participantResult.toolCalls,
             stopReason: participantResult.stopReason,
+          });
+          void activity.emit({
+            type: packet.status === 'completed' ? 'success' : 'warning',
+            status: packet.status === 'completed' ? 'success' : 'info',
+            title: `Parallel participant ${participant.alias} finished`,
+            message: `${participantResult.stopReason}; ${participantResult.toolCalls} tool calls.`,
           });
           return { result: participantResult, packet };
         };
@@ -1198,6 +1583,10 @@ export function registerAgentRoutes(
             role: participantRole,
             mode: 'sole-writer',
           });
+          void activity.emit({
+            type: 'system', status: 'running', title: `Parallel participant ${participant.alias} started`,
+            message: `Running ${participantRole} as the sole writer.`,
+          });
           recorder.recordRuntimeEvent({
             event: 'phase',
             phase: 'parallel',
@@ -1210,7 +1599,8 @@ export function registerAgentRoutes(
             threadId: `${threadId}:${participant.alias}`,
             workspaceId: workspace.id,
             goal: writerGoal,
-            systemPrompt: systemPromptForRole(role, selected.map((tool) => tool.name)),
+            history: conversationHistory,
+            systemPrompt: [systemPromptForRole(role, selected.map((tool) => tool.name)), resolvedRunMode.mode === 'repository_audit' ? repositoryAuditInstructions() : ''].filter(Boolean).join('\n\n'),
             executor,
             coder: participantResolved,
             planner,
@@ -1228,6 +1618,7 @@ export function registerAgentRoutes(
               collector.record(event);
               recorder.record(event);
               void stateTracker.record(event);
+              void activity.emitLoopEvent(event);
               write('participant_event', {
                 participant: participant.alias,
                 turn: event.turn,
@@ -1240,6 +1631,11 @@ export function registerAgentRoutes(
             },
             onGraphEvent: (event) => {
               recorder.recordRuntimeEvent({ event: event.type, phase: event.phase, message: event.message });
+              void activity.emit({
+                type: event.type === 'plan_update' ? 'planning' : 'next_step', status: 'info',
+                title: event.phase ?? 'Agent execution', message: event.message,
+                metadata: event.detail ? { detail: event.detail } : undefined,
+              });
               write('participant_graph_event', {
                 participant: participant.alias,
                 phase: event.phase,
@@ -1258,6 +1654,12 @@ export function registerAgentRoutes(
             toolCalls: participantResult.toolCalls,
             stopReason: participantResult.stopReason,
           });
+          void activity.emit({
+            type: packet.status === 'completed' ? 'success' : 'warning',
+            status: packet.status === 'completed' ? 'success' : 'info',
+            title: `Parallel participant ${participant.alias} finished`,
+            message: `${participantResult.stopReason}; ${participantResult.toolCalls} tool calls.`,
+          });
           return { result: participantResult, packet };
         };
 
@@ -1273,6 +1675,18 @@ export function registerAgentRoutes(
           runReadOnly: runReadOnlyParticipant,
           runWriter: parallelSelection.writerAlias ? runWriterParticipant : undefined,
         });
+        if (preflightFailures.length) {
+          const participantOrder = new Map(requestedAliases.map((alias, index) => [alias, index]));
+          const participants = [...parallelExecution.participants, ...preflightFailures]
+            .sort((left, right) =>
+              (participantOrder.get(left.participant.alias) ?? Number.MAX_SAFE_INTEGER) -
+              (participantOrder.get(right.participant.alias) ?? Number.MAX_SAFE_INTEGER),
+            );
+          parallelExecution = {
+            participants,
+            synthesis: synthesizeParallelEvidence(participants),
+          };
+        }
 
         const workerResults = parallelExecution.participants
           .map((participant) => participant.result)
@@ -1299,6 +1713,11 @@ export function registerAgentRoutes(
             : workerResults.length
               ? 'final-answer' as const
               : 'provider-error' as const,
+          completionState: controller.signal.aborted
+            ? 'CANCELLED' as const
+            : workerResults.length
+              ? 'GOAL_COMPLETE' as const
+              : 'FAILED' as const,
           turns: workerResults.reduce((total, participant) => total + participant.turns, 0),
           toolCalls: workerResults.reduce((total, participant) => total + participant.toolCalls, 0),
           rejectedCalls: workerResults.reduce((total, participant) => total + participant.rejectedCalls, 0),
@@ -1312,7 +1731,7 @@ export function registerAgentRoutes(
           workingState: combinedWorkingState,
           error: workerResults.length ? undefined : 'All parallel participants failed before producing a result.',
         };
-      } else if (role === 'coding') {
+      } else if (role === 'coding' && resolvedRunMode.mode === 'coding' && !imageGenerationRun) {
         const planner = await deps.registry.resolveAlias('planner', { signal: controller.signal }).catch(() => undefined);
         const reviewer = await deps.registry.resolveAlias('reviewer', { signal: controller.signal }).catch(() => undefined);
 
@@ -1320,6 +1739,7 @@ export function registerAgentRoutes(
           threadId,
           workspaceId: workspace.id,
           goal: effectivePrompt,
+          history: conversationHistory,
           systemPrompt: systemPromptForRole(role, selected.map((tool) => tool.name)),
           executor,
           coder: resolved,
@@ -1331,10 +1751,17 @@ export function registerAgentRoutes(
           maxToolCalls,
           maxContextTokens,
           reasoningMode: body.reasoningMode ?? 'auto',
+          runMode: resolvedRunMode.mode,
+          synthesisReserveTurns: resolvedRunMode.budget.synthesisReserveTurns,
           signal: controller.signal,
           onLoopEvent,
           onGraphEvent: (event) => {
             recorder.recordRuntimeEvent({ event: event.type, phase: event.phase, message: event.message });
+            void activity.emit({
+              type: event.type === 'plan_update' ? 'planning' : 'next_step', status: 'info',
+              title: event.phase ?? 'Agent execution', message: event.message,
+              metadata: event.detail ? { detail: event.detail } : undefined,
+            });
             write(event.type, {
               phase: event.phase,
               message: event.message,
@@ -1350,13 +1777,24 @@ export function registerAgentRoutes(
           capabilities: resolved.capabilities,
           executor,
           prompt: effectivePrompt,
-          systemPrompt: systemPromptForRole(role, selected.map((tool) => tool.name)),
+          history: conversationHistory,
+          systemPrompt: [
+            systemPromptForRole(role, selected.map((tool) => tool.name)),
+            imageGenerationRun
+              ? 'IMAGE REQUEST: Call image.generate immediately using a new workspace-relative PNG outputPath. Do not inspect or search the repository first. The user requested an image, not a coding task. After the tool succeeds, report the artifact path and stop.'
+              : '',
+            resolvedRunMode.mode === 'repository_audit' ? repositoryAuditInstructions() : '',
+          ].filter(Boolean).join('\n\n'),
           temperature: resolved.temperature ?? 0.1,
           maxTurns,
           maxToolCalls,
           maxContextTokens,
           reasoningMode: body.reasoningMode ?? 'auto',
-          completionSignalRequired: false,
+          runMode: resolvedRunMode.mode,
+          synthesisReserveTurns: resolvedRunMode.budget.synthesisReserveTurns,
+          completionSignalRequired: imageGenerationRun || resolvedRunMode.mode === 'repository_audit' || resolvedRunMode.mode === 'deep_research',
+          requireMutationForMutationIntent: true,
+          requireValidationAfterMutation: !imageGenerationRun,
           failureRecovery:
           body.role === 'coding'
             ? (failure) =>
@@ -1374,10 +1812,12 @@ export function registerAgentRoutes(
                 )
             : undefined,
 
-        evidenceRequirement: {
-            tools: ['filesystem.list', 'filesystem.search', 'filesystem.read', 'filesystem.stat'],
-            maxNudges: 2,
-          },
+          evidenceRequirement: imageGenerationRun ? undefined : {
+              tools: resolvedRunMode.mode === 'repository_audit'
+                ? ['code.architecture.context', 'code.symbol.search', 'filesystem.read']
+                : ['filesystem.list', 'filesystem.search', 'filesystem.read', 'filesystem.stat'],
+              maxNudges: 2,
+            },
           signal: controller.signal,
           onEvent: onLoopEvent,
         });
@@ -1435,16 +1875,28 @@ export function registerAgentRoutes(
       const finalAcceptance =
         await checkAcceptanceCompletion(
           runId,
-          effectivePrompt,
+        effectivePrompt,
         );
 
+      await activity.emit({
+        type: result.completionState === 'GOAL_COMPLETE' || result.completionState === 'VERIFICATION_COMPLETE' ? 'success' : 'warning',
+        status: result.completionState === 'GOAL_COMPLETE' || result.completionState === 'VERIFICATION_COMPLETE' ? 'success' : result.completionState === 'CANCELLED' || result.completionState === 'BLOCKED' || result.completionState === 'HARD_BUDGET_EXHAUSTED' ? 'blocked' : 'failed',
+        title: `Agent run: ${result.completionState}`,
+        message: `${result.turns}/${maxTurns} turns, ${result.toolCalls}/${maxToolCalls} tool calls, ${Math.round(result.durationMs / 100) / 10}s.`,
+        durationMs: result.durationMs,
+      });
+
       write('done', {
+        runId,
         acceptanceCheck: {
           ok: finalAcceptance.ok,
           criteria: finalAcceptance.criteria,
         },
         answer: result.answer,
         stopReason: result.stopReason,
+        completionState: result.completionState,
+        runMode: resolvedRunMode.mode,
+        budget: resolvedRunMode.budget,
         turns: result.turns,
         toolCalls: result.toolCalls,
         rejectedCalls: result.rejectedCalls,
@@ -1472,10 +1924,13 @@ export function registerAgentRoutes(
     } catch (error) {
       const message = error instanceof AgentCapabilityError ? error.message : String(error);
       await stateTracker.fail(message);
+      await activity.emit({ type: 'error', status: 'failed', title: 'Agent run failed', message });
       write('error', { message });
     }
 
     if (!reply.raw.writableEnded) reply.raw.end();
+    approvals.clearRun(runId);
+    touchSessionActivity(sessionKey);
     return reply;
   });
 }

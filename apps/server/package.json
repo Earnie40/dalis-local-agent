@@ -2,6 +2,7 @@
   "name": "@dacai-local-agent/server",
   "version": "0.1.0",
   "private": true,
+  "license": "UNLICENSED",
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
@@ -12,6 +13,8 @@
     "@dacai-local-agent/agent-core": "workspace:*",
     "@dacai-local-agent/agents": "workspace:^",
     "@dacai-local-agent/context": "workspace:*",
+    "@dacai-local-agent/domain-knowledge": "workspace:*",
+    "@dacai-local-agent/investor-intelligence": "workspace:*",
     "@dacai-local-agent/memory": "workspace:*",
     "@dacai-local-agent/orchestrator": "workspace:*",
     "@dacai-local-agent/providers": "workspace:*",

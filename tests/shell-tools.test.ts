@@ -86,6 +86,19 @@ describe('process execution', () => {
     // realpath differences aside, the temp directory name must appear.
     expect(result.stdout).toContain(root.split(/[\\/]/).pop()!);
   });
+
+  it('redacts secrets from stdout, stderr, and the reported command', async () => {
+    const synthetic = 'rpa_syntheticcredential12345';
+    const script = `console.log("RUNPOD_API_KEY=${synthetic}"); console.error("token=${synthetic}")`;
+    const result = await runProcess(process.execPath, ['-e', script], {
+      cwd: root,
+      timeoutMs: 15_000,
+    });
+    expect(JSON.stringify(result)).not.toContain(synthetic);
+    expect(result.stdout).toContain('[REDACTED]');
+    expect(result.stderr).toContain('[REDACTED]');
+    expect(result.command).toContain('[REDACTED]');
+  });
 });
 
 describe('git.run', () => {

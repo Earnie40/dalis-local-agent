@@ -3,6 +3,7 @@ import {
   saveWorkingState,
 } from '@dacai-local-agent/context';
 import type { AgentWorkingState } from '@dacai-local-agent/context';
+import { extractChangedPaths, isMutationTool } from '@dacai-local-agent/agent-core';
 
 /**
  * Broader than agent-core's `LoopEvent`: this tracker also receives
@@ -88,14 +89,6 @@ function pathFromArguments(
   return undefined;
 }
 
-const MUTATION_TOOLS =
-  new Set([
-    'filesystem.edit',
-    'filesystem.write',
-    'filesystem.move',
-    'filesystem.copy',
-  ]);
-
 const INSPECTION_TOOLS =
   new Set([
     'filesystem.read',
@@ -107,6 +100,7 @@ const INSPECTION_TOOLS =
     'code.symbol.callers',
     'code.symbol.callees',
     'code.symbol.impact',
+    'code.path.trace',
     'code.architecture.context',
   ]);
 
@@ -246,9 +240,7 @@ export class ResumedRunStateTracker {
               result?.denied !==
                 true &&
               tool !== undefined &&
-              MUTATION_TOOLS.has(
-                tool,
-              ) &&
+              isMutationTool(tool) &&
               !String(
                 result?.output ??
                 '',
@@ -256,10 +248,9 @@ export class ResumedRunStateTracker {
                 'pre_edit_impact_gate',
               )
             ) {
-              uniquePush(
-                state.changedFiles,
-                path,
-              );
+              for (const changedPath of extractChangedPaths(tool, args)) {
+                uniquePush(state.changedFiles, changedPath);
+              }
             }
 
             if (

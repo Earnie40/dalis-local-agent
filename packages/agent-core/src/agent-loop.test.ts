@@ -105,4 +105,84 @@ describe('agent loop execution gates', () => {
     expect(result.workingState.mutationGeneration).toBe(result.workingState.validatedMutationGeneration);
     expect(result.workingState.validationResults.at(-1)).toContain('PASSED');
   });
+
+  it('tracks engineering artifacts and requires a separate evidence inspection', async () => {
+    const result = await runAgentLoop({
+      provider: provider([
+        () => response('', [call('1', 'cad.execute', {
+          backend: 'cadquery',
+          scriptPath: 'models/part.py',
+          sourceSha256: 'a'.repeat(64),
+          expectedArtifacts: ['output/a.step', 'output/a.stl'],
+        })]),
+        () => response('TASK_COMPLETE: generated artifacts.'),
+        (request) => {
+          expect(request.messages.at(-1)?.content).toContain('VALIDATION REQUIRED');
+          return response('', [call('2', 'engineering.artifact.inspect', { paths: ['output/a.step', 'output/a.stl'] })]);
+        },
+        () => response('TASK_COMPLETE: artifacts generated and hash-verified.'),
+      ]),
+      model: 'qwen3:8b', capabilities,
+      executor: executor([tool('cad.execute'), tool('engineering.artifact.inspect')], (requested) => {
+        if (requested.name === 'cad.execute') return { success: true, output: '{}' };
+        return {
+          success: true,
+          output: JSON.stringify({ validation: { filesPresent: true, contentHashed: true } }),
+          evidence: [{
+            kind: 'validation_result',
+            summary: 'artifact hashes verified',
+            detail: { filesPresent: true, contentHashed: true },
+          }, {
+            kind: 'artifact_hash', summary: 'a.step hash', detail: { path: 'output/a.step', sha256: 'b'.repeat(64) },
+          }, {
+            kind: 'artifact_hash', summary: 'a.stl hash', detail: { path: 'output/a.stl', sha256: 'c'.repeat(64) },
+          }],
+        };
+      }),
+      prompt: 'Generate and verify a CAD part.',
+      completionSignalRequired: true,
+      requireValidationAfterMutation: true,
+      maxTurns: 8,
+    });
+    expect(result.workingState.changedFiles).toEqual(expect.arrayContaining(['output/a.step', 'output/a.stl']));
+    expect(result.workingState.mutationGeneration).toBe(1);
+    expect(result.workingState.validatedMutationGeneration).toBe(1);
+    expect(result.completionState).toBe('VERIFICATION_COMPLETE');
+  });
+
+  it('does not let inspection of an unrelated artifact validate changed engineering outputs', async () => {
+    const result = await runAgentLoop({
+      provider: provider([
+        () => response('', [call('1', 'cad.execute', {
+          backend: 'cadquery', scriptPath: 'models/part.py', sourceSha256: 'a'.repeat(64),
+          expectedArtifacts: ['output/a.step'],
+        })]),
+        () => response('', [call('2', 'engineering.artifact.inspect', { paths: ['unrelated/preexisting.step'] })]),
+        () => response('TASK_COMPLETE: done.'),
+        (request) => {
+          expect(request.messages.at(-1)?.content).toContain('output/a.step');
+          return response('TASK_BLOCKED: changed artifact was not inspected.');
+        },
+      ]),
+      model: 'qwen3:8b', capabilities,
+      executor: executor([tool('cad.execute'), tool('engineering.artifact.inspect')], (requested) => {
+        if (requested.name === 'cad.execute') return { success: true, output: '{}' };
+        return {
+          success: true,
+          output: JSON.stringify({ validation: { filesPresent: true, contentHashed: true } }),
+          evidence: [
+            { kind: 'validation_result', summary: 'hash inspected', detail: { filesPresent: true, contentHashed: true } },
+            { kind: 'artifact_hash', summary: 'unrelated hash', detail: { path: 'unrelated/preexisting.step', sha256: 'd'.repeat(64) } },
+          ],
+        };
+      }),
+      prompt: 'Generate and verify a CAD part.',
+      completionSignalRequired: true,
+      requireValidationAfterMutation: true,
+      maxTurns: 8,
+    });
+    expect(result.completionState).toBe('BLOCKED');
+    expect(result.workingState.mutationGeneration).toBe(1);
+    expect(result.workingState.validatedMutationGeneration).toBe(0);
+  });
 });

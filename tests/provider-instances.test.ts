@@ -1,9 +1,37 @@
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { AppConfigSchema, buildProviderInstances, isLoopbackUrl, loadAppConfig } from '../packages/shared/src/config';
+import {
+  AppConfigSchema,
+  buildProviderInstances,
+  isLoopbackUrl,
+  loadAppConfig,
+  loadAppConfigResult,
+} from '../packages/shared/src/config';
 
 const BASE_ENV: NodeJS.ProcessEnv = {
   DATABASE_URL: 'postgresql://user:pw@localhost:5433/db',
 };
+
+const aliasDir = mkdtempSync(join(tmpdir(), 'dacai-provider-aliases-'));
+const ALIAS_PATH = join(aliasDir, 'aliases.yaml');
+writeFileSync(
+  ALIAS_PATH,
+  [
+    'models:',
+    '  coder:',
+    '    provider: local_ollama',
+    '    model: qwen3:8b',
+    '  hf_qwen3:',
+    '    provider: huggingface',
+    '    model: Qwen/Qwen3-8B',
+    '  gpu_coder:',
+    '    provider: remote_gpu_ollama',
+    '    model: qwen3-coder:30b',
+    '',
+  ].join('\n'),
+);
 
 describe('provider instances', () => {
   it('defaults to local Ollama with every remote provider disabled', () => {
@@ -15,6 +43,27 @@ describe('provider instances', () => {
     expect(config.providerInstances.remote_gpu_ollama.enabled).toBe(false);
     expect(config.providerInstances.huggingface.enabled).toBe(false);
     expect(config.providerInstances.anthropic.enabled).toBe(false);
+  });
+
+  it('disables aliases whose provider is inactive and says so in warnings', () => {
+    const { config, warnings } = loadAppConfigResult(BASE_ENV, { modelAliasPath: ALIAS_PATH });
+
+    expect(config.models.coder.enabled).toBe(true);
+    expect(config.models.hf_qwen3.enabled).toBe(false);
+    expect(config.models.gpu_coder.enabled).toBe(false);
+    expect(warnings.some((warning) => warning.includes('hf_qwen3 (huggingface)'))).toBe(true);
+  });
+
+  it('keeps an alias enabled once its provider is switched on', () => {
+    const { config } = loadAppConfigResult(
+      { ...BASE_ENV, HF_PROVIDER_ENABLED: 'true', HF_TOKEN: 'token', RUNPOD_CONNECTION: 'ssh root@gpu.example' },
+      { modelAliasPath: ALIAS_PATH },
+    );
+
+    expect(config.models.hf_qwen3.enabled).toBe(true);
+    // An enabled provider whose pod happens to be stopped stays a runtime
+    // condition, not a config change.
+    expect(config.models.gpu_coder.enabled).toBe(true);
   });
 
   it('still honours the deprecated OLLAMA_BASE_URL name', () => {

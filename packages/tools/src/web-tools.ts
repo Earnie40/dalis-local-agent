@@ -1,53 +1,23 @@
-import { lookup } from 'node:dns/promises';
-import { isIP } from 'node:net';
 import { mkdir, stat, writeFile } from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
+import { assertPublicHttps } from '@dacai-local-agent/security';
 import type { ToolDefinition } from './types';
 
 const MAX_RESPONSE_CHARS = 50_000;
 const MAX_DOWNLOAD_BYTES = 10_000_000;
 
-function isPrivateIpv4(address: string): boolean {
-  const octets = address.split('.').map(Number);
-  if (octets.length !== 4 || octets.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return true;
-  const [a, b] = octets;
-  return a === 10 || a === 127 || a === 0 || (a === 169 && b === 254) ||
-    (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
-}
-
-function isPrivateIpv6(address: string): boolean {
-  const normalized = address.toLowerCase();
-  return normalized === '::1' || normalized === '::' || normalized.startsWith('fc') ||
-    normalized.startsWith('fd') || normalized.startsWith('fe80:');
-}
-
-async function assertPublicHttps(urlText: string): Promise<URL> {
-  let url: URL;
-  try { url = new URL(urlText); } catch { throw new Error('URL must be valid.'); }
-  if (url.protocol !== 'https:') throw new Error('Only HTTPS URLs are allowed.');
-  if (url.username || url.password) throw new Error('URLs containing credentials are not allowed.');
-  const host = url.hostname.replace(/^\[|\]$/g, '');
-  if (host === 'localhost' || host === 'metadata.google.internal' || host.endsWith('.internal')) {
-    throw new Error('Private and metadata hosts are not allowed.');
-  }
-  const records = isIP(host) ? [{ address: host }] : await lookup(host, { all: true });
-  for (const record of records) {
-    if (isPrivateIpv4(record.address) || isPrivateIpv6(record.address)) {
-      throw new Error(`URL resolves to a private or link-local address (${record.address}).`);
-    }
-  }
-  return url;
-}
-
 export const webFetchTool: ToolDefinition = {
   name: 'web.fetch',
   description:
-    'PUBLIC INTERNET ONLY: fetch a specific public HTTPS page and return capped text for agent research. ' +
+    'PUBLIC INTERNET READ ONLY: GET or HEAD a specific public HTTPS page and return capped text or metadata for agent research. ' +
     'Do not use this for local files, workspace source code, localhost, private networks, or repository identifiers; ' +
     'use filesystem.read/filesystem.search for workspace content. Blocks private/localhost/metadata destinations and redirects.',
   inputSchema: {
     type: 'object',
-    properties: { url: { type: 'string', description: 'Public HTTPS URL to fetch.' } },
+    properties: {
+      url: { type: 'string', description: 'Public HTTPS URL to fetch.' },
+      method: { type: 'string', enum: ['GET', 'HEAD'], description: 'Read-only HTTP method. Defaults to GET.' },
+    },
     required: ['url'],
     additionalProperties: false,
   },
@@ -56,14 +26,21 @@ export const webFetchTool: ToolDefinition = {
   timeoutMs: 20_000,
   async execute(input, ctx) {
     const url = await assertPublicHttps(String(input.url ?? ''));
+    const requestedMethod = String(input.method ?? 'GET').toUpperCase();
+    if (requestedMethod !== 'GET' && requestedMethod !== 'HEAD') {
+      throw new Error('web.fetch only permits read-only GET and HEAD requests.');
+    }
+    const method = requestedMethod as 'GET' | 'HEAD';
     const response = await fetch(url, {
+      method,
       redirect: 'error',
       signal: ctx.signal,
       headers: { Accept: 'text/html,text/plain,application/json;q=0.9,*/*;q=0.1', 'User-Agent': 'DacaiLocalAgent/0.1 research' },
     });
-    const text = await response.text();
+    const text = method === 'HEAD' ? '' : await response.text();
     return {
       url: url.toString(),
+      method,
       status: response.status,
       contentType: response.headers.get('content-type'),
       body: text.length > MAX_RESPONSE_CHARS ? `${text.slice(0, MAX_RESPONSE_CHARS)}\n[response truncated]` : text,

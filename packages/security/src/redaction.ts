@@ -15,6 +15,8 @@ export type SecretKind =
   | 'aws-access-key'
   | 'google-api-key'
   | 'slack-token'
+  | 'runpod-token'
+  | 'oauth-token'
   | 'private-key-block'
   | 'jwt'
   | 'database-url-password'
@@ -30,7 +32,12 @@ interface SecretPattern {
 
 /** Env var names whose VALUES must never appear in output. */
 const SENSITIVE_ENV_KEYS =
-  'HF_TOKEN|HUGGINGFACE_API_KEY|ANTHROPIC_API_KEY|OPENAI_API_KEY|OLLAMA_REMOTE_AUTH_TOKEN|DATABASE_URL|PGPASSWORD|PGSUPERPASSWORD|AWS_SECRET_ACCESS_KEY|GOOGLE_APPLICATION_CREDENTIALS|.*_SECRET|.*_TOKEN|.*_PASSWORD|.*_API_KEY';
+  'HF_TOKEN|HUGGINGFACE_API_KEY|ANTHROPIC_API_KEY|OPENAI_API_KEY|OLLAMA_REMOTE_AUTH_TOKEN|' +
+  'DATABASE_URL|PGPASSWORD|PGSUPERPASSWORD|AWS_SECRET_ACCESS_KEY|GOOGLE_APPLICATION_CREDENTIALS|' +
+  'RUNPOD_CONNECTION|[A-Z0-9_]*_SECRET|[A-Z0-9_]*_TOKEN|[A-Z0-9_]*_PASSWORD|' +
+  '[A-Z0-9_]*_API_KEY|[A-Z0-9_]*_PRIVATE_KEY|[A-Z0-9_]*_CREDENTIALS?|' +
+  '[A-Z0-9_]*_USER_KEY|[A-Z0-9_]*_ACCESS_KEY|[A-Z0-9_]*_AUTH|PASSWORD|SECRET|TOKEN|' +
+  'API[_-]?KEY|CLIENT[_-]?SECRET|ACCESS[_-]?TOKEN|PRIVATE[_-]?KEY';
 
 const PATTERNS: SecretPattern[] = [
   { kind: 'private-key-block', pattern: /-----BEGIN[ A-Z]*PRIVATE KEY-----[\s\S]*?-----END[ A-Z]*PRIVATE KEY-----/g },
@@ -43,15 +50,97 @@ const PATTERNS: SecretPattern[] = [
   // under-matching costs a leaked credential.
   { kind: 'google-api-key', pattern: /\bAIza[0-9A-Za-z_-]{30,}\b/g },
   { kind: 'slack-token', pattern: /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g },
+  { kind: 'runpod-token', pattern: /\brpa_[A-Za-z0-9_-]{10,}\b/g },
+  { kind: 'oauth-token', pattern: /\bya29\.[A-Za-z0-9_-]{10,}\b/g },
   { kind: 'jwt', pattern: /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g },
   // postgres://user:PASSWORD@host — replace only the password group.
   { kind: 'database-url-password', pattern: /\b([a-z+]+:\/\/[^\s:/@]+:)([^\s@]+)(@)/gi, group: 2 },
   { kind: 'bearer-header', pattern: /\b(Authorization\s*:\s*(?:Bearer|Basic)\s+)([A-Za-z0-9._~+/=-]{8,})/gi, group: 2 },
+  { kind: 'bearer-header', pattern: /\b(Bearer\s+)([A-Za-z0-9._~+/=-]{8,})/gi, group: 2 },
+  // Connection strings may contain spaces (for example an SSH command), so
+  // redact their entire line rather than only the first token.
+  { kind: 'env-assignment', pattern: /\b(RUNPOD_CONNECTION\s*[=:]\s*)([^\r\n]+)/gi, group: 2 },
   // KEY=value / KEY: "value" for known-sensitive names.
-  { kind: 'env-assignment', pattern: new RegExp(`\\b(${SENSITIVE_ENV_KEYS})\\s*[=:]\\s*["']?([^\\s"',}]+)`, 'gi'), group: 2 },
+  {
+    kind: 'env-assignment',
+    pattern: new RegExp(
+      `\\b(${SENSITIVE_ENV_KEYS})\\s*[=:]\\s*["']?` +
+        '(?!(?:process|import\\.meta)\\.env\\.)' +
+        '([^\\s"\',}]+)',
+      'gi',
+    ),
+    group: 2,
+  },
 ];
 
 export const REDACTED = '[REDACTED]';
+
+const PROTECTED_BASENAMES = new Set([
+  '.npmrc',
+  '.pypirc',
+  '.netrc',
+  'application_default_credentials.json',
+  'id_rsa',
+  'id_ed25519',
+  'runpodssh.txt',
+]);
+
+/**
+ * Files whose contents must never be returned through ordinary agent tools.
+ * Public-key companions (`*.pub`) are intentionally not included.
+ */
+export function isProtectedSecretPath(pathText: string): boolean {
+  const normalized = pathText.replace(/\\/g, '/').toLowerCase();
+  const basename = normalized.split('/').pop() ?? normalized;
+
+  return (
+    basename === '.env' ||
+    basename.startsWith('.env.') ||
+    basename.endsWith('.pem') ||
+    basename.endsWith('.key') ||
+    PROTECTED_BASENAMES.has(basename) ||
+    basename.startsWith('credentials') ||
+    basename.startsWith('secrets') ||
+    basename.includes('private-key') ||
+    basename.includes('private_key') ||
+    /(?:^|\/)\.aws\/credentials$/.test(normalized) ||
+    /(?:service[-_]?account|credential[-_]?export).*\.json$/.test(basename)
+  );
+}
+
+export interface ProtectedVariable {
+  name: string;
+  line: number;
+}
+
+/** Extracts names and locations from env/INI/YAML/JSON-style configuration, never values. */
+export function extractProtectedVariables(content: string): ProtectedVariable[] {
+  const variables: ProtectedVariable[] = [];
+  const seen = new Set<string>();
+
+  for (const [index, line] of content.split(/\r?\n/).entries()) {
+    const match = /^\s*(?:export\s+)?["']?([A-Za-z_][A-Za-z0-9_.-]*)["']?\s*(?:=|:)\s*/.exec(line);
+    if (!match || seen.has(match[1])) continue;
+    seen.add(match[1]);
+    variables.push({ name: match[1], line: index + 1 });
+  }
+
+  return variables.slice(0, 500);
+}
+
+export function summarizeProtectedFile(path: string, content: string, bytes?: number): {
+  path: string;
+  protected: true;
+  variables: string[];
+  bytes?: number;
+} {
+  return {
+    path,
+    protected: true,
+    variables: extractProtectedVariables(content).map(({ name }) => name),
+    ...(bytes === undefined ? {} : { bytes }),
+  };
+}
 
 export interface SecretFinding {
   kind: SecretKind;
@@ -110,7 +199,10 @@ export function redactDeep<T>(value: T): T {
   if (value && typeof value === 'object') {
     const result: Record<string, unknown> = {};
     for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
-      result[key] = redactDeep(item);
+      const sensitiveKey = new RegExp(`^(?:${SENSITIVE_ENV_KEYS})$`, 'i').test(key);
+      const credentialReference =
+        typeof item === 'string' && /^(?:process|import\.meta)\.env\.[A-Za-z_][A-Za-z0-9_]*$/.test(item);
+      result[key] = sensitiveKey && item != null && !credentialReference ? REDACTED : redactDeep(item);
     }
     return result as T;
   }

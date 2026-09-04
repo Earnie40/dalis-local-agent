@@ -3,10 +3,13 @@ import {
 } from 'node:crypto';
 
 import {
+  createReadStream,
+} from 'node:fs';
+
+import {
   access,
   copyFile,
   mkdir,
-  readFile,
   rm,
   stat,
 } from 'node:fs/promises';
@@ -167,28 +170,39 @@ async function hashFile(
     );
   }
 
-  /*
-   * Repository source/config files should remain bounded.
-   * Large generated/binary artifacts should use a different
-   * recovery strategy rather than bloating transaction backups.
-   */
-  if (
-    info.size >
-    16 * 1024 * 1024
-  ) {
-    throw new Error(
-      `File exceeds 16 MiB transaction snapshot limit: ${path}`,
+  const digest =
+    createHash(
+      'sha256',
     );
-  }
 
-  const bytes =
-    await readFile(path);
+  await new Promise(
+    (
+      resolveHash,
+      rejectHash,
+    ) => {
+      const stream =
+        createReadStream(
+          path,
+        );
 
-  return createHash(
-    'sha256',
-  )
-    .update(bytes)
-    .digest('hex');
+      stream.on(
+        'data',
+        (chunk) => digest.update(chunk),
+      );
+
+      stream.on(
+        'error',
+        rejectHash,
+      );
+
+      stream.on(
+        'end',
+        resolveHash,
+      );
+    },
+  );
+
+  return digest.digest('hex');
 }
 
 function backupName(

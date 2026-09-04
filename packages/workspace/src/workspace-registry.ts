@@ -21,6 +21,12 @@ interface WorkspaceRow {
   updated_at: Date;
 }
 
+function assertCapabilityInvariant(capabilities: WorkspaceCapabilities): void {
+  if (!capabilities.read && (capabilities.write || capabilities.shell)) {
+    throw new Error('Workspace write and shell capabilities require read capability.');
+  }
+}
+
 function toDescriptor(row: WorkspaceRow): WorkspaceDescriptor {
   return {
     id: row.id,
@@ -93,6 +99,7 @@ export class PostgresWorkspaceRegistry implements WorkspaceRegistry {
   }
 
   async updateCapabilities(id: string, capabilities: WorkspaceCapabilities): Promise<WorkspaceDescriptor | undefined> {
+    assertCapabilityInvariant(capabilities);
     const { rows } = await getPool().query<WorkspaceRow>(
       `UPDATE workspaces
           SET read_access = $2,
@@ -108,6 +115,7 @@ export class PostgresWorkspaceRegistry implements WorkspaceRegistry {
   }
 
   async create(workspace: WorkspaceInput): Promise<WorkspaceDescriptor> {
+    assertCapabilityInvariant(workspace.capabilities);
     const rootPath = resolve(workspace.rootPath);
 
     if (!existsSync(rootPath) || !statSync(rootPath).isDirectory()) {

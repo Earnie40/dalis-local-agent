@@ -2,6 +2,7 @@
   "name": "dacai-local-agent",
   "private": true,
   "version": "0.1.0",
+  "license": "UNLICENSED",
   "packageManager": "pnpm@9.15.0",
   "workspaces": [
     "apps/*",
@@ -16,7 +17,10 @@
     "typecheck": "pnpm -r exec tsc --noEmit",
     "test": "vitest run",
     "lint": "pnpm -r exec eslint . --ext .ts,.tsx",
+    "model:install:qwen-uncensored": "ollama pull huihui_ai/qwen3-abliterated:8b",
     "tomahawk": "node scripts/tomahawk.mjs",
+    "runpod:media": "node --import tsx scripts/runpod-media-up.mjs",
+    "runpod:app": "node --env-file=.env --import tsx scripts/runpod-app-up.mjs",
     "test:providers:live": "node --import tsx scripts/live-provider-check.mjs"
   },
   "devDependencies": {
@@ -28,10 +32,12 @@
     "concurrently": "^9.1.2",
     "eslint": "^9.22.0",
     "fast-check": "^4.9.0",
+    "fastify": "^5.4.0",
     "globals": "^14.0.0",
     "playwright-core": "^1.62.1",
     "tsx": "^4.19.3",
     "typescript": "^5.7.3",
+    "zod": "^3.25.0",
     "vitest": "^2.1.8"
   }
 }

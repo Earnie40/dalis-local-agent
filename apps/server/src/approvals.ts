@@ -42,6 +42,7 @@ const DEFAULT_TIMEOUT_MS = 120_000;
 
 export class ApprovalRegistry {
   private readonly waiters = new Map<string, Waiter>();
+  private readonly approveAllRuns = new Set<string>();
 
   /**
    * Creates a pending request and resolves when a decision arrives, the
@@ -59,6 +60,8 @@ export class ApprovalRegistry {
       input: input.input,
       requestedAt: new Date().toISOString(),
     };
+
+    if (this.approveAllRuns.has(input.runId)) return Promise.resolve(true);
 
     return new Promise<boolean>((resolve) => {
       const settle = (approved: boolean) => {
@@ -84,6 +87,23 @@ export class ApprovalRegistry {
     return true;
   }
 
+  /** Approve all current and future approval-gated calls for one live run. */
+  approveAll(runId: string): number {
+    this.approveAllRuns.add(runId);
+    let approved = 0;
+    for (const waiter of [...this.waiters.values()]) {
+      if (waiter.approval.runId !== runId) continue;
+      waiter.resolve(true);
+      approved += 1;
+    }
+    return approved;
+  }
+
+  /** Remove the run-scoped approval grant when the run ends. */
+  clearRun(runId: string): void {
+    this.approveAllRuns.delete(runId);
+  }
+
   /** Denies every outstanding request for a run — used when the client leaves. */
   cancelRun(runId: string): number {
     let cancelled = 0;
@@ -92,6 +112,7 @@ export class ApprovalRegistry {
       waiter.resolve(false);
       cancelled += 1;
     }
+    this.clearRun(runId);
     return cancelled;
   }
 

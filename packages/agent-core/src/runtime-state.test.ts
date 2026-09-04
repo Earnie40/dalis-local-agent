@@ -2,6 +2,9 @@ import { describe, expect, it } from 'vitest';
 import {
   chooseInitialReasoningMode,
   compactMessagesForRequest,
+  extractChangedPaths,
+  isMutationTool,
+  isValidationTool,
   escalateReasoningMode,
   validationPassed,
 } from './runtime-state';
@@ -33,5 +36,25 @@ describe('runtime state', () => {
     expect(validationPassed({ success: true, output: JSON.stringify({ exitCode: 0 }) })).toBe(true);
     expect(validationPassed({ success: true, output: JSON.stringify({ exitCode: 1 }) })).toBe(false);
     expect(validationPassed({ success: true, output: 'looks good' })).toBe(false);
+    expect(validationPassed({
+      success: true,
+      output: '{}',
+      evidence: [{ kind: 'validation_result', detail: { filesPresent: true, contentHashed: true } }],
+    })).toBe(true);
+  });
+
+  it('tracks engineering outputs as mutations and requires separate artifact validation', () => {
+    expect(isMutationTool('cad.execute')).toBe(true);
+    expect(isValidationTool('cad.execute')).toBe(false);
+    expect(isValidationTool('engineering.artifact.inspect')).toBe(true);
+    expect(extractChangedPaths('cad.execute', {
+      expectedArtifacts: ['output/part.step', 'output/part.stl'],
+      outputPath: 'output/part.step',
+      scriptPath: 'models/part.py',
+    })).toEqual(['output/part.step', 'output/part.stl']);
+    expect(isMutationTool('image.generate')).toBe(true);
+    expect(extractChangedPaths('image.generate', { outputPath: 'output/person.png' })).toEqual(['output/person.png']);
+    expect(isMutationTool('video.generate')).toBe(true);
+    expect(extractChangedPaths('video.generate', { outputPath: 'output/person.mp4' })).toEqual(['output/person.mp4']);
   });
 });

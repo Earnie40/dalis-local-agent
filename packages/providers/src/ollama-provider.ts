@@ -37,8 +37,9 @@ interface OllamaMessage {
    * Some reasoning-capable Ollama models expose their internal reasoning pass
    * separately.
    *
-   * Hidden reasoning is deliberately never surfaced as assistant content or
-   * persisted. Streaming only emits a `thinking` activity marker.
+  * This is separate from assistant content. Callers may display it as
+  * model-emitted reasoning output, but it is not a dump of neural-network
+  * internals and must not be presented as guaranteed-faithful thought.
    */
   thinking?: string;
 
@@ -412,16 +413,12 @@ export class OllamaProvider
     }
 
     if (!response.ok) {
-      /**
-       * Deliberately avoid including the raw response body in the thrown
-       * exception.
-       *
-       * Provider bodies can contain prompt fragments, gateway diagnostics, or
-       * other environment-specific material that should not automatically
-       * enter logs.
-       */
+      const detail = sanitizeOllamaErrorBody(
+        await response.text().catch(() => ''),
+      );
       throw new OllamaProviderError(
-        `Ollama instance "${this.instanceId}" returned HTTP ${response.status} for ${path}.`,
+        `Ollama instance "${this.instanceId}" returned HTTP ${response.status} for ${path}.` +
+          (detail ? ` ${detail}` : ''),
         this.instanceId,
       );
     }
@@ -445,9 +442,12 @@ export class OllamaProvider
 
           body:
             JSON.stringify(
-              this.buildChatBody(
+              buildOllamaChatBody(
                 input,
                 false,
+                this.supportsThinking(
+                  input.model,
+                ),
               ),
             ),
 
@@ -533,6 +533,8 @@ export class OllamaProvider
     return {
       content,
 
+      thinking: payload.message?.thinking,
+
       toolCalls:
         toolCalls.length > 0
           ? toolCalls
@@ -587,9 +589,12 @@ export class OllamaProvider
 
           body:
             JSON.stringify(
-              this.buildChatBody(
+              buildOllamaChatBody(
                 input,
                 true,
+                this.supportsThinking(
+                  input.model,
+                ),
               ),
             ),
 
@@ -832,9 +837,6 @@ export class OllamaProvider
             }
           }
 
-          /**
-           * Hidden reasoning is represented only as activity.
-           */
           if (
             payload.message
               ?.thinking
@@ -842,6 +844,8 @@ export class OllamaProvider
             yield {
               type:
                 'thinking',
+
+              content: payload.message.thinking,
             };
           }
 
@@ -977,6 +981,8 @@ export class OllamaProvider
           yield {
             type:
               'thinking',
+
+            content: payload.message.thinking,
           };
         }
 
@@ -1054,100 +1060,6 @@ export class OllamaProvider
     }
   }
 
-  private buildChatBody(
-    input: ModelChatRequest,
-
-    stream: boolean,
-  ): Record<
-    string,
-    unknown
-  > {
-    const messages =
-      input.systemPrompt
-        ? [
-            {
-              role:
-                'system',
-
-              content:
-                input.systemPrompt,
-            },
-
-            ...input.messages,
-          ]
-        : input.messages;
-
-    const body:
-      Record<
-        string,
-        unknown
-      > = {
-      model:
-        input.model,
-
-      messages:
-        messages.map(
-          (message) => ({
-            role:
-              message.role,
-
-            content:
-              message.content,
-          }),
-        ),
-
-      stream,
-
-      options: {
-        ...(input.temperature !==
-        undefined
-          ? {
-              temperature:
-                input.temperature,
-            }
-          : {}),
-
-        ...(input.maxTokens !==
-        undefined
-          ? {
-              num_predict:
-                input.maxTokens,
-            }
-          : {}),
-
-        ...(input.contextWindowTokens !==
-        undefined
-          ? {
-              num_ctx:
-                input.contextWindowTokens,
-            }
-          : {}),
-      },
-    };
-
-    if (
-      input.tools?.length
-    ) {
-      body.tools =
-        input.tools.map(
-          toOllamaTool,
-        );
-    }
-
-    /**
-     * Only send the reasoning control when explicitly requested.
-     */
-    if (
-      input.think !==
-      undefined
-    ) {
-      body.think =
-        input.think;
-    }
-
-    return body;
-  }
-
   /**
    * Returns only provider-declared capability confidence.
    *
@@ -1172,6 +1084,34 @@ export class OllamaProvider
 
     return declared.includes(
       'tools',
+    )
+      ? 'declared'
+      : 'unsupported';
+  }
+
+  /**
+   * Ollama's `/api/show` capability list is model-specific. Absence of
+   * `thinking` in a returned list means the model rejects the wire option;
+   * absence of model metadata remains unknown and preserves legacy behavior.
+   */
+  supportsThinking(
+    model?: string,
+  ): CapabilityStatus {
+    if (!model) {
+      return 'unknown';
+    }
+
+    const declared =
+      this.declared.get(
+        model,
+      );
+
+    if (!declared) {
+      return 'unknown';
+    }
+
+    return declared.includes(
+      'thinking',
     )
       ? 'declared'
       : 'unsupported';
@@ -1778,11 +1718,139 @@ function findJsonObjectRanges(
   return ranges;
 }
 
+const OLLAMA_SCHEMA_KEYS = new Set([
+  'type', 'description', 'properties', 'required', 'items', 'enum',
+  'additionalProperties', 'minimum', 'maximum', 'exclusiveMinimum',
+  'exclusiveMaximum', 'minLength', 'maxLength', 'minItems', 'maxItems',
+  'pattern', 'anyOf', 'oneOf', 'allOf',
+]);
+
 /**
- * Translate the provider-neutral tool schema into Ollama's function-tool
- * format.
+ * Project a provider-neutral JSON schema onto the conservative subset accepted
+ * by Ollama/llama.cpp tool grammars. The canonical schema remains unchanged and
+ * is still enforced by PermissionedToolExecutor after the model returns.
  */
-function toOllamaTool(
+export function normalizeOllamaToolSchema(
+  input: Record<string, unknown>,
+): Record<string, unknown> {
+  const root = input;
+  const definitions = (
+    root.$defs && typeof root.$defs === 'object' ? root.$defs :
+    root.definitions && typeof root.definitions === 'object' ? root.definitions : {}
+  ) as Record<string, unknown>;
+
+  const visit = (value: unknown, depth = 0): unknown => {
+    if (depth > 24) return {};
+    if (Array.isArray(value)) return value.map((item) => visit(item, depth + 1));
+    if (!value || typeof value !== 'object') return value;
+    const record = value as Record<string, unknown>;
+    if (typeof record.$ref === 'string') {
+      const name = record.$ref.match(/^#\/(?:\$defs|definitions)\/(.+)$/)?.[1];
+      if (name && definitions[name]) return visit(definitions[name], depth + 1);
+    }
+    const normalized: Record<string, unknown> = {};
+    for (const [key, child] of Object.entries(record)) {
+      if (!OLLAMA_SCHEMA_KEYS.has(key)) continue;
+      if (key === 'properties' && child && typeof child === 'object' && !Array.isArray(child)) {
+        normalized.properties = Object.fromEntries(
+          Object.entries(child as Record<string, unknown>).map(([name, schema]) => [name, visit(schema, depth + 1)]),
+        );
+      } else if (key === 'type' && Array.isArray(child)) {
+        normalized.type = child.find((item) => item !== 'null') ?? 'string';
+      } else if (key === 'description' && typeof child === 'string') {
+        normalized.description = child.slice(0, 2_000);
+      } else {
+        normalized[key] = visit(child, depth + 1);
+      }
+    }
+    if (normalized.type === 'object' || normalized.properties) {
+      normalized.type = 'object';
+      normalized.properties = normalized.properties && typeof normalized.properties === 'object'
+        ? normalized.properties
+        : {};
+      if (Array.isArray(normalized.required)) {
+        const propertyNames = new Set(Object.keys(normalized.properties as Record<string, unknown>));
+        normalized.required = normalized.required.filter((name) => typeof name === 'string' && propertyNames.has(name));
+      }
+    }
+    return normalized;
+  };
+
+  const normalized = visit(root) as Record<string, unknown>;
+  return normalized.type === 'object'
+    ? normalized
+    : { type: 'object', properties: { value: normalized } };
+}
+
+export function buildOllamaChatBody(
+  input: ModelChatRequest,
+  stream: boolean,
+  declaredThinking: CapabilityStatus = 'unknown',
+): Record<string, unknown> {
+  const messages = input.systemPrompt
+    ? [{ role: 'system' as const, content: input.systemPrompt }, ...input.messages]
+    : input.messages;
+  const body: Record<string, unknown> = {
+    model: input.model,
+    messages: messages.map((message) => ({
+      role: message.role,
+      content: message.content,
+      ...(message.role === 'assistant' && message.toolCalls?.length
+        ? {
+            tool_calls: message.toolCalls.map((call) => ({
+              function: { name: call.name, arguments: call.arguments },
+            })),
+          }
+        : {}),
+      ...(message.role === 'tool' && message.toolName ? { tool_name: message.toolName } : {}),
+    })),
+    stream,
+    options: {
+      ...(input.temperature !== undefined ? { temperature: input.temperature } : {}),
+      ...(input.maxTokens !== undefined ? { num_predict: input.maxTokens } : {}),
+      ...(input.contextWindowTokens !== undefined ? { num_ctx: input.contextWindowTokens } : {}),
+    },
+  };
+  if (input.tools?.length) body.tools = input.tools.map(toOllamaTool);
+  // Ollama accepts either the literal "json" or a JSON Schema object here.
+  // Passing it through unchanged keeps schema-constrained decoding available
+  // without this layer deciding what a valid schema looks like.
+  if (input.responseFormat !== undefined) body.format = input.responseFormat;
+  const thinkingCapability =
+    input.thinkingCapability ??
+    declaredThinking;
+  if (
+    input.think !== undefined &&
+    thinkingCapability !== 'unsupported'
+  ) {
+    body.think = input.think;
+  }
+  return body;
+}
+
+/** Only the provider's explicit error field is allowed into diagnostics. */
+export function sanitizeOllamaErrorBody(raw: string): string {
+  if (!raw.trim()) return '';
+  let detail = '';
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const candidate = parsed.error ?? parsed.message ?? parsed.detail;
+    if (typeof candidate === 'string') detail = candidate;
+  } catch {
+    detail = '';
+  }
+  if (!detail) return '';
+  const sanitized = detail
+    .replace(/Bearer\s+\S+/gi, 'Bearer [REDACTED]')
+    .replace(/\b(?:sk-|rpa_)[A-Za-z0-9_-]{12,}\b/g, '[REDACTED]')
+    .replace(/https?:\/\/\S+/gi, '[REDACTED_URL]')
+    .replace(/[\r\n\t]+/g, ' ')
+    .slice(0, 500);
+  return sanitized ? `Ollama detail: ${sanitized}` : '';
+}
+
+/** Translate the provider-neutral schema into Ollama's function-tool format. */
+export function toOllamaTool(
   tool: ToolSchema,
 ): Record<
   string,
@@ -1797,10 +1865,10 @@ function toOllamaTool(
         tool.name,
 
       description:
-        tool.description,
+        tool.description.slice(0, 2_000),
 
       parameters:
-        tool.inputSchema,
+        normalizeOllamaToolSchema(tool.inputSchema),
     },
   };
 }

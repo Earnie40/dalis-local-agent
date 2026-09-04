@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { classifyCommand } from '@dacai-local-agent/security';
+import { classifyCommand, sanitizeText } from '@dacai-local-agent/security';
 import type {
   ToolDefinition,
   ToolExecutionContext,
@@ -148,10 +148,7 @@ export function runProcess(
       if (options.signal?.aborted) {
         resolve({
           command:
-            formatCommand(
-              file,
-              args,
-            ),
+            sanitizeText(formatCommand(file, args)),
 
           exitCode: -1,
           stdout: '',
@@ -220,17 +217,14 @@ export function runProcess(
           );
 
           const out =
-            cap(stdout);
+            cap(sanitizeText(stdout));
 
           const err =
-            cap(stderr);
+            cap(sanitizeText(stderr));
 
           resolve({
             command:
-              formatCommand(
-                file,
-                args,
-              ),
+              sanitizeText(formatCommand(file, args)),
 
             exitCode:
               timedOut
@@ -335,7 +329,7 @@ export function runProcess(
             onAbort,
           );
 
-          reject(error);
+          reject(new Error(sanitizeText(error.message)));
         },
       );
 
@@ -429,6 +423,10 @@ export const shellRunTool: ToolDefinition = {
    * classifier currently considers a specific command low risk.
    */
   permissionTier: 'mutation',
+
+  requiresRead: true,
+
+  requiresWrite: true,
 
   requiresShell: true,
 
@@ -657,6 +655,10 @@ export const gitTool: ToolDefinition = {
   },
 
   permissionTier: 'safe',
+
+  requiresRead: true,
+
+  requiresShell: true,
 
   timeoutMs: 30_000,
 
@@ -954,6 +956,10 @@ export const testTool: ToolDefinition = {
    * treated as equivalent to passive file inspection.
    */
   permissionTier: 'mutation',
+
+  requiresRead: true,
+
+  requiresWrite: true,
 
   requiresShell: true,
 

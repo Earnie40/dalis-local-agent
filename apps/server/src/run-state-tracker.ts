@@ -6,6 +6,7 @@ import {
 import {
   rememberFailure,
 } from '@dacai-local-agent/memory';
+import { extractChangedPaths, isMutationTool } from '@dacai-local-agent/agent-core';
 
 interface EventLike {
   type: string;
@@ -137,32 +138,11 @@ export class RunStateTracker {
 
         if (
           !preEditGate &&
-          (
-            tool === 'filesystem.write' ||
-            tool === 'filesystem.edit' ||
-            tool === 'filesystem.move' ||
-            tool === 'filesystem.copy'
-          )
+          isMutationTool(tool)
         ) {
-          pushUnique(
-            this.state.changedFiles ?? [],
-            argumentString(
-              args,
-              'path',
-              'filePath',
-              'destination',
-              'to',
-            ),
-          );
-
-          pushUnique(
-            this.state.changedFiles ?? [],
-            argumentString(
-              args,
-              'source',
-              'from',
-            ),
-          );
+          for (const path of extractChangedPaths(tool, args ?? {})) {
+            pushUnique(this.state.changedFiles ?? [], path);
+          }
         }
 
         if (

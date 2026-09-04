@@ -14,10 +14,14 @@ function estimateTokens(content: string): number {
 }
 
 function truncateToTokens(content: string, tokens: number): string {
-  const chars = Math.max(200, tokens * 4);
+  const chars = Math.max(1, Math.floor(tokens) * 4);
   if (content.length <= chars) return content;
-  const half = Math.max(100, Math.floor((chars - 70) / 2));
-  return `${content.slice(0, half)}\n… [context compacted] …\n${content.slice(-half)}`;
+  const marker = '\n… [context compacted] …\n';
+  if (chars <= marker.length + 2) return content.slice(0, chars);
+  const available = chars - marker.length;
+  const head = Math.ceil(available / 2);
+  const tail = Math.floor(available / 2);
+  return `${content.slice(0, head)}${marker}${content.slice(-tail)}`;
 }
 
 /**
@@ -189,9 +193,9 @@ export class ContextManager {
   }
 
   private applyBudgets(sections: ContextSection[], options: ContextManagerOptions): BuiltContext {
-    const configuredMax = options.maxContextTokens ?? 26000;
+    const configuredMax = Math.max(1, Math.floor(options.maxContextTokens ?? 26000));
     const reserve = Math.max(2048, options.reserveOutputTokens ?? 6000);
-    const maxTokens = Math.max(4000, configuredMax - reserve);
+    const maxTokens = Math.min(configuredMax, Math.max(4000, configuredMax - reserve));
     const budgets = options.priorityBudgets ?? {};
     const priorityOrder: ContextPriority[] = ['critical', 'goal', 'plan', 'state', 'knowledge', 'memory', 'history'];
 

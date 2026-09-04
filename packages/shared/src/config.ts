@@ -23,11 +23,35 @@ export const RoutingPolicySchema = z.enum([
   'local-preferred',
   'manual-provider-selection',
   'configured-fallback',
+  // GPU-first: a reachable REMOTE_GPU_OLLAMA pod serves agent work without an
+  // explicit per-request selection, and local Ollama is the fallback. Paid
+  // providers still require an explicit selection, so preferring the pod never
+  // turns into unattended paid-API spend.
+  'gpu-preferred',
 ]);
 export type RoutingPolicy = z.infer<typeof RoutingPolicySchema>;
 
 export const EscalationModeSchema = z.enum(['never', 'ask', 'automatic', 'budgeted']);
 export type EscalationMode = z.infer<typeof EscalationModeSchema>;
+
+/** Execution depth is independent from provider routing and tool authority. */
+export const AgentRunModeSchema = z.enum(['interactive', 'coding', 'repository_audit', 'deep_research']);
+export type AgentRunMode = z.infer<typeof AgentRunModeSchema>;
+
+export const AgentRunBudgetSchema = z.object({
+  maxTurns: z.number().int().positive(),
+  maxToolCalls: z.number().int().positive(),
+  /** Turns reserved for evidence consolidation, synthesis, and verification. */
+  synthesisReserveTurns: z.number().int().nonnegative().default(0),
+});
+export type AgentRunBudget = z.infer<typeof AgentRunBudgetSchema>;
+
+export const DEFAULT_AGENT_RUN_BUDGETS: Record<AgentRunMode, AgentRunBudget> = {
+  interactive: { maxTurns: 16, maxToolCalls: 32, synthesisReserveTurns: 0 },
+  coding: { maxTurns: 40, maxToolCalls: 96, synthesisReserveTurns: 6 },
+  repository_audit: { maxTurns: 80, maxToolCalls: 160, synthesisReserveTurns: 20 },
+  deep_research: { maxTurns: 100, maxToolCalls: 200, synthesisReserveTurns: 25 },
+};
 
 /** Environment variable names only; never secret values. */
 const EnvVarNameSchema = z
@@ -91,8 +115,11 @@ export function isLoopbackUrl(url: string): boolean {
 }
 
 export const ModelAliasSchema = z.enum([
+  'agent',
+  'planner',
   'fast',
   'chat',
+  'qwen_uncensored',
   'coder',
   'reasoner',
   'reviewer',
@@ -102,6 +129,16 @@ export const ModelAliasSchema = z.enum([
   'hf_reasoner',
   'sol',
   'claude',
+  'intelligence',
+  'intelligence_local',
+  'gpu_agent',
+  'gpu_planner',
+  'gpu_reasoner',
+  'gpu_coder',
+  'gpu_structured_agent',
+  'gpu_reviewer',
+  'gpu_chat',
+  'gpu_qwen_uncensored',
 ]);
 export type ModelAlias = z.infer<typeof ModelAliasSchema>;
 
@@ -143,7 +180,13 @@ export const AppConfigSchema = z
     limits: z
       .object({
         maxLocalWorkers: z.number().int().positive().default(3),
-        maxAgentTurns: z.number().int().positive().default(50),
+        maxAgentTurns: z.number().int().positive().default(100),
+        runBudgets: z.object({
+          interactive: AgentRunBudgetSchema.default(DEFAULT_AGENT_RUN_BUDGETS.interactive),
+          coding: AgentRunBudgetSchema.default(DEFAULT_AGENT_RUN_BUDGETS.coding),
+          repository_audit: AgentRunBudgetSchema.default(DEFAULT_AGENT_RUN_BUDGETS.repository_audit),
+          deep_research: AgentRunBudgetSchema.default(DEFAULT_AGENT_RUN_BUDGETS.deep_research),
+        }).default(DEFAULT_AGENT_RUN_BUDGETS),
         maxTaskDepth: z.number().int().positive().default(3),
         maxConcurrentModelRequests: z.number().int().positive().default(2),
       })
@@ -192,6 +235,13 @@ function truthy(value: string | undefined): boolean {
 /** Build all provider instances without ever storing credential values. */
 export function buildProviderInstances(env: NodeJS.ProcessEnv = process.env): Record<string, unknown> {
   const hfTokenVar = env.HF_TOKEN ? 'HF_TOKEN' : env.HUGGINGFACE_API_KEY ? 'HUGGINGFACE_API_KEY' : undefined;
+  // A valid API key is enough to discover a running pod and its current SSH
+  // endpoint. RUNPOD_CONNECTION remains useful as a warm/statically supplied
+  // path, but it must not be required for GPU-first routing after a pod restart.
+  const runpodConfigured = Boolean(
+    env.RUNPOD_CONNECTION?.trim() || env.RUNPOD_API_KEY?.trim(),
+  );
+  const runpodLocalPort = Number(env.RUNPOD_LOCAL_OLLAMA_PORT ?? 11435);
 
   return {
     local_ollama: {
@@ -206,13 +256,18 @@ export function buildProviderInstances(env: NodeJS.ProcessEnv = process.env): Re
     remote_gpu_ollama: {
       id: 'remote_gpu_ollama',
       kind: 'ollama',
-      baseUrl: env.OLLAMA_REMOTE_BASE_URL || undefined,
-      enabled: truthy(env.OLLAMA_REMOTE_ENABLED),
+      baseUrl:
+        env.OLLAMA_REMOTE_BASE_URL ||
+        (runpodConfigured ? `http://127.0.0.1:${runpodLocalPort}` : undefined),
+      enabled: truthy(env.OLLAMA_REMOTE_ENABLED) || runpodConfigured,
       usageClass: 'REMOTE_GPU_OLLAMA',
       transport: env.OLLAMA_REMOTE_TRANSPORT ?? 'ssh-tunnel',
       proxyUrl: env.OLLAMA_REMOTE_SOCKS5_PROXY || env.OUTBOUND_SOCKS5_PROXY || undefined,
       proxyRequired: truthy(env.OUTBOUND_PROXY_REQUIRED),
       authTokenEnvVar: env.OLLAMA_REMOTE_AUTH_TOKEN ? 'OLLAMA_REMOTE_AUTH_TOKEN' : undefined,
+      requestTimeoutMs: Number(env.RUNPOD_OLLAMA_REQUEST_TIMEOUT_MS ?? env.OLLAMA_REQUEST_TIMEOUT_MS ?? 300_000),
+      // A stopped or unreachable pod must degrade to local inference rather
+      // than failing the run outright.
       fallbackInstanceId: 'local_ollama',
     },
     huggingface: {
@@ -245,6 +300,30 @@ export function buildProviderInstances(env: NodeJS.ProcessEnv = process.env): Re
       requestTimeoutMs: Number(env.OPENAI_REQUEST_TIMEOUT_MS ?? 120_000),
     },
   };
+}
+
+/**
+ * An alias is only as available as the provider behind it. Deriving this keeps
+ * a switch like HF_PROVIDER_ENABLED authoritative in one place: without it,
+ * every alias on a disabled provider still reaches the UI model picker, where
+ * routing then rejects the request instead of the alias simply not being
+ * offered. Aliases on an *enabled* provider are left alone even when the far
+ * side is unreachable, so a stopped RunPod stays a runtime condition rather
+ * than becoming a config change.
+ */
+function disableAliasesOnInactiveProviders(config: AppConfig, warnings: string[]): void {
+  const disabled: string[] = [];
+
+  for (const [alias, model] of Object.entries(config.models)) {
+    if (!model.enabled) continue;
+    if (config.providerInstances[model.providerInstanceId]?.enabled) continue;
+    config.models[alias] = { ...model, enabled: false };
+    disabled.push(`${alias} (${model.providerInstanceId})`);
+  }
+
+  if (disabled.length > 0) {
+    warnings.push(`Model aliases disabled because their provider is not active: ${disabled.join(', ')}.`);
+  }
 }
 
 export interface LoadAppConfigOptions {
@@ -283,11 +362,34 @@ export function loadAppConfigResult(
     models,
     limits: {
       maxLocalWorkers: Number(env.MAX_LOCAL_WORKERS ?? 3),
-      maxAgentTurns: Number(env.MAX_AGENT_TURNS ?? 50),
+      maxAgentTurns: Number(env.MAX_AGENT_TURNS ?? 100),
+      runBudgets: {
+        interactive: {
+          maxTurns: Number(env.AGENT_INTERACTIVE_MAX_TURNS ?? DEFAULT_AGENT_RUN_BUDGETS.interactive.maxTurns),
+          maxToolCalls: Number(env.AGENT_INTERACTIVE_MAX_TOOL_CALLS ?? DEFAULT_AGENT_RUN_BUDGETS.interactive.maxToolCalls),
+          synthesisReserveTurns: DEFAULT_AGENT_RUN_BUDGETS.interactive.synthesisReserveTurns,
+        },
+        coding: {
+          maxTurns: Number(env.AGENT_CODING_MAX_TURNS ?? DEFAULT_AGENT_RUN_BUDGETS.coding.maxTurns),
+          maxToolCalls: Number(env.AGENT_CODING_MAX_TOOL_CALLS ?? DEFAULT_AGENT_RUN_BUDGETS.coding.maxToolCalls),
+          synthesisReserveTurns: Number(env.AGENT_CODING_SYNTHESIS_RESERVE_TURNS ?? DEFAULT_AGENT_RUN_BUDGETS.coding.synthesisReserveTurns),
+        },
+        repository_audit: {
+          maxTurns: Number(env.AGENT_REPOSITORY_AUDIT_MAX_TURNS ?? DEFAULT_AGENT_RUN_BUDGETS.repository_audit.maxTurns),
+          maxToolCalls: Number(env.AGENT_REPOSITORY_AUDIT_MAX_TOOL_CALLS ?? DEFAULT_AGENT_RUN_BUDGETS.repository_audit.maxToolCalls),
+          synthesisReserveTurns: Number(env.AGENT_REPOSITORY_AUDIT_SYNTHESIS_RESERVE_TURNS ?? DEFAULT_AGENT_RUN_BUDGETS.repository_audit.synthesisReserveTurns),
+        },
+        deep_research: {
+          maxTurns: Number(env.AGENT_DEEP_RESEARCH_MAX_TURNS ?? DEFAULT_AGENT_RUN_BUDGETS.deep_research.maxTurns),
+          maxToolCalls: Number(env.AGENT_DEEP_RESEARCH_MAX_TOOL_CALLS ?? DEFAULT_AGENT_RUN_BUDGETS.deep_research.maxToolCalls),
+          synthesisReserveTurns: Number(env.AGENT_DEEP_RESEARCH_SYNTHESIS_RESERVE_TURNS ?? DEFAULT_AGENT_RUN_BUDGETS.deep_research.synthesisReserveTurns),
+        },
+      },
       maxTaskDepth: Number(env.MAX_TASK_DEPTH ?? 3),
       maxConcurrentModelRequests: Number(env.MAX_CONCURRENT_MODEL_REQUESTS ?? 2),
     },
   });
+  disableAliasesOnInactiveProviders(config, warnings);
   return { config, warnings };
 }
 
@@ -303,7 +405,13 @@ export function loadAppConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     defaultEscalationMode: env.DEFAULT_ESCALATION_MODE ?? 'ask',
     limits: {
       maxLocalWorkers: Number(env.MAX_LOCAL_WORKERS ?? 3),
-      maxAgentTurns: Number(env.MAX_AGENT_TURNS ?? 50),
+      maxAgentTurns: Number(env.MAX_AGENT_TURNS ?? 100),
+      runBudgets: {
+        interactive: DEFAULT_AGENT_RUN_BUDGETS.interactive,
+        coding: DEFAULT_AGENT_RUN_BUDGETS.coding,
+        repository_audit: DEFAULT_AGENT_RUN_BUDGETS.repository_audit,
+        deep_research: DEFAULT_AGENT_RUN_BUDGETS.deep_research,
+      },
       maxTaskDepth: Number(env.MAX_TASK_DEPTH ?? 3),
       maxConcurrentModelRequests: Number(env.MAX_CONCURRENT_MODEL_REQUESTS ?? 2),
     },

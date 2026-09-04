@@ -68,6 +68,8 @@ export class PermissionedToolExecutor implements ToolExecutor {
       tier: tool.permissionTier,
       capabilities: this.options.capabilities,
       command: typeof call.arguments.command === 'string' ? call.arguments.command : undefined,
+      autoApprove: tool.autoApprove,
+      requiresRead: tool.requiresRead,
       requiresWrite: tool.requiresWrite,
       requiresShell: tool.requiresShell,
       requiresNetwork: tool.requiresNetwork,
@@ -176,6 +178,37 @@ function extractEvidence(
 
   if (typeof record.status === 'number') {
     evidence.push({ kind: 'http_status', summary: `${toolName} returned HTTP ${record.status}` });
+  }
+
+  if (Array.isArray(record.artifacts)) {
+    for (const artifact of record.artifacts.slice(0, 50)) {
+      if (!artifact || typeof artifact !== 'object') continue;
+      const item = artifact as Record<string, unknown>;
+      if (typeof item.path !== 'string' || typeof item.sha256 !== 'string') continue;
+      evidence.push({
+        kind: 'artifact_hash',
+        summary: `${toolName} verified artifact ${item.path}`,
+        detail: {
+          path: item.path,
+          sha256: item.sha256,
+          ...(typeof item.format === 'string' ? { format: item.format } : {}),
+          ...(typeof item.bytes === 'number' ? { bytes: item.bytes } : {}),
+        },
+      });
+    }
+  }
+
+  if (record.validation && typeof record.validation === 'object') {
+    const validation = record.validation as Record<string, unknown>;
+    const checks = Object.entries(validation).filter(([, value]) => typeof value === 'boolean');
+    if (checks.length) {
+      const passed = checks.every(([, value]) => value === true);
+      evidence.push({
+        kind: 'validation_result',
+        summary: `${toolName} validation checks ${passed ? 'passed' : 'did not all pass'}`,
+        detail: Object.fromEntries(checks),
+      });
+    }
   }
 
   return evidence;

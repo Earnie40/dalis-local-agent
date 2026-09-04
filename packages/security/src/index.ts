@@ -1,6 +1,7 @@
 export * from './permission-engine';
 export * from './command-classifier';
 export * from './path-containment';
+export * from './public-url-guard';
 export * from './redaction';
 export * from './types';
 export * from './red-team-types';

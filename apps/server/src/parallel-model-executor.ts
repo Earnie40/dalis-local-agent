@@ -51,11 +51,12 @@ export interface ParallelParticipantResult {
   error?: string;
 }
 
-export type ParallelLoopResult = Pick<
+type ParallelLoopResultFields = Pick<
   AgentLoopResult,
   | 'taskId'
   | 'answer'
   | 'stopReason'
+  | 'completionState'
   | 'turns'
   | 'toolCalls'
   | 'rejectedCalls'
@@ -66,6 +67,15 @@ export type ParallelLoopResult = Pick<
   | 'workingState'
   | 'error'
 >;
+
+/**
+ * Older/remote participants may predate the authoritative completion-state
+ * field. Keep accepting those packets at this boundary and use the mechanical
+ * stop reason only as a compatibility fallback.
+ */
+export type ParallelLoopResult = Omit<ParallelLoopResultFields, 'completionState'> & {
+  completionState?: AgentLoopResult['completionState'];
+};
 
 export interface ParallelWorkerSuccess {
   result: ParallelLoopResult;
@@ -118,6 +128,7 @@ const READ_ONLY_TOOL_NAMES = new Set([
   'code.symbol.callers',
   'code.symbol.callees',
   'code.symbol.impact',
+  'code.path.trace',
   'code.architecture.context',
   'code.failure.recall',
   'code.working-state.get',
@@ -139,9 +150,16 @@ function safeVisibleAnswer(value: string): string | undefined {
 }
 
 function statusFor(result: ParallelLoopResult): AgentEvidencePacket['status'] {
+  if (result.completionState === 'CANCELLED') return 'cancelled';
+  if (result.completionState === 'GOAL_COMPLETE' || result.completionState === 'VERIFICATION_COMPLETE') return 'completed';
+  if (result.completionState === 'FAILED') return 'failed';
+  if (result.completionState !== undefined) return 'partial';
+
+  // Compatibility for version-skewed worker packets. New workers should
+  // always send completionState because stopReason alone is less expressive.
   if (result.stopReason === 'cancelled') return 'cancelled';
-  if (result.stopReason === 'final-answer') return 'completed';
   if (result.stopReason === 'provider-error') return 'failed';
+  if (result.stopReason === 'final-answer') return 'completed';
   return 'partial';
 }
 
@@ -150,6 +168,8 @@ export function roleForParallelParticipant(alias: string): ParallelParticipantRo
   switch (alias) {
     case 'coder':
       return 'repository-explorer';
+    case 'gpu_coder':
+      return 'implementation-specialist';
     case 'claude':
       return 'architecture-reviewer';
     case 'sol':
@@ -174,8 +194,8 @@ export function normalizeParallelParticipants(
   if (participants.length < 2) {
     throw new Error('Parallel execution requires at least two explicitly selected participants.');
   }
-  if (participants.length > 3) {
-    throw new Error('Parallel execution supports at most three participants.');
+  if (participants.length > 4) {
+    throw new Error('Parallel execution supports at most four participants.');
   }
   if (unique(participants).length !== participants.length) {
     throw new Error('Parallel execution participants must be unique.');

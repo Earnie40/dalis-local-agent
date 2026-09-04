@@ -17,11 +17,20 @@ export default defineConfig({
       { find: '@dacai-local-agent/tools', replacement: packageSrc('tools') },
       { find: '@dacai-local-agent/orchestrator', replacement: packageSrc('orchestrator') },
       { find: '@dacai-local-agent/agents', replacement: packageSrc('agents') },
+      { find: '@dacai-local-agent/domain-knowledge', replacement: packageSrc('domain-knowledge') },
+      { find: '@dacai-local-agent/rag', replacement: packageSrc('rag') },
+      { find: '@dacai-local-agent/smart-contract', replacement: packageSrc('smart-contract') },
+      { find: '@dacai-local-agent/datasets', replacement: packageSrc('datasets') },
+      { find: '@dacai-local-agent/market-intelligence', replacement: packageSrc('market-intelligence') },
+      { find: '@dacai-local-agent/model-registry', replacement: packageSrc('model-registry') },
+      { find: '@dacai-local-agent/investor-intelligence', replacement: packageSrc('investor-intelligence') },
     ],
   },
   test: {
     environment: 'node',
-    include: ['tests/**/*.test.ts'],
+    // Package-local tests exercise private state-machine helpers that are not
+    // exposed through the public test tree. Keep both locations discoverable.
+    include: ['tests/**/*.test.ts', 'packages/**/*.test.ts'],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'html'],

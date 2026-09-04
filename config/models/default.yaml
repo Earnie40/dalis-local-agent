@@ -11,13 +11,25 @@
 # IMPORTANT:
 # Capability is determined by runtime probes, not assumptions in this file.
 #
+# HOST SELECTION:
+# Under ROUTING_POLICY=gpu-preferred a role alias runs on the RunPod GPU when
+# its `gpu_<role>` twin below is reachable and serving the named model. Local
+# Ollama is the fallback, never the silent default: when the pod is stopped,
+# unreachable, or missing the model, the run reports which of those it was.
+#
 # Current measured capabilities:
+#
+#   huihui_ai/qwen3-abliterated:8b
+#     - tool calling VERIFIED
+#     - structured tool channel VERIFIED
+#     - streaming VERIFIED
+#     - default chat and coding model
 #
 #   qwen3:8b
 #     - tool calling VERIFIED
 #     - structured tool channel VERIFIED
 #     - multi-turn agent loop VERIFIED
-#     - primary local autonomous agent
+#     - planner, reasoner and supporting autonomous roles
 #
 #   qwen2.5-coder
 #     - tool calling VERIFIED through text-json
@@ -97,7 +109,7 @@ models:
   # patterns over creative invention.
   coder:
     provider: local_ollama
-    model: qwen3:8b
+    model: huihui_ai/qwen3-abliterated:8b
     temperature: 0.08
 
   # Explicit alias for tool-loop execution when the caller specifically needs
@@ -131,14 +143,27 @@ models:
   # CHAT
   # ---------------------------------------------------------------------------
   #
-  # Fast conversational/default completion role.
-  #
-  # qwen2.5-coder is retained because it performs well for short questions and
-  # ordinary code explanations. It MUST NOT automatically receive autonomous
-  # multi-turn tool-loop authority.
+  # Default conversational/completion role. This uses the same low-refusal
+  # checkpoint as the coding executor, with a chat-oriented temperature.
   chat:
     provider: local_ollama
-    model: qwen2.5-coder:latest
+    model: huihui_ai/qwen3-abliterated:8b
+    temperature: 0.2
+
+  # ---------------------------------------------------------------------------
+  # OPTIONAL LOW-REFUSAL QWEN CHAT MODEL
+  # ---------------------------------------------------------------------------
+  #
+  # Community abliterated Qwen checkpoint. This alias changes model behavior,
+  # not application authority: filesystem, shell, network and mutation access
+  # still pass through the normal DACAIS permission and audit boundaries.
+  #
+  # Install it with: pnpm model:install:qwen-uncensored
+  # The agent loop admits it only if the runtime tool-capability probe passes;
+  # it remains usable for ordinary chat when tool calling is not verified.
+  qwen_uncensored:
+    provider: local_ollama
+    model: huihui_ai/qwen3-abliterated:8b
     temperature: 0.2
 
   # ---------------------------------------------------------------------------
@@ -184,6 +209,85 @@ models:
     temperature: 0.15
 
   # ---------------------------------------------------------------------------
+  # ECOSYSTEM / INVESTOR INTELLIGENCE
+  # ---------------------------------------------------------------------------
+  #
+  # Theme extraction, semantic matching, opportunity analysis, mock diligence,
+  # memo and content drafting. Advisory-class work: no tool authority is granted
+  # on this path, so a verified tool-calling probe is not required.
+  #
+  # `intelligence` prefers the RunPod GPU instance. `intelligence_local` is the
+  # named fallback, used when the pod is unreachable. The fallback is recorded
+  # on the result rather than applied silently -- see
+  # packages/providers/src/structured-generation.ts.
+  intelligence:
+    provider: remote_gpu_ollama
+    model: ${RUNPOD_OLLAMA_MODEL}
+    temperature: 0.2
+
+  intelligence_local:
+    provider: local_ollama
+    model: qwen3:8b
+    temperature: 0.2
+
+  # ---------------------------------------------------------------------------
+  # GPU TWINS
+  # ---------------------------------------------------------------------------
+  #
+  # Each `gpu_<role>` alias is the RunPod counterpart of the local `<role>`
+  # alias above. Under ROUTING_POLICY=gpu-preferred the provider registry
+  # resolves `<role>` to `gpu_<role>` whenever the pod answers an inference
+  # request AND already serves the model named here; otherwise the local alias
+  # runs and the reason is reported on the run.
+  #
+  # The pairing is by NAME on purpose. Promoting by provider instance alone
+  # would carry the local model name to the pod, which serves a different
+  # (usually larger) checkpoint, and the request would fail at inference time.
+  #
+  # Keep the temperatures aligned with the local twin so moving hosts does not
+  # silently change sampling behavior. These aliases stay individually
+  # selectable, so a run can still be pinned to the GPU explicitly.
+  gpu_agent:
+    provider: remote_gpu_ollama
+    model: qwen3:8b
+    temperature: 0.15
+
+  gpu_planner:
+    provider: remote_gpu_ollama
+    model: qwen3:8b
+    temperature: 0.25
+
+  gpu_reasoner:
+    provider: remote_gpu_ollama
+    model: qwen3:8b
+    temperature: 0.25
+
+  gpu_coder:
+    provider: remote_gpu_ollama
+    model: huihui_ai/qwen3-abliterated:8b
+    temperature: 0.08
+
+  gpu_structured_agent:
+    provider: remote_gpu_ollama
+    model: qwen3:8b
+    temperature: 0.05
+
+  gpu_reviewer:
+    provider: remote_gpu_ollama
+    model: qwen3:8b
+    temperature: 0.22
+
+  gpu_chat:
+    provider: remote_gpu_ollama
+    model: huihui_ai/qwen3-abliterated:8b
+    temperature: 0.2
+
+  gpu_qwen_uncensored:
+    provider: remote_gpu_ollama
+    model: huihui_ai/qwen3-abliterated:8b
+    temperature: 0.2
+
+  # ---------------------------------------------------------------------------
   # HUGGING FACE ADVISORY / FALLBACK ROLES
   # ---------------------------------------------------------------------------
   #
@@ -192,14 +296,14 @@ models:
   # They MUST NOT receive tool authority merely because the underlying model
   # family supports tools elsewhere. The configured provider adapter itself
   # must pass the project's capability contract.
+  #
+  # None of these need an explicit `enabled` flag: config loading disables every
+  # alias whose provider instance is inactive, so HF_PROVIDER_ENABLED (plus a
+  # token) is the single switch that decides whether they appear in the picker.
 
   hf_reasoner:
     provider: huggingface
     model: ${HF_DEFAULT_MODEL}
-    # Disabled: HF_PROVIDER_ENABLED=false and no API key configured. Leaving this
-    # enabled surfaces it in the UI model picker, where manual-provider-selection
-    # routing then rejects every chat request with a 400.
-    enabled: false
     temperature: 0.25
 
   hf_llama:

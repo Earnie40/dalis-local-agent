@@ -14,7 +14,7 @@ import {
   saveWorkingState,
 } from '@dacai-local-agent/context';
 
-const MUTATION_TOOLS = new Set([
+const FILE_MUTATION_TOOLS = new Set([
   'filesystem.edit',
   'filesystem.write',
   'filesystem.move',
@@ -144,7 +144,7 @@ implements ToolExecutor {
       );
 
     if (
-      !MUTATION_TOOLS.has(call.name) ||
+      !FILE_MUTATION_TOOLS.has(call.name) ||
       !result.success ||
       result.denied ||
       isImpactGate(result)

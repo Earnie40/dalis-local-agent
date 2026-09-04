@@ -9,7 +9,7 @@ import type {
  * Bumped whenever the probe itself changes, so cached results from an older
  * probe are re-run rather than trusted.
  */
-export const PROBE_VERSION = 1;
+export const PROBE_VERSION = 3;
 
 /**
  * A trivial, side-effect-free tool. The model is asked to call it with one
@@ -50,12 +50,16 @@ export async function probeCapabilities(
   options: ProbeOptions = {},
 ): Promise<ProviderCapabilities> {
   const declaredToolCalling = provider.supportsTools(model);
+  const declaredConfigurableThinking =
+    provider.supportsThinking?.(model) ?? 'unknown';
   const timeout = AbortSignal.timeout(options.timeoutMs ?? 60_000);
   const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
 
   const capabilities: ProviderCapabilities = {
     toolCalling: declaredToolCalling,
     streaming: provider.stream ? 'declared' : 'unsupported',
+    configurableThinking:
+      declaredConfigurableThinking,
     probedAt: new Date().toISOString(),
     probeVersion: PROBE_VERSION,
   };
@@ -64,7 +68,12 @@ export async function probeCapabilities(
   // inference call to confirm a "no" is waste. Streaming is still probed below,
   // because advisory-class models are exactly the ones used for plain chat.
   if (declaredToolCalling === 'unsupported') {
-    if (provider.stream) capabilities.streaming = await probeStreaming(provider, model, signal);
+    if (provider.stream) capabilities.streaming = await probeStreaming(
+      provider,
+      model,
+      signal,
+      declaredConfigurableThinking,
+    );
     return capabilities;
   }
 
@@ -89,7 +98,12 @@ export async function probeCapabilities(
   }
 
   if (provider.stream) {
-    capabilities.streaming = await probeStreaming(provider, model, signal);
+    capabilities.streaming = await probeStreaming(
+      provider,
+      model,
+      signal,
+      declaredConfigurableThinking,
+    );
   }
 
   return capabilities;
@@ -115,6 +129,7 @@ async function probeStreaming(
   provider: ModelProvider,
   model: string,
   signal: AbortSignal,
+  thinkingCapability: CapabilityStatus,
 ): Promise<CapabilityStatus> {
   if (!provider.stream) return 'unsupported';
 
@@ -127,7 +142,11 @@ async function probeStreaming(
       // Reasoning models spend their whole budget thinking before emitting any
       // answer text, so thinking is disabled here and the budget left generous.
       // Judging a reasoning model on a 16-token window reports a false negative.
-      think: false,
+      think:
+        thinkingCapability === 'unsupported'
+          ? undefined
+          : false,
+      thinkingCapability,
       maxTokens: 256,
       signal,
     })) {

@@ -1,7 +1,14 @@
 import { constants } from 'node:fs';
 import { access, copyFile, mkdir, readdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, sep } from 'node:path';
-import { resolveWithinWorkspace } from '@dacai-local-agent/security';
+import {
+  extractProtectedVariables,
+  isProtectedSecretPath,
+  REDACTED,
+  resolveWithinWorkspace,
+  sanitizeText,
+  summarizeProtectedFile,
+} from '@dacai-local-agent/security';
 import { unifiedDiff } from './diff';
 import type { ToolDefinition, ToolExecutionContext } from './types';
 
@@ -43,6 +50,16 @@ function requireString(input: Record<string, unknown>, key: string): string {
   return value;
 }
 
+/** Models often use the pod convention `/workspace`; DACAIS tools expose the
+ * selected workspace instead, so translate only these exact safe aliases. */
+function workspaceAlias(value: string): string {
+  const normalized = value.trim().replaceAll('\\', '/');
+  if (normalized === '/' || normalized === '/workspace') return '.';
+  if (normalized.startsWith('/workspace/')) return normalized.slice('/workspace/'.length);
+  if (normalized.startsWith('/')) return normalized.slice(1);
+  return value;
+}
+
 export const listFilesTool: ToolDefinition = {
   name: 'filesystem.list',
   description:
@@ -57,10 +74,11 @@ export const listFilesTool: ToolDefinition = {
     },
   },
   permissionTier: 'safe',
+  requiresRead: true,
   timeoutMs: 15_000,
   async execute(input, ctx) {
     const root = requireRoot(ctx);
-    const target = resolveWithinWorkspace(root, typeof input.path === 'string' ? input.path : '.');
+    const target = resolveWithinWorkspace(root, workspaceAlias(typeof input.path === 'string' ? input.path : '.'));
     const recursive = input.recursive === true;
 
     const entries: string[] = [];
@@ -114,10 +132,11 @@ export const readFileTool: ToolDefinition = {
     required: ['path'],
   },
   permissionTier: 'safe',
+  requiresRead: true,
   timeoutMs: 15_000,
   async execute(input, ctx) {
     const root = requireRoot(ctx);
-    const target = resolveWithinWorkspace(root, requireString(input, 'path'));
+    const target = resolveWithinWorkspace(root, workspaceAlias(requireString(input, 'path')));
 
     let info;
     try {
@@ -145,17 +164,22 @@ export const readFileTool: ToolDefinition = {
     }
 
     const content = await readFile(target, 'utf8');
+    const reportedPath = toRelative(root, target);
+    if (isProtectedSecretPath(reportedPath)) {
+      return summarizeProtectedFile(reportedPath, content, info.size);
+    }
+
     const lines = content.split('\n');
     const start = typeof input.startLine === 'number' ? Math.max(1, input.startLine) : 1;
     const end = typeof input.endLine === 'number' ? Math.min(lines.length, input.endLine) : lines.length;
     const slice = lines.slice(start - 1, end);
 
     return {
-      path: toRelative(root, target),
+      path: reportedPath,
       totalLines: lines.length,
       startLine: start,
       endLine: start + slice.length - 1,
-      content: slice.map((line, index) => `${start + index}: ${line}`).join('\n'),
+      content: sanitizeText(slice.map((line, index) => `${start + index}: ${line}`).join('\n')),
     };
   },
 };
@@ -178,10 +202,11 @@ export const searchTool: ToolDefinition = {
     required: ['pattern'],
   },
   permissionTier: 'safe',
+  requiresRead: true,
   timeoutMs: 30_000,
   async execute(input, ctx) {
     const root = requireRoot(ctx);
-    const target = resolveWithinWorkspace(root, typeof input.path === 'string' ? input.path : '.');
+    const target = resolveWithinWorkspace(root, workspaceAlias(typeof input.path === 'string' ? input.path : '.'));
 
     let regex: RegExp;
     try {
@@ -195,7 +220,13 @@ export const searchTool: ToolDefinition = {
         ? new RegExp(input.filePattern, 'i')
         : undefined;
 
-    const matches: Array<{ path: string; line: number; text: string }> = [];
+    const matches: Array<{
+      path: string;
+      line: number;
+      text?: string;
+      variable?: string;
+      value?: typeof REDACTED;
+    }> = [];
     let filesScanned = 0;
     let truncated = false;
 
@@ -225,13 +256,32 @@ export const searchTool: ToolDefinition = {
         }
 
         filesScanned += 1;
+        const reportedPath = toRelative(root, absolute);
+        if (isProtectedSecretPath(reportedPath)) {
+          for (const variable of extractProtectedVariables(content)) {
+            const safeLine = `${variable.name}=${REDACTED}`;
+            if (!regex.test(variable.name) && !regex.test(safeLine)) continue;
+            matches.push({
+              path: reportedPath,
+              line: variable.line,
+              variable: variable.name,
+              value: REDACTED,
+            });
+            if (matches.length >= MAX_SEARCH_MATCHES) {
+              truncated = true;
+              return;
+            }
+          }
+          continue;
+        }
+
         const lines = content.split('\n');
         for (let index = 0; index < lines.length; index += 1) {
           if (!regex.test(lines[index])) continue;
           matches.push({
-            path: toRelative(root, absolute),
+            path: reportedPath,
             line: index + 1,
-            text: lines[index].trim().slice(0, 200),
+            text: sanitizeText(lines[index].trim().slice(0, 200)),
           });
           if (matches.length >= MAX_SEARCH_MATCHES) {
             truncated = true;
@@ -346,11 +396,12 @@ export const writeFileTool: ToolDefinition = {
     required: ['path', 'content'],
   },
   permissionTier: 'mutation',
+  requiresRead: true,
   requiresWrite: true,
   timeoutMs: 15_000,
   async execute(input, ctx) {
     const root = requireRoot(ctx);
-    const target = resolveWithinWorkspace(root, requireString(input, 'path'));
+    const target = resolveWithinWorkspace(root, workspaceAlias(requireString(input, 'path')));
     const content = typeof input.content === 'string' ? input.content : '';
 
     // Read the prior contents so the change can be recorded as a patch rather
@@ -396,11 +447,12 @@ export const editFileTool: ToolDefinition = {
     required: ['path', 'oldString', 'newString'],
   },
   permissionTier: 'mutation',
+  requiresRead: true,
   requiresWrite: true,
   timeoutMs: 15_000,
   async execute(input, ctx) {
     const root = requireRoot(ctx);
-    const target = resolveWithinWorkspace(root, requireString(input, 'path'));
+    const target = resolveWithinWorkspace(root, workspaceAlias(requireString(input, 'path')));
     const oldString = requireString(input, 'oldString');
     const newString = typeof input.newString === 'string' ? input.newString : '';
 
@@ -447,13 +499,14 @@ export const moveFileTool: ToolDefinition = {
     required: ['from', 'to'],
   },
   permissionTier: 'mutation',
+  requiresRead: true,
   requiresWrite: true,
   timeoutMs: 15_000,
   async execute(input, ctx) {
     const root = requireRoot(ctx);
     // Both ends are contained: moving a file out of the workspace is an escape.
-    const from = resolveWithinWorkspace(root, requireString(input, 'from'));
-    const to = resolveWithinWorkspace(root, requireString(input, 'to'));
+    const from = resolveWithinWorkspace(root, workspaceAlias(requireString(input, 'from')));
+    const to = resolveWithinWorkspace(root, workspaceAlias(requireString(input, 'to')));
 
     await mkdir(dirname(to), { recursive: true });
     await rename(from, to);
@@ -470,12 +523,13 @@ export const copyFileTool: ToolDefinition = {
     required: ['from', 'to'],
   },
   permissionTier: 'mutation',
+  requiresRead: true,
   requiresWrite: true,
   timeoutMs: 15_000,
   async execute(input, ctx) {
     const root = requireRoot(ctx);
-    const from = resolveWithinWorkspace(root, requireString(input, 'from'));
-    const to = resolveWithinWorkspace(root, requireString(input, 'to'));
+    const from = resolveWithinWorkspace(root, workspaceAlias(requireString(input, 'from')));
+    const to = resolveWithinWorkspace(root, workspaceAlias(requireString(input, 'to')));
 
     await mkdir(dirname(to), { recursive: true });
     await copyFile(from, to, constants.COPYFILE_EXCL).catch(async (error: NodeJS.ErrnoException) => {
@@ -492,10 +546,11 @@ export const statTool: ToolDefinition = {
   description: 'Check workspace path metadata without reading file contents. Use filesystem.read to inspect text and filesystem.list to inspect directories.',
   inputSchema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
   permissionTier: 'safe',
+  requiresRead: true,
   timeoutMs: 10_000,
   async execute(input, ctx) {
     const root = requireRoot(ctx);
-    const target = resolveWithinWorkspace(root, requireString(input, 'path'));
+    const target = resolveWithinWorkspace(root, workspaceAlias(requireString(input, 'path')));
 
     try {
       await access(target, constants.F_OK);

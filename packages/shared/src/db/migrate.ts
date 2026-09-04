@@ -12,8 +12,15 @@ export interface MigrationResult {
 
 export async function runMigrations(): Promise<MigrationResult> {
   const pool = getPool();
+  const client = await pool.connect();
 
-  await pool.query(`
+  // A local watch server, a worker, and the main API may all start together.
+  // Hold a database-scoped lock for the entire check/apply sequence so two
+  // instances cannot both decide that the same migration is pending.
+  await client.query('SELECT pg_advisory_lock($1)', [4_276_221]);
+  try {
+
+  await client.query(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
       name       TEXT PRIMARY KEY,
       applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -21,7 +28,7 @@ export async function runMigrations(): Promise<MigrationResult> {
   `);
 
   const files = (await readdir(migrationsDir)).filter((f) => f.endsWith('.sql')).sort();
-  const { rows } = await pool.query<{ name: string }>('SELECT name FROM schema_migrations');
+  const { rows } = await client.query<{ name: string }>('SELECT name FROM schema_migrations');
   const done = new Set(rows.map((r) => r.name));
 
   const applied: string[] = [];
@@ -34,7 +41,6 @@ export async function runMigrations(): Promise<MigrationResult> {
     }
 
     const sql = await readFile(join(migrationsDir, file), 'utf8');
-    const client = await pool.connect();
     try {
       await client.query('BEGIN');
       await client.query(sql);
@@ -44,10 +50,12 @@ export async function runMigrations(): Promise<MigrationResult> {
     } catch (error) {
       await client.query('ROLLBACK');
       throw new Error(`Migration ${file} failed: ${(error as Error).message}`, { cause: error });
-    } finally {
-      client.release();
     }
   }
 
   return { applied, alreadyCurrent };
+  } finally {
+    await client.query('SELECT pg_advisory_unlock($1)', [4_276_221]).catch(() => undefined);
+    client.release();
+  }
 }

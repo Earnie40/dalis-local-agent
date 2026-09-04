@@ -13,6 +13,7 @@ import {
   chooseInitialReasoningMode,
   compactMessagesForRequest,
   escalateReasoningMode,
+  ENGINEERING_MUTATION_TOOLS,
   extractChangedPaths,
   goalImpliesMutation,
   isMutationTool,
@@ -65,13 +66,25 @@ export type LoopStopReason =
   | 'no-progress'
   | 'tool-budget';
 
+/** Authoritative task state, separate from the mechanical reason a loop ended. */
+export type AgentCompletionState =
+  | 'IN_PROGRESS'
+  | 'GOAL_COMPLETE'
+  | 'VERIFICATION_COMPLETE'
+  | 'WAITING_FOR_USER'
+  | 'BLOCKED'
+  | 'CANCELLED'
+  | 'HARD_BUDGET_EXHAUSTED'
+  | 'FAILED';
+
 export interface LoopEvent {
-  type: 'model_response' | 'tool_call' | 'tool_result' | 'error' | 'context_compaction' | 'context_refresh' | 'reasoning_mode' | 'validation';
+  type: 'model_request' | 'model_response' | 'thinking' | 'tool_call' | 'tool_result' | 'error' | 'context_compaction' | 'context_refresh' | 'reasoning_mode' | 'validation' | 'budget';
   turn: number;
   content?: string;
   toolCall?: NormalizedToolCall;
   result?: LoopToolResult;
   message?: string;
+  budget?: { mode?: string; turns: number; maxTurns: number; toolCalls: number; maxToolCalls: number; reserveTurns?: number };
 }
 
 export interface AgentLoopOptions {
@@ -101,6 +114,10 @@ export interface AgentLoopOptions {
   think?: boolean;
   maxTurns?: number;
   maxToolCalls?: number;
+  /** Caller-selected execution depth. This never changes tool authority. */
+  runMode?: string;
+  /** Final turns reserved for evidence consolidation, synthesis, and verification. */
+  synthesisReserveTurns?: number;
   /** Maximum provider context window requested for this run. */
   maxContextTokens?: number;
   /** Planner output injected into the working state. */
@@ -182,6 +199,7 @@ export interface AgentLoopResult {
   taskId: string;
   answer: string;
   stopReason: LoopStopReason;
+  completionState: AgentCompletionState;
   turns: number;
   toolCalls: number;
   /** Calls rejected before execution: unknown tool, duplicate, or malformed. */
@@ -285,6 +303,52 @@ function isFilesystemPathTool(toolName: string): boolean {
   );
 }
 
+/** Paths genuinely inspected by the engineering evidence tool in this call. */
+function engineeringArtifactPaths(call: NormalizedToolCall, result: LoopToolResult): Set<string> {
+  const requested = Array.isArray(call.arguments.paths)
+    ? call.arguments.paths.filter((value): value is string => typeof value === 'string')
+    : [];
+  const requestedKeys = new Set(
+    requested.map((path) => normalizeObservedPath(path).toLocaleLowerCase()),
+  );
+  const evidenced = (result.evidence ?? []).flatMap((item) => {
+    const path = item.kind === 'artifact_hash' ? item.detail?.path : undefined;
+    return typeof path === 'string' ? [path] : [];
+  });
+  return new Set(
+    evidenced
+      .map((path) => normalizeObservedPath(path).toLocaleLowerCase())
+      .filter((path) => requestedKeys.has(path)),
+  );
+}
+
+/**
+ * These operations are explicitly observational.  They can be started together
+ * when a model asks for distinct calls in the same turn; anything that can
+ * mutate state, validate a changing workspace, prompt for permission, or run a
+ * shell command remains ordered below.
+ */
+function isSafelyBatchableReadOnlyTool(toolName: string): boolean {
+  return new Set([
+    'filesystem.list',
+    'filesystem.read',
+    'filesystem.search',
+    'filesystem.stat',
+    'code.symbol.search',
+    'code.symbol.references',
+    'code.symbol.callers',
+    'code.symbol.callees',
+    'code.symbol.impact',
+    'code.path.trace',
+    'code.architecture.context',
+    'code.failure.recall',
+    'code.working-state.get',
+    'code.validation.status',
+    'web.search',
+    'web.fetch',
+  ]).has(toolName);
+}
+
 function requestedToolPath(call: NormalizedToolCall): string | undefined {
   const path = call.arguments.path;
   return typeof path === 'string' && path.trim() ? path : undefined;
@@ -329,6 +393,14 @@ function selectToolsForTurn(tools: ToolSchema[], snapshot: AgentLoopContextSnaps
   if (/\b(?:web|website|http|https|online|latest|documentation|docs|research|external)\b/.test(goal)) addPrefix('web.');
   if (/\b(?:mcp|model context protocol|connector)\b/.test(goal)) add('mcp.list');
   if (/\b(?:network|ip|interface|dns)\b/.test(goal)) add('system.network.info');
+
+  // Specialist tools have already passed server capability gates and explicit
+  // user selection. Preserve them instead of hiding them behind this coding-
+  // focused per-turn reducer.
+  addPrefix('engineering.');
+  addPrefix('cad.');
+  addPrefix('bim.');
+  addPrefix('scene.');
 
   // If filtering would leave almost nothing, preserve the original set rather
   // than accidentally creating a capability dead-end.
@@ -421,6 +493,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
 
   const maxTurns = options.maxTurns ?? DEFAULT_MAX_TURNS;
   const maxToolCalls = options.maxToolCalls ?? DEFAULT_MAX_TOOL_CALLS;
+  const synthesisReserveTurns = Math.min(options.synthesisReserveTurns ?? 0, Math.max(0, maxTurns - 1));
   const maxToolOutputChars = options.maxToolOutputChars ?? DEFAULT_MAX_TOOL_OUTPUT;
   const maxUnproductiveTurns = options.maxUnproductiveTurns ?? DEFAULT_MAX_UNPRODUCTIVE_TURNS;
   const maxHistoryMessages = options.maxHistoryMessages ?? DEFAULT_MAX_HISTORY_MESSAGES;
@@ -457,6 +530,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   const seenCalls = new Set<string>();
   const knownPaths = new Set<string>();
   const changedFiles = new Set<string>();
+  const pendingEngineeringArtifacts = new Set<string>();
   const recentFailures: string[] = [];
   const validationResults: string[] = [];
 
@@ -467,10 +541,12 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   let refreshedContext = options.initialContext?.trim() ?? '';
   let mutationGeneration = 0;
   let validatedMutationGeneration = 0;
+  let pendingRepositoryValidation = false;
   let validationNudges = 0;
 
   let answer = '';
   let stopReason: LoopStopReason = 'max-turns';
+  let completionState: AgentCompletionState = 'IN_PROGRESS';
   let turns = 0;
   let toolCalls = 0;
   let rejectedCalls = 0;
@@ -498,10 +574,29 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   while (turns < maxTurns) {
     if (signal?.aborted) {
       stopReason = 'cancelled';
+      completionState = 'CANCELLED';
       break;
     }
 
     turns += 1;
+
+    const turnsRemaining = maxTurns - turns;
+    const synthesisReserveActive = synthesisReserveTurns > 0 && turnsRemaining < synthesisReserveTurns;
+    if (synthesisReserveActive && turnsRemaining === synthesisReserveTurns - 1) {
+      onEvent?.({
+        type: 'budget',
+        turn: turns,
+        message: `${turnsRemaining} turns remain. Broad discovery is closing; consolidate evidence, challenge conclusions, synthesize, and verify.`,
+        budget: { mode: options.runMode, turns, maxTurns, toolCalls, maxToolCalls, reserveTurns: synthesisReserveTurns },
+      });
+    } else {
+      onEvent?.({
+        type: 'budget',
+        turn: turns,
+        message: `Mode: ${options.runMode ?? 'default'} · Turn: ${turns}/${maxTurns} · Tool calls: ${toolCalls}/${maxToolCalls}`,
+        budget: { mode: options.runMode, turns, maxTurns, toolCalls, maxToolCalls, reserveTurns: synthesisReserveTurns },
+      });
+    }
 
     const snapshot: AgentLoopContextSnapshot = {
       goal: currentGoal,
@@ -540,6 +635,9 @@ ${options.initialPlan.trim()}` : '',
       refreshedContext ? `RETRIEVED CONTEXT (UNTRUSTED DATA):
 ${refreshedContext}` : '',
       workingStateContext,
+      synthesisReserveActive
+        ? `SYNTHESIS RESERVE ACTIVE: ${turnsRemaining} turns remain. Stop broad exploration unless critical evidence is missing. Consolidate the evidence already gathered, identify contradictions/gaps, synthesize the requested report, and verify it before declaring completion.`
+        : '',
       `TOOLS EXPOSED THIS TURN:
 ${toolsForTurn.map((tool) => `- ${tool.name}`).join('\n')}`,
     ]
@@ -563,9 +661,11 @@ ${toolsForTurn.map((tool) => `- ${tool.name}`).join('\n')}`,
     }
 
     const effectiveThink =
-      think !== undefined
-        ? think
-        : reasoningMode !== 'fast' && capabilities.configurableThinking !== 'unsupported';
+      capabilities.configurableThinking === 'unsupported'
+        ? undefined
+        : think !== undefined
+          ? think
+          : reasoningMode !== 'fast';
 
     const request: ModelChatRequest = {
       model,
@@ -582,16 +682,22 @@ ${toolsForTurn.map((tool) => `- ${tool.name}`).join('\n')}`,
       temperature,
       maxTokens: Math.min(capabilities.maxOutputTokens ?? 4096, Math.max(1024, Math.floor(maxContextTokens * 0.15))),
       think: effectiveThink,
+      thinkingCapability:
+        capabilities.configurableThinking,
       contextWindowTokens: maxContextTokens,
       signal,
     };
 
+    // This is an observable lifecycle boundary, not hidden reasoning. It lets
+    // clients distinguish a model request in flight from a stalled tool call.
+    onEvent?.({ type: 'model_request', turn: turns, message: `Requesting model response for turn ${turns}.` });
     let response;
     try {
       response = await provider.chat(request);
     } catch (cause) {
       if (signal?.aborted) {
         stopReason = 'cancelled';
+        completionState = 'CANCELLED';
         break;
       }
       error = cause instanceof Error ? cause.message : String(cause);
@@ -614,6 +720,14 @@ ${toolsForTurn.map((tool) => `- ${tool.name}`).join('\n')}`,
     });
 
     onEvent?.({ type: 'model_response', turn: turns, content });
+    if (response.thinking?.trim()) {
+      onEvent?.({
+        type: 'thinking',
+        turn: turns,
+        content: response.thinking.slice(0, 12_000),
+        message: 'The local model emitted a reasoning preview for this turn.',
+      });
+    }
 
     // No tool calls means the model is proposing a final answer rather than
     // continuing execution. Validate evidence and basic task alignment first.
@@ -655,6 +769,20 @@ ${toolsForTurn.map((tool) => `- ${tool.name}`).join('\n')}`,
       }
 
       const wantsTaskComplete = /^\s*TASK_COMPLETE:/i.test(content);
+      const waitingForUser = /^\s*TASK_WAITING_FOR_USER:/i.test(content);
+      const taskBlocked = /^\s*TASK_BLOCKED:/i.test(content);
+      if (waitingForUser) {
+        answer = content;
+        stopReason = 'final-answer';
+        completionState = 'WAITING_FOR_USER';
+        break;
+      }
+      if (taskBlocked) {
+        answer = content;
+        stopReason = 'final-answer';
+        completionState = 'BLOCKED';
+        break;
+      }
       const needsRequiredMutation = wantsTaskComplete && mutationRequiredByGoal && mutationGeneration === 0;
       if (needsRequiredMutation) {
         retries += 1;
@@ -682,13 +810,16 @@ ${toolsForTurn.map((tool) => `- ${tool.name}`).join('\n')}`,
           validationNudges += 1;
           retries += 1;
           reasoningMode = 'deep';
-          onEvent?.({ type: 'reasoning_mode', turn: turns, message: 'Escalated to DEEP reasoning because changed code is not yet validated.' });
+          onEvent?.({ type: 'reasoning_mode', turn: turns, message: 'Escalated to DEEP reasoning because changed work is not yet validated.' });
           messages.push({
             role: 'user',
             content: [
               'VALIDATION REQUIRED BEFORE TASK_COMPLETE:',
-              'You successfully changed repository files after the last passing validation.',
-              'Run tests.run and/or code.diagnostics that actually validate the changed work.',
+              'You successfully changed repository files or engineering artifacts after the last complete validation.',
+              pendingEngineeringArtifacts.size
+                ? `Run engineering.artifact.inspect for every changed artifact still pending: ${[...pendingEngineeringArtifacts].join(', ')}.`
+                : 'Run tests.run and/or code.diagnostics that actually validate the changed repository work.',
+              'Artifact presence and hashes do not establish geometry, physics, code compliance, or professional certification.',
               'If validation fails, diagnose and fix the failure before finalizing.',
             ].join('\n'),
           });
@@ -786,19 +917,57 @@ ${toolsForTurn.map((tool) => `- ${tool.name}`).join('\n')}`,
 
       answer = content;
       stopReason = 'final-answer';
+      completionState = wantsTaskComplete && validatedMutationGeneration === mutationGeneration && mutationGeneration > 0
+        ? 'VERIFICATION_COMPLETE'
+        : 'GOAL_COMPLETE';
       break;
     }
 
     let executedThisTurn = 0;
 
+    // Start a group of clearly independent, read-only requests concurrently.
+    // Results are still incorporated in model-specified order below, preserving
+    // deterministic transcripts, duplicate detection, recovery, and activity
+    // events.  A mixed group stays entirely sequential.
+    const remainingToolBudget = maxToolCalls - toolCalls;
+    const batchSignatures = requested.map(toolCallSignature);
+    const canBatchReadOnly =
+      requested.length > 1 &&
+      requested.length <= remainingToolBudget &&
+      new Set(batchSignatures).size === batchSignatures.length &&
+      requested.every((call, index) =>
+        isSafelyBatchableReadOnlyTool(call.name) &&
+        !seenCalls.has(batchSignatures[index]) &&
+        toolsForTurn.some((tool) => tool.name === call.name),
+      );
+    const executeSafely = async (call: NormalizedToolCall): Promise<LoopToolResult> => {
+      try {
+        return await executor.execute(call, signal);
+      } catch (cause) {
+        return {
+          output: cause instanceof Error ? cause.message : String(cause),
+          success: false,
+          error: 'tool-threw',
+        };
+      }
+    };
+    const batchedReadOnlyResults = new Map<string, Promise<LoopToolResult>>();
+    if (canBatchReadOnly) {
+      for (const call of requested) {
+        batchedReadOnlyResults.set(toolCallSignature(call), executeSafely(call));
+      }
+    }
+
     for (const call of requested) {
       if (signal?.aborted) {
         stopReason = 'cancelled';
+        completionState = 'CANCELLED';
         break;
       }
 
       if (toolCalls >= maxToolCalls) {
         stopReason = 'tool-budget';
+        completionState = 'HARD_BUDGET_EXHAUSTED';
         break;
       }
 
@@ -854,15 +1023,7 @@ ${toolsForTurn.map((tool) => `- ${tool.name}`).join('\n')}`,
       onEvent?.({ type: 'tool_call', turn: turns, toolCall: call });
 
       let result: LoopToolResult;
-      try {
-        result = await executor.execute(call, signal);
-      } catch (cause) {
-        result = {
-          output: cause instanceof Error ? cause.message : String(cause),
-          success: false,
-          error: 'tool-threw',
-        };
-      }
+      result = await (batchedReadOnlyResults.get(signature) ?? executeSafely(call));
 
       if (result.denied) deniedCalls += 1;
       if (result.success) succeededTools.add(call.name);
@@ -878,19 +1039,34 @@ ${toolsForTurn.map((tool) => `- ${tool.name}`).join('\n')}`,
 
       if (result.success && isMutationTool(call.name)) {
         mutationGeneration += 1;
-        for (const path of extractChangedPaths(call.name, call.arguments)) changedFiles.add(normalizeObservedPath(path));
+        const paths = extractChangedPaths(call.name, call.arguments).map(normalizeObservedPath);
+        for (const path of paths) changedFiles.add(path);
+        if (ENGINEERING_MUTATION_TOOLS.has(call.name)) {
+          for (const path of paths) pendingEngineeringArtifacts.add(path.toLocaleLowerCase());
+        } else {
+          pendingRepositoryValidation = true;
+        }
       }
 
       if (isValidationTool(call.name)) {
         const passed = validationPassed(result);
+        let coverage = '';
+        if (passed && call.name === 'engineering.artifact.inspect') {
+          for (const path of engineeringArtifactPaths(call, result)) pendingEngineeringArtifacts.delete(path);
+          coverage = pendingEngineeringArtifacts.size
+            ? `; ${pendingEngineeringArtifacts.size} changed engineering artifact(s) still require hash inspection`
+            : '; all changed engineering artifacts are present and hash-inspected (geometry/compliance not evaluated)';
+        } else if (passed) {
+          pendingRepositoryValidation = false;
+        }
         const summary = `${call.name}: ${passed ? 'PASSED' : 'FAILED'}${
           result.evidence?.find((item) => item.kind === 'exit_code')?.summary
             ? ` (${result.evidence.find((item) => item.kind === 'exit_code')!.summary})`
             : ''
-        }`;
+        }${coverage}`;
         validationResults.push(summary);
         onEvent?.({ type: 'validation', turn: turns, toolCall: call, result, message: summary });
-        if (passed) {
+        if (passed && !pendingRepositoryValidation && pendingEngineeringArtifacts.size === 0) {
           validatedMutationGeneration = mutationGeneration;
         } else {
           reasoningMode = 'deep';
@@ -1029,6 +1205,7 @@ ${toolsForTurn.map((tool) => `- ${tool.name}`).join('\n')}`,
           continue;
         }
         stopReason = 'no-progress';
+        completionState = 'BLOCKED';
         answer = content;
         break;
       }
@@ -1037,7 +1214,16 @@ ${toolsForTurn.map((tool) => `- ${tool.name}`).join('\n')}`,
     }
   }
 
-  if (signal?.aborted) stopReason = 'cancelled';
+  if (signal?.aborted) {
+    stopReason = 'cancelled';
+    completionState = 'CANCELLED';
+  }
+
+  if (stopReason === 'max-turns' || stopReason === 'tool-budget') {
+    completionState = 'HARD_BUDGET_EXHAUSTED';
+  } else if (stopReason === 'provider-error') {
+    completionState = 'FAILED';
+  }
 
   // A loop that ran out of turns still returns the last assistant output, but
   // callers can distinguish this from a successful final answer via stopReason.
@@ -1046,10 +1232,19 @@ ${toolsForTurn.map((tool) => `- ${tool.name}`).join('\n')}`,
     answer = lastAssistant?.content ?? '';
   }
 
+  if (completionState === 'HARD_BUDGET_EXHAUSTED') {
+    answer = [
+      `TASK_BLOCKED: HARD_BUDGET_EXHAUSTED — the ${options.runMode ?? 'agent'} run reached its safety ceiling before verified completion.`,
+      `Used ${turns}/${maxTurns} turns and ${toolCalls}/${maxToolCalls} tool calls.`,
+      answer ? `Last model response (not a completion claim):\n${answer}` : '',
+    ].filter(Boolean).join('\n\n');
+  }
+
   return {
     taskId,
     answer,
     stopReason,
+    completionState,
     turns,
     toolCalls,
     rejectedCalls,

@@ -11,7 +11,7 @@ import type { ContextRef, Evidence, TraceSource, TrainingStep } from './types';
  */
 
 export interface LoopEventLike {
-  type: 'model_response' | 'tool_call' | 'tool_result' | 'error' | 'context_compaction' | 'context_refresh' | 'reasoning_mode' | 'validation';
+  type: 'model_request' | 'model_response' | 'thinking' | 'tool_call' | 'tool_result' | 'error' | 'context_compaction' | 'context_refresh' | 'reasoning_mode' | 'validation' | 'budget';
   turn: number;
   content?: string;
   toolCall?: { id?: string; name: string; arguments: Record<string, unknown> };
@@ -23,6 +23,7 @@ export interface LoopEventLike {
     evidence?: Array<{ kind: string; summary: string; detail?: Record<string, unknown> }>;
   };
   message?: string;
+  budget?: { mode?: string; turns: number; maxTurns: number; toolCalls: number; maxToolCalls: number; reserveTurns?: number };
 }
 
 export interface LoopRecorderOptions {
@@ -71,6 +72,9 @@ export class LoopTraceRecorder {
       return;
     }
 
+    // Provider-emitted thinking is a UI preview, not training evidence.
+    if (event.type === 'thinking') return;
+
     if (event.type === 'tool_call' && event.toolCall) {
       this.steps.push({
         type: 'tool_call',
@@ -106,12 +110,14 @@ export class LoopTraceRecorder {
     }
 
     if (
+      event.type === 'model_request' ||
+      event.type === 'budget' ||
       event.type === 'context_compaction' ||
       event.type === 'context_refresh' ||
       event.type === 'reasoning_mode' ||
       event.type === 'validation'
     ) {
-      this.recordRuntimeEvent({ event: event.type, message: event.message ?? event.type });
+      this.recordRuntimeEvent({ event: event.type === 'model_request' || event.type === 'budget' ? 'phase' : event.type, message: event.message ?? event.type });
       return;
     }
 

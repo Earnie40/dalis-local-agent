@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS workspaces (
   read_access         BOOLEAN     NOT NULL DEFAULT TRUE,
   write_access        BOOLEAN     NOT NULL DEFAULT FALSE,
   shell_access        BOOLEAN     NOT NULL DEFAULT FALSE,
-  network_access      BOOLEAN     NOT NULL DEFAULT FALSE,
+  network_access      BOOLEAN     NOT NULL DEFAULT TRUE,
   project_instructions TEXT,
   memory_namespace    TEXT,
   git_detected        BOOLEAN     NOT NULL DEFAULT FALSE,

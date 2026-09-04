@@ -4,6 +4,8 @@ import { join, resolve } from 'node:path';
 import { lookup } from 'node:dns/promises';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { approvedDownloadTool, webFetchTool, webSearchTool } from '../packages/tools/src/web-tools';
+import { PermissionedToolExecutor } from '../packages/tools/src/permissioned-executor';
+import { ToolRegistry } from '../packages/tools/src/tool-registry';
 
 /*
  * These tools sell network access to the agent, so the tests are really
@@ -67,6 +69,27 @@ describe('web.fetch', () => {
     expect(result.status).toBe(200);
     expect(result.body).toContain('<h1>ok</h1>');
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect((fetchImpl.mock.calls[0][1] as RequestInit).method).toBe('GET');
+  });
+
+  it('supports metadata-only HEAD without reading a response body', async () => {
+    const response = okResponse('must not be returned');
+    const textSpy = vi.spyOn(response, 'text');
+    fetchImpl.mockResolvedValue(response);
+    const result = (await webFetchTool.execute(
+      { url: 'https://example.com/docs', method: 'HEAD' },
+      {},
+    )) as { method: string; body: string };
+    expect((fetchImpl.mock.calls[0][1] as RequestInit).method).toBe('HEAD');
+    expect(result).toMatchObject({ method: 'HEAD', body: '' });
+    expect(textSpy).not.toHaveBeenCalled();
+  });
+
+  it('rejects outbound mutation methods', async () => {
+    await expect(
+      webFetchTool.execute({ url: 'https://example.com/', method: 'POST' }, {}),
+    ).rejects.toThrow(/only permits read-only GET and HEAD/i);
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
   it('caps and marks a very large response rather than returning it whole', async () => {
@@ -135,5 +158,27 @@ describe('permission tiers', () => {
     expect(approvedDownloadTool.permissionTier).toBe('mutation');
     expect(approvedDownloadTool.requiresNetwork).toBe(true);
     expect(approvedDownloadTool.requiresWrite).toBe(true);
+  });
+
+  it('requires explicit workspace network capability for public reads', async () => {
+    const registry = new ToolRegistry();
+    registry.register(webFetchTool);
+    const call = { id: 'web-1', name: 'web.fetch', arguments: { url: 'https://example.com/' } };
+
+    const denied = await new PermissionedToolExecutor({
+      registry,
+      capabilities: { read: true, write: false, shell: false, network: false },
+      context: {},
+    }).execute(call);
+    expect(denied.denied).toBe(true);
+    expect(fetchImpl).not.toHaveBeenCalled();
+
+    const allowed = await new PermissionedToolExecutor({
+      registry,
+      capabilities: { read: true, write: false, shell: false, network: true },
+      context: {},
+    }).execute(call);
+    expect(allowed.success).toBe(true);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 });

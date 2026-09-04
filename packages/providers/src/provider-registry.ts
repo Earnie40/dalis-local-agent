@@ -5,12 +5,13 @@ import type {
   ProviderCapabilities,
   ProviderHealth,
 } from '@dacai-local-agent/agent-core';
-import { isAgentLoopCapable } from '@dacai-local-agent/agent-core';
+import { isAgentLoopCapable, UNKNOWN_CAPABILITIES } from '@dacai-local-agent/agent-core';
 import { AnthropicProvider } from './anthropic-provider';
 import { HuggingFaceProvider } from './huggingface-provider';
 import { OllamaProvider } from './ollama-provider';
 import { OpenAIResponsesProvider } from './openai-provider';
 import { probeCapabilities } from './capability-probe';
+import { podServesModel, type GpuAvailability, type GpuAvailabilityProbe } from './gpu-availability';
 import { InMemoryCapabilityStore, type CapabilityStore } from './capability-store';
 
 export class ProviderResolutionError extends Error {
@@ -39,6 +40,12 @@ export interface ResolvedModel {
   capabilities: ProviderCapabilities;
   /** Set when a remote instance failed and a LOCAL instance served instead. */
   fallbackFromInstanceId?: string;
+  /** Set when gpu-preferred routing moved a local alias onto the GPU pod. */
+  promotedFromAlias?: string;
+  /** Set when a GPU alias could not be served and its local counterpart ran instead. */
+  fellBackFromAlias?: string;
+  /** One sentence describing where this request ran and why. Safe to show a user. */
+  routingNote?: string;
 }
 
 export interface ResolveOptions {
@@ -46,6 +53,13 @@ export interface ResolveOptions {
   requireToolCalling?: boolean;
   /** Set when the user explicitly named this instance for this request. */
   explicitInstanceRequest?: boolean;
+  /** Opt out of gpu-preferred promotion for work that must stay on this machine. */
+  preferLocal?: boolean;
+  /**
+   * Resolve configured provider metadata without contacting the text model.
+   * Used only when another subsystem executes the request directly.
+   */
+  skipCapabilityProbe?: boolean;
   signal?: AbortSignal;
 }
 
@@ -60,11 +74,31 @@ export class ProviderRegistry {
   private readonly providers = new Map<string, ModelProvider>();
   private readonly inflightProbes = new Map<string, Promise<ProviderCapabilities>>();
   private readonly fallbackEvents: FallbackEvent[] = [];
+  private gpuProbe?: GpuAvailabilityProbe;
 
   constructor(
     private readonly config: AppConfig,
     private readonly capabilityStore: CapabilityStore = new InMemoryCapabilityStore(),
   ) {}
+
+  /**
+   * Supplying the probe is what turns the gpu-preferred policy on in practice:
+   * without a way to ask whether the pod is answering, "prefer the GPU" would
+   * mean "route to a host that may be stopped", which is worse than local.
+   */
+  setGpuAvailabilityProbe(probe: GpuAvailabilityProbe | undefined): void {
+    this.gpuProbe = probe;
+  }
+
+  /** True when a reachable pod would be preferred over local Ollama. */
+  get gpuPreferred(): boolean {
+    return this.config.routingPolicy === 'gpu-preferred' && Boolean(this.gpuProbe);
+  }
+
+  /** Current GPU availability, including the sentence explaining an unusable pod. */
+  async gpuAvailability(force = false): Promise<GpuAvailability | undefined> {
+    return this.gpuProbe?.evaluate(force);
+  }
 
   get routingPolicy(): RoutingPolicy {
     return this.config.routingPolicy;
@@ -105,12 +139,35 @@ export class ProviderRegistry {
       );
     }
 
+    // The point of gpu-preferred is that the pod needs no per-request consent;
+    // paid providers still do, so preferring the GPU never becomes API spend.
+    if (this.routingPolicy === 'gpu-preferred') {
+      if (instance.usageClass === 'REMOTE_GPU_OLLAMA') return;
+      if (!options.explicitInstanceRequest) {
+        throw new ProviderResolutionError(
+          `Routing policy is gpu-preferred; "${instance.id}" (${instance.usageClass}) requires an explicit selection.`,
+          'policy-blocked',
+        );
+      }
+      return;
+    }
+
     if (this.routingPolicy === 'manual-provider-selection' && !options.explicitInstanceRequest) {
       throw new ProviderResolutionError(
         `Routing policy requires an explicit provider selection before using "${instance.id}".`,
         'policy-blocked',
       );
     }
+  }
+
+  /** Returns cached or provider-declared status without issuing an inference request. */
+  async getKnownToolCallingStatus(instanceId: string, model: string): Promise<ProviderCapabilities['toolCalling']> {
+    const cached = await this.capabilityStore.read(instanceId, model);
+    if (cached) return cached.toolCalling;
+
+    // Provider declarations are safe to inspect here because this path must not
+    // turn the model-list endpoint into a paid or slow inference request.
+    return this.getProvider(instanceId).supportsTools(model);
   }
 
   /** Capability results are cached; provider probes never run on the boot path. */
@@ -141,7 +198,13 @@ export class ProviderRegistry {
         await provider.showModel(model).catch(() => undefined);
       }
 
-      const capabilities = await probeCapabilities(provider, model, { signal });
+      // A large GPU model may need more than the generic 60-second probe
+      // window for its first load. Reuse the provider's bounded request
+      // timeout so a cold start is not cached as a false capability failure.
+      const capabilities = await probeCapabilities(provider, model, {
+        signal,
+        timeoutMs: this.getInstance(instanceId).requestTimeoutMs,
+      });
       await this.capabilityStore.write(instanceId, model, capabilities).catch(() => undefined);
       return capabilities;
     })().finally(() => this.inflightProbes.delete(key));
@@ -155,21 +218,145 @@ export class ProviderRegistry {
   }
 
   async resolveAlias(alias: string, options: ResolveOptions = {}): Promise<ResolvedModel> {
-    const modelConfig = this.config.models[alias];
+    const routed = await this.applyGpuPreference(alias, options);
+    const modelConfig = this.config.models[routed.alias];
     if (!modelConfig) {
-      throw new ProviderResolutionError(`Unknown model alias "${alias}".`, 'unknown-alias');
+      throw new ProviderResolutionError(`Unknown model alias "${routed.alias}".`, 'unknown-alias');
     }
     if (!modelConfig.enabled) {
-      throw new ProviderResolutionError(`Model alias "${alias}" is disabled.`, 'instance-disabled');
+      throw new ProviderResolutionError(`Model alias "${routed.alias}" is disabled.`, 'instance-disabled');
     }
 
-    const resolved = await this.resolve(modelConfig.providerInstanceId, modelConfig.model, options);
-    return {
-      ...resolved,
-      alias,
-      temperature: modelConfig.temperature,
-      maxTokens: modelConfig.maxTokens,
-    };
+    try {
+      const resolved = await this.resolve(modelConfig.providerInstanceId, modelConfig.model, options);
+      return {
+        ...resolved,
+        alias: routed.alias,
+        temperature: modelConfig.temperature,
+        maxTokens: modelConfig.maxTokens,
+        promotedFromAlias: routed.promotedFromAlias,
+        fellBackFromAlias: routed.fellBackFromAlias,
+        routingNote: routed.note,
+      };
+    } catch (error) {
+      // Reachability alone does not make a model suitable for an autonomous
+      // agent. If the GPU model cannot pass the tool-call gate, preserve the
+      // standing local fallback instead of failing an otherwise runnable task.
+      const instance = this.config.providerInstances[modelConfig.providerInstanceId];
+      if (
+        error instanceof ProviderResolutionError &&
+        error.code === 'not-agent-capable' &&
+        options.requireToolCalling &&
+        instance?.usageClass === 'REMOTE_GPU_OLLAMA'
+      ) {
+        const localAlias = this.localCounterpartAlias(routed.alias) ?? routed.promotedFromAlias;
+        const localModel = localAlias ? this.config.models[localAlias] : undefined;
+        if (localAlias && localModel?.enabled) {
+          const localResolved = await this.resolve(
+            localModel.providerInstanceId,
+            localModel.model,
+            { ...options, preferLocal: true },
+          );
+          this.recordFallback(instance.id, localResolved.instance.id, 'GPU model is not agent-capable');
+          return {
+            ...localResolved,
+            alias: localAlias,
+            temperature: localModel.temperature,
+            maxTokens: localModel.maxTokens,
+            fellBackFromAlias: routed.alias,
+            routingNote:
+              `The GPU model "${modelConfig.model}" is reachable but is not verified for autonomous tool use. ` +
+              `Serving "${localAlias}" locally instead.`,
+          };
+        }
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Choose between an alias and its counterpart on the other side of the
+   * local/GPU boundary.
+   *
+   * Aliases pair by name -- `coder` and `gpu_coder`, `intelligence` and
+   * `intelligence_local` -- so the pair always carries the model that actually
+   * exists on that host. Promoting by instance alone would keep the local model
+   * name and ask the pod for a model it does not serve.
+   *
+   * Every outcome carries a sentence: a run that stayed local because the pod
+   * is stopped should say so rather than look like an ordinary local run.
+   */
+  private async applyGpuPreference(
+    alias: string,
+    options: ResolveOptions,
+  ): Promise<{ alias: string; promotedFromAlias?: string; fellBackFromAlias?: string; note?: string }> {
+    if (!this.gpuProbe || options.preferLocal) return { alias };
+    const requested = this.config.models[alias];
+    if (!requested?.enabled) return { alias };
+    const usageClass = this.config.providerInstances[requested.providerInstanceId]?.usageClass;
+
+    if (usageClass === 'LOCAL_OLLAMA') {
+      if (this.routingPolicy !== 'gpu-preferred') return { alias };
+      const gpuAlias = this.counterpartAlias(`gpu_${alias}`, 'REMOTE_GPU_OLLAMA');
+      if (!gpuAlias) return { alias };
+
+      const gpuModel = this.config.models[gpuAlias].model;
+      const availability = await this.gpuProbe.evaluate();
+      if (!podServesModel(availability, gpuModel)) {
+        return { alias, note: this.describeUnusableGpu(availability, gpuModel, alias) };
+      }
+      return {
+        alias: gpuAlias,
+        promotedFromAlias: alias,
+        note: `Running "${alias}" on the GPU pod as "${gpuAlias}" (${gpuModel}).`,
+      };
+    }
+
+    if (usageClass === 'REMOTE_GPU_OLLAMA') {
+      const availability = await this.gpuProbe.evaluate();
+      if (podServesModel(availability, requested.model)) return { alias, note: availability.detail };
+
+      const localAlias = this.localCounterpartAlias(alias);
+      if (!localAlias) return { alias, note: this.describeUnusableGpu(availability, requested.model, alias) };
+
+      this.recordFallback(
+        requested.providerInstanceId,
+        this.config.models[localAlias].providerInstanceId,
+        availability.reason ?? 'gpu model unavailable',
+      );
+      return {
+        alias: localAlias,
+        fellBackFromAlias: alias,
+        note: `${this.describeUnusableGpu(availability, requested.model, alias)} Serving "${localAlias}" locally instead.`,
+      };
+    }
+
+    return { alias };
+  }
+
+  /** The alias exists, is enabled, and sits on an enabled instance of that class. */
+  private counterpartAlias(candidate: string, usageClass: ProviderInstance['usageClass']): string | undefined {
+    const model = this.config.models[candidate];
+    if (!model?.enabled) return undefined;
+    const instance = this.config.providerInstances[model.providerInstanceId];
+    if (!instance?.enabled || instance.usageClass !== usageClass) return undefined;
+    return candidate;
+  }
+
+  private localCounterpartAlias(alias: string): string | undefined {
+    return this.counterpartAlias(
+      alias.startsWith('gpu_') ? alias.slice('gpu_'.length) : `${alias}_local`,
+      'LOCAL_OLLAMA',
+    );
+  }
+
+  private describeUnusableGpu(availability: GpuAvailability, model: string, alias: string): string {
+    if (!availability.usable) return availability.detail;
+    const installed = availability.models.length ? availability.models.join(', ') : 'none';
+    return (
+      `The GPU pod is reachable but does not serve "${model}" for "${alias}" (installed: ${installed}). ` +
+      `Pull it on the pod with: ollama pull ${model}`
+    );
   }
 
   async resolve(instanceId: string, model: string, options: ResolveOptions = {}): Promise<ResolvedModel> {
@@ -191,7 +378,9 @@ export class ProviderRegistry {
     }
 
     const provider = this.getProvider(instanceId);
-    const capabilities = await this.getCapabilities(instanceId, model, options.signal);
+    const capabilities = options.skipCapabilityProbe
+      ? { ...UNKNOWN_CAPABILITIES }
+      : await this.getCapabilities(instanceId, model, options.signal);
 
     if (options.requireToolCalling && !isAgentLoopCapable(capabilities)) {
       throw new ProviderResolutionError(

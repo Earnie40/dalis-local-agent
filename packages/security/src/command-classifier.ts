@@ -325,6 +325,8 @@ const MUTATION_OPERATIONS:
     'init',
   ]),
 
+  node: new Set(),
+
   npm: new Set([
     'run',
     'test',

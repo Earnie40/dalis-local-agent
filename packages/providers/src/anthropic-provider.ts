@@ -345,14 +345,57 @@ export class AnthropicProvider implements ModelProvider {
       : [];
   }
 
-  /** Anthropic has no unauthenticated health endpoint; do not claim a live probe. */
+  /**
+   * Anthropic has no unauthenticated health endpoint, but an authenticated
+   * `GET /v1/models` is cheap, does not consume a completion, and proves the
+   * key actually works rather than just being present.
+   */
   async health(): Promise<ProviderHealth> {
-    return {
-      status: this.instance.enabled && this.apiKey() ? 'unavailable' : 'not configured',
-      instanceId: this.instanceId,
-      usageClass: this.usageClass,
-      location: 'Remote',
-    };
+    const apiKey = this.apiKey();
+    if (!this.instance.enabled || !apiKey) {
+      return {
+        status: 'not configured',
+        instanceId: this.instanceId,
+        usageClass: this.usageClass,
+        location: 'Remote',
+      };
+    }
+
+    const startedAt = Date.now();
+    try {
+      const response = await globalThis.fetch(`${this.baseUrl}/models`, {
+        method: 'GET',
+        signal: AbortSignal.timeout(Math.min(this.instance.requestTimeoutMs, 10_000)),
+        headers: { 'anthropic-version': ANTHROPIC_VERSION, 'x-api-key': apiKey },
+      });
+      if (!response.ok) {
+        const details = await readAnthropicError(response);
+        return {
+          status: response.status === 429 ? 'rate limited' : 'unavailable',
+          instanceId: this.instanceId,
+          usageClass: this.usageClass,
+          location: 'Remote',
+          latencyMs: Date.now() - startedAt,
+          error: anthropicErrorSummary(response.status, details),
+        };
+      }
+      return {
+        status: 'connected',
+        instanceId: this.instanceId,
+        usageClass: this.usageClass,
+        location: 'Remote',
+        latencyMs: Date.now() - startedAt,
+      };
+    } catch (error) {
+      return {
+        status: 'unavailable',
+        instanceId: this.instanceId,
+        usageClass: this.usageClass,
+        location: 'Remote',
+        latencyMs: Date.now() - startedAt,
+        error: error instanceof Error ? error.message : 'UnknownError',
+      };
+    }
   }
 
   async getUsage(): Promise<Record<string, number>> {

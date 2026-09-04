@@ -14,6 +14,7 @@ export const codeDiagnosticsTool: ToolDefinition = {
   },
 
   permissionTier: 'safe',
+  requiresRead: true,
   requiresShell: true,
   timeoutMs: 120_000,
 

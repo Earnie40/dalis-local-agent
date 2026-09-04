@@ -14,6 +14,7 @@ import type {
   ToolExecutor,
   ToolSchema,
 } from '@dacai-local-agent/agent-core';
+import { extractChangedPaths, isMutationTool } from '@dacai-local-agent/agent-core';
 
 import {
   loadWorkingState,
@@ -73,14 +74,6 @@ interface ConflictLike {
   expected?: unknown;
   observed?: unknown;
 }
-
-const MUTATION_TOOLS =
-  new Set([
-    'filesystem.edit',
-    'filesystem.write',
-    'filesystem.move',
-    'filesystem.copy',
-  ]);
 
 const STATUS_SCHEMA = {
   type: 'object',
@@ -293,55 +286,12 @@ function mutationPaths(
     NormalizedToolCall,
 ): string[] {
   if (
-    !MUTATION_TOOLS.has(
-      call.name,
-    )
+    !isMutationTool(call.name)
   ) {
     return [];
   }
 
-  const args =
-    call.arguments ??
-    {};
-
-  const paths:
-    string[] = [];
-
-  for (
-    const key
-    of [
-      'path',
-      'file',
-      'filePath',
-      'targetPath',
-
-      'source',
-      'sourcePath',
-      'from',
-
-      'destination',
-      'destinationPath',
-      'target',
-      'to',
-    ]
-  ) {
-    const value =
-      args[key];
-
-    if (
-      typeof value ===
-        'string' &&
-      value.trim()
-    ) {
-      paths.push(
-        value.trim(),
-      );
-    }
-  }
-
-  return Array.from(
-    new Set(paths),
-  );
+  return extractChangedPaths(call.name, call.arguments ?? {});
 }
 
 function commandKey(

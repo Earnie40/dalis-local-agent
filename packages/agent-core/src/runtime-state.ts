@@ -53,24 +53,41 @@ export function escalateReasoningMode(
 }
 
 export function goalImpliesMutation(goal: string): boolean {
-  return /\b(?:implement|edit|write|create|fix|update|replace|move|copy|refactor|migrate|install|distribute|merge|delete|remove|add|wire|upgrade)\b/i.test(goal);
+  return /\b(?:implement|edit|write|create|generate|render|produce|fix|update|replace|move|copy|refactor|migrate|install|distribute|merge|delete|remove|add|wire|upgrade)\b/i.test(goal);
 }
+
+export const ENGINEERING_MUTATION_TOOLS = new Set([
+  'cad.execute',
+  'bim.execute',
+  'scene.render',
+  'image.generate',
+  'video.generate',
+]);
 
 export function isMutationTool(toolName: string): boolean {
   return (
     toolName === 'filesystem.write' ||
     toolName === 'filesystem.edit' ||
     toolName === 'filesystem.move' ||
-    toolName === 'filesystem.copy'
+    toolName === 'filesystem.copy' ||
+    ENGINEERING_MUTATION_TOOLS.has(toolName)
   );
 }
 
 export function isValidationTool(toolName: string): boolean {
-  return toolName === 'tests.run' || toolName === 'code.diagnostics';
+  return toolName === 'tests.run' || toolName === 'code.diagnostics' || toolName === 'engineering.artifact.inspect';
 }
 
 export function extractChangedPaths(toolName: string, args: Record<string, unknown>): string[] {
   if (!isMutationTool(toolName)) return [];
+
+  if (ENGINEERING_MUTATION_TOOLS.has(toolName)) {
+    const expected = Array.isArray(args.expectedArtifacts)
+      ? args.expectedArtifacts.filter((value): value is string => typeof value === 'string')
+      : [];
+    const output = typeof args.outputPath === 'string' ? [args.outputPath] : [];
+    return [...new Set([...expected, ...output].map((value) => value.trim()).filter(Boolean))];
+  }
 
   const candidates = [args.path, args.source, args.destination, args.from, args.to];
   return [...new Set(candidates.filter((value): value is string => typeof value === 'string' && value.trim().length > 0))];
@@ -88,10 +105,21 @@ export function validationPassed(result: {
     return exitEvidence.detail.exitCode === 0;
   }
 
+  const validationEvidence = result.evidence?.find((item) => item.kind === 'validation_result');
+  if (validationEvidence?.detail) {
+    const checks = Object.values(validationEvidence.detail).filter((value): value is boolean => typeof value === 'boolean');
+    if (checks.length) return checks.every(Boolean);
+  }
+
   try {
-    const parsed = JSON.parse(result.output) as { exitCode?: unknown; passed?: unknown };
+    const parsed = JSON.parse(result.output) as { exitCode?: unknown; passed?: unknown; validation?: unknown };
     if (typeof parsed.exitCode === 'number') return parsed.exitCode === 0;
     if (typeof parsed.passed === 'boolean') return parsed.passed;
+    if (parsed.validation && typeof parsed.validation === 'object') {
+      const checks = Object.values(parsed.validation as Record<string, unknown>)
+        .filter((value): value is boolean => typeof value === 'boolean');
+      if (checks.length) return checks.every(Boolean);
+    }
   } catch {
     // Some tools return plain text. A successful tool without exit evidence is
     // still useful, but it is not strong enough to prove validation passed.

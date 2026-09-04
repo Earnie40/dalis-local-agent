@@ -50,7 +50,7 @@ export async function hybridSymbolSearch(
     WITH semantic AS (
       SELECT
         id,
-        to_jsonb(code_symbols) payload,
+        to_jsonb(code_symbols) - 'embedding' - 'content' payload,
         1 - (embedding <=> $1::vector) similarity
       FROM code_symbols
       WHERE embedding IS NOT NULL
@@ -60,7 +60,7 @@ export async function hybridSymbolSearch(
     lexical AS (
       SELECT
         id,
-        to_jsonb(code_symbols) payload,
+        to_jsonb(code_symbols) - 'embedding' - 'content' payload,
         0.55::double precision similarity
       FROM code_symbols
       WHERE to_jsonb(code_symbols)::text ILIKE '%' || $2 || '%'
@@ -70,13 +70,18 @@ export async function hybridSymbolSearch(
       SELECT * FROM semantic
       UNION ALL
       SELECT * FROM lexical
+    ),
+    deduplicated AS (
+      SELECT DISTINCT ON (id)
+        id,
+        payload,
+        similarity
+      FROM combined
+      ORDER BY id, similarity DESC
     )
-    SELECT DISTINCT ON (id)
-      id,
-      payload,
-      similarity
-    FROM combined
-    ORDER BY id, similarity DESC
+    SELECT id, payload, similarity
+    FROM deduplicated
+    ORDER BY similarity DESC, id
     LIMIT $3
   `, [vector, query, limit]);
 
@@ -84,47 +89,55 @@ export async function hybridSymbolSearch(
     id: String(row.id),
     filePath: row.payload.file_path ?? row.payload.path,
     name: row.payload.name ?? row.payload.symbol_name,
-    kind: row.payload.kind ?? row.payload.symbol_kind,
+    kind: row.payload.kind ?? row.payload.symbol_kind ?? row.payload.symbol_type,
     similarity: Number(row.similarity),
     payload: row.payload,
   }));
 }
 
-export async function symbolEdges(symbol: string) {
+export async function symbolEdges(symbol: string, workspaceRoot?: string) {
   const pool = getPool();
 
   const result = await pool.query(`
-    SELECT *
-    FROM symbol_edges
-    WHERE source = $1 OR target = $1
-    ORDER BY file_path, line
-  `, [symbol]);
+    SELECT e.*
+    FROM symbol_edges e
+    JOIN repositories r ON r.id = e.repository_id
+    WHERE (e.source = $1 OR e.target = $1)
+      AND ($2::text IS NULL OR lower(r.root_path) = lower($2))
+    ORDER BY e.file_path, e.line
+  `, [symbol, workspaceRoot ?? null]);
 
   return result.rows;
 }
 
-export async function symbolCallers(symbol: string) {
+export async function symbolCallers(symbol: string, workspaceRoot?: string) {
   const pool = getPool();
 
   const result = await pool.query(`
-    SELECT *
-    FROM symbol_edges
-    WHERE target = $1
-    ORDER BY file_path, line
-  `, [symbol]);
+    SELECT e.*
+    FROM symbol_edges e
+    JOIN repositories r ON r.id = e.repository_id
+    WHERE e.target = $1
+      AND e.relationship = 'CALLS'
+      AND ($2::text IS NULL OR lower(r.root_path) = lower($2))
+    ORDER BY e.file_path, e.line
+  `, [symbol, workspaceRoot ?? null]);
 
   return result.rows;
 }
 
-export async function symbolCallees(symbol: string) {
+export async function symbolCallees(symbol: string, workspaceRoot?: string) {
   const pool = getPool();
 
   const result = await pool.query(`
-    SELECT *
-    FROM symbol_edges
-    WHERE source = $1
-    ORDER BY file_path, line
-  `, [symbol]);
+    SELECT e.*
+    FROM symbol_edges e
+    JOIN repositories r ON r.id = e.repository_id
+    WHERE e.source = $1
+      AND e.relationship = 'CALLS'
+      AND ($2::text IS NULL OR lower(r.root_path) = lower($2))
+    ORDER BY e.file_path, e.line
+  `, [symbol, workspaceRoot ?? null]);
 
   return result.rows;
 }
