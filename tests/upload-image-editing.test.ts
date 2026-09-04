@@ -1,14 +1,19 @@
-import { describe, expect, it } from 'vitest';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   classifyDirectMediaRequest,
   isImageEditRequest,
   isImageGenerationRequest,
+  lastGeneratedImageFromHistory,
 } from '../apps/server/src/routes/agent';
 import {
   fitGenerationSize,
   readImageDimensions,
   renderUploadsForPrompt,
   selectEditableImage,
+  workspaceImageDescriptor,
   type UploadDescriptor,
 } from '../apps/server/src/workspace-uploads';
 
@@ -186,5 +191,78 @@ describe('renderUploadsForPrompt for images', () => {
     ]);
     expect(rendered).toContain('Read it with a tool');
     expect(rendered).not.toContain('sourcePath');
+  });
+});
+
+describe('lastGeneratedImageFromHistory', () => {
+  const answer = (path: string) =>
+    `TASK_COMPLETE: Generated image saved to ${path} (SHA-256: ${'a'.repeat(64)}).`;
+
+  it('finds the newest image an assistant turn reported', () => {
+    expect(lastGeneratedImageFromHistory([
+      { role: 'user', content: 'a portrait of a woman' },
+      { role: 'assistant', content: answer('generated/image-run_aaa.png') },
+      { role: 'user', content: 'update the image so the background is darker' },
+      { role: 'assistant', content: answer('generated/image-run_bbb.png') },
+    ])).toBe('generated/image-run_bbb.png');
+  });
+
+  it('ignores video output and paths outside the generated directory', () => {
+    expect(lastGeneratedImageFromHistory([
+      { role: 'assistant', content: answer('generated/video-run_aaa.mp4') },
+    ])).toBeUndefined();
+    expect(lastGeneratedImageFromHistory([
+      { role: 'assistant', content: 'I read apps/web/src/logo.png while reviewing the code.' },
+    ])).toBeUndefined();
+  });
+
+  it('never takes a path a user turn supplied', () => {
+    // Only what the run itself saved is evidence; prompt text is not.
+    expect(lastGeneratedImageFromHistory([
+      { role: 'user', content: 'edit generated/image-run_zzz.png for me' },
+    ])).toBeUndefined();
+  });
+
+  it('returns undefined for an empty history', () => {
+    expect(lastGeneratedImageFromHistory([])).toBeUndefined();
+  });
+});
+
+describe('workspaceImageDescriptor', () => {
+  let root: string;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'dacai-generated-'));
+    mkdirSync(join(root, 'generated'));
+  });
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('describes a generated image the way an upload is described', async () => {
+    writeFileSync(join(root, 'generated', 'image-run_a.png'), pngHeader(1024, 768));
+    const descriptor = await workspaceImageDescriptor(root, 'generated/image-run_a.png');
+    expect(descriptor).toMatchObject({
+      path: 'generated/image-run_a.png',
+      name: 'image-run_a.png',
+      mimeType: 'image/png',
+      kind: 'binary',
+    });
+    // The descriptor has to survive the same selection the attachment path uses.
+    expect(selectEditableImage([descriptor!])?.path).toBe('generated/image-run_a.png');
+  });
+
+  it('refuses a path that escapes the workspace', async () => {
+    expect(await workspaceImageDescriptor(root, '../outside.png')).toBeUndefined();
+  });
+
+  it('refuses missing, empty and unusable files', async () => {
+    writeFileSync(join(root, 'generated', 'empty.png'), Buffer.alloc(0));
+    writeFileSync(join(root, 'generated', 'clip.mp4'), Buffer.from('not an image'));
+    expect(await workspaceImageDescriptor(root, 'generated/missing.png')).toBeUndefined();
+    expect(await workspaceImageDescriptor(root, 'generated/empty.png')).toBeUndefined();
+    expect(await workspaceImageDescriptor(root, 'generated/clip.mp4')).toBeUndefined();
+    expect(await workspaceImageDescriptor(root, 'generated')).toBeUndefined();
   });
 });

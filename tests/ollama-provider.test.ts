@@ -110,6 +110,23 @@ describe('Ollama request boundary normalization', () => {
     expect(chatBody?.tools).toHaveLength(1);
   });
 
+  it('caps remote Ollama context to protect GPU KV-cache memory', async () => {
+    let chatBody: Record<string, unknown> | undefined;
+    vi.stubGlobal('fetch', vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      chatBody = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
+      return new Response(JSON.stringify({ model: 'qwen3:8b', message: { content: 'ready' } }), { status: 200 });
+    }));
+
+    const provider = new OllamaProvider({
+      id: 'remote_gpu_ollama', kind: 'ollama', baseUrl: 'http://127.0.0.1:11435', enabled: true,
+      usageClass: 'REMOTE_GPU_OLLAMA', transport: 'ssh-tunnel', requestTimeoutMs: 1_000,
+      contextWindowTokens: 8_192,
+    });
+
+    await provider.chat({ model: 'qwen3:8b', messages: [{ role: 'user', content: 'hello' }] });
+    expect((chatBody?.options as Record<string, unknown>).num_ctx).toBe(8_192);
+  });
+
   it('projects complex canonical schemas without mutating them', () => {
     const canonical = {
       $schema: 'https://json-schema.org/draft/2020-12/schema',

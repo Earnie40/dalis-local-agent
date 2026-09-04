@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { ProviderRegistry } from '@dacai-local-agent/providers';
 import {
   buildGroundedEditPrompt,
+  analyzeImageForEdit,
   describeImage,
   evaluateSourceConditionedMedia,
   VISION_ALIAS,
@@ -78,7 +79,12 @@ describe('describeImage', () => {
 describe('buildGroundedEditPrompt', () => {
   it('describes the whole intended result, not just the delta', async () => {
     const caption = 'A woman in a red coat standing in front of a brick wall, brown hair, soft daylight.';
-    const registry = registryWith(vi.fn(async () => ({ content: caption })));
+    const registry = registryWith(vi.fn(async () => ({ content: JSON.stringify({
+      sceneSummary: caption,
+      requestedChange: 'make her hair blonde',
+      targetRegions: ['hair at the top-center of the subject'],
+      regions: [{ label: 'subject hair', location: 'top-center', box: { left: 0.35, top: 0.08, right: 0.7, bottom: 0.3 }, visibleDetails: 'brown hair' }],
+    }) })));
 
     const grounded = await buildGroundedEditPrompt(registry, attachment, 'make her hair blonde');
 
@@ -89,19 +95,48 @@ describe('buildGroundedEditPrompt', () => {
     expect(grounded.editPrompt).toContain('make her hair blonde');
     expect(grounded.editPrompt).toContain('remains exactly as described');
     expect(grounded.description).toBe(caption);
+    expect(grounded.regions[0].location).toBe('top-center');
+    expect(grounded.editPrompt).toContain('top-center');
   });
 
   it('collapses whitespace so the prompt stays a single line', async () => {
-    const registry = registryWith(vi.fn(async () => ({ content: 'A dog.\n\n  Sitting   on grass.' })));
+    const registry = registryWith(vi.fn(async () => ({ content: JSON.stringify({ sceneSummary: 'A dog. Sitting on grass.', regions: [] }) })));
     const grounded = await buildGroundedEditPrompt(registry, attachment, 'add a red collar');
     expect(grounded.editPrompt).not.toMatch(/\s{2,}|\n/);
   });
 
   it('bounds the prompt so a runaway caption cannot flood the diffusion request', async () => {
-    const registry = registryWith(vi.fn(async () => ({ content: 'word '.repeat(5_000) })));
+    const registry = registryWith(vi.fn(async () => ({ content: JSON.stringify({ sceneSummary: 'word '.repeat(5_000), regions: [] }) })));
     const grounded = await buildGroundedEditPrompt(registry, attachment, 'brighter');
     expect(grounded.description.length).toBeLessThanOrEqual(1_200);
     expect(grounded.editPrompt.length).toBeLessThanOrEqual(1_200);
+  });
+});
+
+describe('analyzeImageForEdit', () => {
+  it('returns structured target regions and normalized coordinates', async () => {
+    const registry = registryWith(vi.fn(async () => ({ content: JSON.stringify({
+      sceneSummary: 'A person centered in a room.',
+      requestedChange: 'change the upper-right lamp',
+      targetRegions: ['upper-right lamp'],
+      regions: [{ label: 'lamp', location: 'upper-right', box: { left: 0.72, top: 0.08, right: 0.95, bottom: 0.32 }, visibleDetails: 'a brass lamp' }],
+    }) })));
+    const result = await analyzeImageForEdit(registry, attachment, 'change the upper-right lamp');
+    expect(result.targetRegions).toEqual(['upper-right lamp']);
+    expect(result.regions[0].box).toEqual({ left: 0.72, top: 0.08, right: 0.95, bottom: 0.32 });
+  });
+
+  it('keeps analysis bounded when the model returns invalid or oversized regions', async () => {
+    const registry = registryWith(vi.fn(async () => ({ content: JSON.stringify({
+      sceneSummary: 'A scene.',
+      regions: [
+        { label: 'invalid', location: 'center', box: { left: 2, top: 2, right: 1, bottom: 1 }, visibleDetails: 'ignored' },
+        ...Array.from({ length: 20 }, (_, index) => ({ label: `region-${index}`, location: 'center', visibleDetails: 'visible' })),
+      ],
+    }) })));
+    const result = await analyzeImageForEdit(registry, attachment, 'change the center region');
+    expect(result.regions).toHaveLength(12);
+    expect(result.regions[0].box).toBeUndefined();
   });
 });
 

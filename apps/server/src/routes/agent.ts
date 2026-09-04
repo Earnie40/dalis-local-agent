@@ -42,10 +42,11 @@ import {
   renderUploadsForPrompt,
   loadVisionAttachments,
   selectEditableImage,
+  workspaceImageDescriptor,
 } from '../workspace-uploads';
 import {
   buildGroundedEditPrompt,
-  describeImage,
+  analyzeImageForEdit,
   VisionUnavailableError,
 } from '../vision';
 import { LoopTraceRecorder } from '@dacai-local-agent/training-traces';
@@ -190,6 +191,28 @@ export function isImageEditRequest(prompt: string, options: MediaIntentOptions =
     normalized.trim().length > 0 &&
     !ATTACHED_IMAGE_INSPECTION_INTENT.test(normalized),
   );
+}
+
+/**
+ * Path of the image this conversation last produced, taken from the assistant
+ * turn that reported it.
+ *
+ * A follow-up refinement ("update the image so the sky is darker") carries no
+ * attachment — the composer clears the attachment bar after every run — so the
+ * only grounded source for a continued edit is the artifact the previous turn
+ * actually saved. Restricted to the `generated/` prefix the media path writes
+ * to, so an incidental filename in prose can never become an edit source.
+ */
+export function lastGeneratedImageFromHistory(
+  history: readonly { role: string; content: string }[],
+): string | undefined {
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    const message = history[index];
+    if (message.role !== 'assistant' || typeof message.content !== 'string') continue;
+    const matches = message.content.match(/\bgenerated\/[\w.-]+\.(?:png|jpe?g|webp)\b/gi);
+    if (matches?.length) return matches[matches.length - 1];
+  }
+  return undefined;
 }
 
 export function isVideoGenerationRequest(prompt: string, requestedTools: Iterable<string> = []): boolean {
@@ -1568,12 +1591,36 @@ export function registerAgentRoutes(
           throw new Error(`${kind === 'image' ? 'Image' : 'Video'} generation is unavailable because ${mediaTool} is not authorized for this run.`);
         }
 
-        const sourceImage = editableImage;
+        const attachedSource = editableImage;
         const imageEditRun = imageGenerationRun && isImageEditRequest(effectivePrompt, {
-          hasImageAttachment: Boolean(sourceImage),
+          hasImageAttachment: Boolean(attachedSource),
         });
+        // A refinement of the picture the previous turn produced arrives with an
+        // empty attachment bar, so continue from that artifact instead of
+        // rejecting the request. Only an edit resolves a source this way: a
+        // fresh generation must never be conditioned on the last image.
+        const continuedPath = imageEditRun && !attachedSource
+          ? lastGeneratedImageFromHistory(conversationHistory)
+          : undefined;
+        const continuedSource = continuedPath
+          ? await workspaceImageDescriptor(workspace.rootPath, continuedPath)
+          : undefined;
+        const sourceImage = attachedSource ?? continuedSource;
         if (imageEditRun && !sourceImage) {
-          throw new Error('Image editing requires an attached PNG, JPEG, or WebP source image.');
+          throw new Error(
+            'Image editing requires a source image. Attach a PNG, JPEG, or WebP file, or ask ' +
+            'for the change in the same conversation as the image it should apply to.',
+          );
+        }
+        if (continuedSource) {
+          void activity.emit({
+            type: 'system',
+            status: 'running',
+            title: 'Continuing from the last generated image',
+            message: `No file was attached, so the edit runs on ${continuedSource.path} from earlier in this conversation.`,
+            toolName: mediaTool,
+            filePath: continuedSource.path,
+          });
         }
 
         const outputPath = `generated/${kind}-${runId}.${format}`;
@@ -1601,8 +1648,12 @@ export function registerAgentRoutes(
 
         let groundedPrompt: string | undefined;
         let sourceDescription: string | undefined;
+        let spatialInstruction: string | undefined;
         if (imageEditRun && sourceImage) {
-          const attachment = visionAttachments.find((entry) => entry.upload.id === sourceImage.id);
+          // A continued source was never uploaded, so it is not among the
+          // prompt's vision attachments; read its pixels here instead.
+          const attachment = visionAttachments.find((entry) => entry.upload.id === sourceImage.id)
+            ?? (await loadVisionAttachments(workspace.rootPath, [sourceImage]))[0];
           if (attachment) {
             try {
               if (isImg2Img) {
@@ -1623,40 +1674,60 @@ export function registerAgentRoutes(
                   metadata: { visionAlias: grounded.alias, visionModel: grounded.model },
                 });
               } else {
-                const described = await describeImage(
+                const analyzed = await analyzeImageForEdit(
                   deps.registry,
                   attachment,
-                  'Describe this image.',
+                  cleanedPrompt,
                   controller.signal,
                 );
-                sourceDescription = described.description;
+                sourceDescription = analyzed.description;
+                const regions = analyzed.regions.map((region) =>
+                  `${region.label} at ${region.location}${region.box ? ` (${region.box.left},${region.box.top})-(${region.box.right},${region.box.bottom})` : ''}: ${region.visibleDetails}`,
+                ).join('; ');
+                spatialInstruction = [
+                  cleanedPrompt,
+                  analyzed.targetRegions.length ? `Target regions: ${analyzed.targetRegions.join(', ')}.` : '',
+                  regions ? `Use these visible region anchors: ${regions}.` : '',
+                  'Preserve every other subject, pose, composition, and background detail unless explicitly changed.',
+                ].filter(Boolean).join(' ');
                 void activity.emit({
                   type: 'inspection',
                   status: 'running',
-                  title: 'Read the attached image',
-                  message: described.description,
+                  title: 'Located edit regions in the attached image',
+                  message: analyzed.description,
                   toolName: mediaTool,
-                  metadata: { visionAlias: described.alias, visionModel: described.model },
+                  metadata: {
+                    visionAlias: analyzed.alias,
+                    visionModel: analyzed.model,
+                    targetRegions: analyzed.targetRegions,
+                    regions: analyzed.regions,
+                  },
                 });
               }
             } catch (error) {
-              // Editing without grounding is worse, not impossible. Say so
-              // rather than silently producing a drifted result.
+              // A source edit without visual grounding can alter the wrong
+              // person or region. Fail explicitly instead of producing a
+              // plausible but ungrounded result.
               void activity.emit({
                 type: 'warning',
-                status: 'running',
-                title: 'Editing without seeing the image',
+                status: 'failed',
+                title: 'Image edit requires visual grounding',
                 message: error instanceof VisionUnavailableError
-                  ? `${error.message} The edit will run on the instruction alone and may not preserve the original.`
-                  : 'The vision model could not describe the attachment; the edit will run on the instruction alone.',
+                  ? `${error.message} The edit was not submitted because its target region could not be verified.`
+                  : 'The vision model could not locate the requested region, so the edit was not submitted.',
                 toolName: mediaTool,
               });
+              throw new Error(
+                error instanceof VisionUnavailableError
+                  ? `${error.message} Attach a readable image or restore the configured vision model before retrying the edit.`
+                  : 'Image edit cancelled: visual region analysis failed before submission.',
+              );
             }
           }
         }
 
         const effectiveImagePrompt = imageEditRun && !isImg2Img
-          ? cleanedPrompt
+          ? (spatialInstruction ?? cleanedPrompt)
           : (groundedPrompt ?? cleanedPrompt);
         const realismRequested = /\b(realistic|photorealistic|photoreal|lifelike|true[- ]to[- ]life)\b/i.test(cleanedPrompt);
         const argumentsForTool: Record<string, unknown> = imageGenerationRun

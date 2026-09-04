@@ -70,6 +70,8 @@ export const ProviderInstanceSchema = z
     proxyRequired: z.boolean().default(false),
     authTokenEnvVar: EnvVarNameSchema.optional(),
     requestTimeoutMs: z.number().int().positive().default(120_000),
+    /** Optional Ollama context cap; limits KV-cache VRAM on constrained GPUs. */
+    contextWindowTokens: z.number().int().min(2_048).max(131_072).optional(),
     fallbackInstanceId: z.string().optional(),
   })
   .superRefine((instance, ctx) => {
@@ -266,6 +268,10 @@ export function buildProviderInstances(env: NodeJS.ProcessEnv = process.env): Re
       proxyRequired: truthy(env.OUTBOUND_PROXY_REQUIRED),
       authTokenEnvVar: env.OLLAMA_REMOTE_AUTH_TOKEN ? 'OLLAMA_REMOTE_AUTH_TOKEN' : undefined,
       requestTimeoutMs: Number(env.RUNPOD_OLLAMA_REQUEST_TIMEOUT_MS ?? env.OLLAMA_REQUEST_TIMEOUT_MS ?? 300_000),
+      // Keep the remote model's KV cache bounded. A large context can consume
+      // several GB after the model is loaded and turn a healthy pod into an
+      // OOM failure before the first token is produced.
+      contextWindowTokens: Number(env.RUNPOD_OLLAMA_CONTEXT_TOKENS ?? env.OLLAMA_REMOTE_CONTEXT_TOKENS ?? 8_192),
       // A stopped or unreachable pod must degrade to local inference rather
       // than failing the run outright.
       fallbackInstanceId: 'local_ollama',

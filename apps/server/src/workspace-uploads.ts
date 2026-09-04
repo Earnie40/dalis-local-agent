@@ -347,6 +347,47 @@ export function selectEditableImage(
 }
 
 /**
+ * Describes an ordinary workspace image — a previously generated artifact, say
+ * — in the same shape as an upload, so edit sourcing, dimension reading and
+ * vision grounding can treat it exactly like an attachment. Returns undefined
+ * unless the path is inside the workspace, exists, is non-empty, and is a
+ * format image.generate accepts as a source.
+ */
+export async function workspaceImageDescriptor(
+  workspaceRoot: string,
+  relativePath: string,
+): Promise<UploadDescriptor | undefined> {
+  const path = String(relativePath ?? '').replace(/\\/g, '/');
+  const mimeType = BINARY_MIME_TYPES[extname(path).toLowerCase()];
+  if (!mimeType || !EDITABLE_IMAGE_MIME_TYPES.has(mimeType)) return undefined;
+
+  let absolute: string;
+  try {
+    absolute = resolveWithinWorkspace(workspaceRoot, path);
+  } catch {
+    return undefined;
+  }
+
+  let info;
+  try {
+    info = await stat(absolute);
+  } catch {
+    return undefined;
+  }
+  if (!info.isFile() || info.size === 0) return undefined;
+
+  return {
+    id: path,
+    name: basename(path),
+    path,
+    bytes: info.size,
+    mimeType,
+    kind: 'binary',
+    uploadedAt: info.mtime.toISOString(),
+  };
+}
+
+/**
  * Reads intrinsic pixel dimensions from PNG, JPEG and WebP headers.
  *
  * The image backend is told what size to render, so an edit that does not pass

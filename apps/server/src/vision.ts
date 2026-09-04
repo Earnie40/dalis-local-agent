@@ -10,6 +10,8 @@ export const VISION_ALIAS = 'vision';
  * a diffusion prompt with its own token limit.
  */
 const MAX_DESCRIPTION_CHARS = 1_200;
+const MAX_REGION_COUNT = 12;
+const MAX_REGION_TEXT_CHARS = 280;
 
 const DESCRIBE_SYSTEM_PROMPT =
   'You describe images for an image-editing pipeline. Reply with one dense, literal caption and nothing else. ' +
@@ -24,6 +26,23 @@ export interface GroundedEdit {
   editPrompt: string;
   alias: string;
   model: string;
+  regions: VisionRegion[];
+}
+
+export interface VisionRegion {
+  label: string;
+  location: string;
+  box?: { left: number; top: number; right: number; bottom: number };
+  visibleDetails: string;
+}
+
+export interface VisionEditAnalysis {
+  description: string;
+  regions: VisionRegion[];
+  requestedChange: string;
+  targetRegions: string[];
+  alias: string;
+  model: string;
 }
 
 export class VisionUnavailableError extends Error {
@@ -35,6 +54,60 @@ export class VisionUnavailableError extends Error {
 
 function collapse(text: string): string {
   return text.replace(/\s+/g, ' ').trim().slice(0, MAX_DESCRIPTION_CHARS);
+}
+
+function regionText(value: unknown): string {
+  return typeof value === 'string'
+    ? value.replace(/\s+/g, ' ').trim().slice(0, MAX_REGION_TEXT_CHARS)
+    : '';
+}
+
+function normalizedBox(value: unknown): VisionRegion['box'] | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const box = value as Record<string, unknown>;
+  const numbers = ['left', 'top', 'right', 'bottom'].map((key) => Number(box[key]));
+  if (numbers.some((entry) => !Number.isFinite(entry))) return undefined;
+  const [left, top, right, bottom] = numbers.map((entry) => Math.max(0, Math.min(1, entry)));
+  if (right <= left || bottom <= top) return undefined;
+  return { left, top, right, bottom };
+}
+
+function parseVisionAnalysis(raw: string, instruction: string, alias: string, model: string): VisionEditAnalysis {
+  const match = raw.match(/\{[\s\S]*\}/);
+  try {
+    const parsed = JSON.parse(match ? match[0] : raw) as Record<string, unknown>;
+    const regions = Array.isArray(parsed.regions)
+      ? parsed.regions.slice(0, MAX_REGION_COUNT).flatMap((item): VisionRegion[] => {
+          if (!item || typeof item !== 'object') return [];
+          const region = item as Record<string, unknown>;
+          const label = regionText(region.label);
+          const location = regionText(region.location);
+          const visibleDetails = regionText(region.visibleDetails);
+          return label && location && visibleDetails ? [{ label, location, visibleDetails, box: normalizedBox(region.box) }] : [];
+        })
+      : [];
+    const requestedChange = regionText(parsed.requestedChange) || instruction.trim().slice(0, MAX_REGION_TEXT_CHARS);
+    const targetRegions = Array.isArray(parsed.targetRegions)
+      ? parsed.targetRegions.filter((item): item is string => typeof item === 'string').map(regionText).filter(Boolean).slice(0, 8)
+      : [];
+    return {
+      description: collapse(regionText(parsed.sceneSummary) || raw),
+      regions,
+      requestedChange,
+      targetRegions,
+      alias,
+      model,
+    };
+  } catch {
+    return {
+      description: collapse(raw),
+      regions: [],
+      requestedChange: instruction.trim().slice(0, MAX_REGION_TEXT_CHARS),
+      targetRegions: [],
+      alias,
+      model,
+    };
+  }
 }
 
 /**
@@ -88,6 +161,50 @@ export async function describeImage(
 }
 
 /**
+ * Produces spatially grounded evidence for an edit request. Coordinates are
+ * normalized to 0..1 so the result remains useful across source resolutions.
+ */
+export async function analyzeImageForEdit(
+  registry: ProviderRegistry,
+  attachment: VisionAttachment,
+  instruction: string,
+  signal?: AbortSignal,
+): Promise<VisionEditAnalysis> {
+  let resolved;
+  try {
+    resolved = await registry.resolveAlias(VISION_ALIAS, { requireToolCalling: false, skipCapabilityProbe: true });
+  } catch (error) {
+    throw new VisionUnavailableError(
+      `No vision model is available for spatial image analysis: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
+  const response = await resolved.provider.chat({
+    model: resolved.model,
+    systemPrompt:
+      'You analyze images for a conversational editing assistant. Identify the exact visual regions relevant to the user request. ' +
+      'Use image-relative locations such as upper-left, center, or lower-right and normalized coordinates from 0 to 1. ' +
+      'Only report visible facts; never invent hidden content. Return JSON only.',
+    messages: [{
+      role: 'user',
+      content: [
+        `User request: ${instruction.trim()}`,
+        'Return this JSON shape:',
+        '{"sceneSummary":"...","requestedChange":"...","targetRegions":["..."],"regions":[{"label":"...","location":"...","box":{"left":0,"top":0,"right":1,"bottom":1},"visibleDetails":"..."}]}',
+        'Include up to 12 regions, prioritizing regions named or implied by the request. Omit box when uncertain.',
+      ].join('\n'),
+      images: [attachment.base64],
+    }],
+    temperature: 0.1,
+    signal,
+  });
+
+  const raw = (response.content ?? '').trim();
+  if (!raw) throw new VisionUnavailableError('The vision model returned no spatial analysis.');
+  return parseVisionAnalysis(raw, instruction, resolved.alias ?? VISION_ALIAS, resolved.model);
+}
+
+/**
  * Builds a diffusion prompt grounded in what the source image actually shows.
  *
  * SDXL img2img re-renders the whole frame from the prompt it is given. A bare
@@ -102,19 +219,22 @@ export async function buildGroundedEditPrompt(
   instruction: string,
   signal?: AbortSignal,
 ): Promise<GroundedEdit> {
-  const { description, alias, model } = await describeImage(
-    registry,
-    attachment,
-    'Describe this image in one dense caption.',
-    signal,
-  );
+  const analysis = await analyzeImageForEdit(registry, attachment, instruction, signal);
+  const regionContext = analysis.regions.length
+    ? ` Spatial regions: ${analysis.regions.map((region) =>
+        `${region.label} at ${region.location}${region.box ? ` (${region.box.left},${region.box.top})-(${region.box.right},${region.box.bottom})` : ''}: ${region.visibleDetails}`,
+      ).join('; ')}.`
+    : '';
+  const targetContext = analysis.targetRegions.length
+    ? ` Target regions identified by the visual analysis: ${analysis.targetRegions.join(', ')}.`
+    : '';
 
   const editPrompt = collapse(
-    `${description} The image is modified so that: ${instruction.trim()}. ` +
+    `${analysis.description}.${regionContext}${targetContext} The image is modified so that: ${analysis.requestedChange || instruction.trim()}. ` +
       'Everything else in the scene remains exactly as described.',
   );
 
-  return { description, editPrompt, alias, model };
+  return { description: analysis.description, editPrompt, alias: analysis.alias, model: analysis.model, regions: analysis.regions };
 }
 
 export interface EditEvaluationReport {

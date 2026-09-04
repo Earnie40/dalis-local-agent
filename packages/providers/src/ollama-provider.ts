@@ -443,7 +443,7 @@ export class OllamaProvider
           body:
             JSON.stringify(
               buildOllamaChatBody(
-                input,
+                this.withInstanceContextWindow(input),
                 false,
                 this.supportsThinking(
                   input.model,
@@ -590,7 +590,7 @@ export class OllamaProvider
           body:
             JSON.stringify(
               buildOllamaChatBody(
-                input,
+                this.withInstanceContextWindow(input),
                 true,
                 this.supportsThinking(
                   input.model,
@@ -1058,6 +1058,12 @@ export class OllamaProvider
           () => undefined,
         );
     }
+  }
+
+  private withInstanceContextWindow(input: ModelChatRequest): ModelChatRequest {
+    return this.instance.contextWindowTokens === undefined || input.contextWindowTokens !== undefined
+      ? input
+      : { ...input, contextWindowTokens: this.instance.contextWindowTokens };
   }
 
   /**
