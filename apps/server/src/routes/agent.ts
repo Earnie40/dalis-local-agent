@@ -95,6 +95,7 @@ import { phaseForAuditTool, repositoryAuditInstructions, resolveAgentRunMode, ty
 import {
   detectExecutionEnvironment,
   evidenceRequirementFor,
+  prohibitedOperationalRequestReason,
   resolveAgentTaskProfile,
 } from '../operational-task';
 import {
@@ -860,6 +861,18 @@ export function registerAgentRoutes(
       recoveredRun?.resumePrompt ??
       requestedPrompt;
     const conversationHistory = normalizeAgentConversationHistory(body.history);
+    const historyText = conversationHistory
+      .filter((message) => message.role === 'user')
+      .map((message) => (typeof message.content === 'string' ? message.content : ''))
+      .join('\n');
+    // The adversarial twin has its own synthetic-only tool boundary. Ordinary
+    // coding runs must not hand live-system tools to compromise/bypass intent.
+    const operationalSafetyBlock = body.role === 'adversarial-twin-simulator'
+      ? undefined
+      : prohibitedOperationalRequestReason(effectivePrompt, historyText);
+    if (operationalSafetyBlock) {
+      return reply.code(403).send({ error: operationalSafetyBlock });
+    }
 
     // Attachments are appended only to the model-facing prompt. The run
     // objective, acceptance criteria and image prompt keep the text the user
@@ -979,10 +992,6 @@ export function registerAgentRoutes(
     // just this turn, so the constraint survives into the turn that runs a
     // command. Tool selection below depends on it: a runtime the user named in
     // an earlier turn must still have its tools selected now.
-    const historyText = conversationHistory
-      .filter((message) => message.role === 'user')
-      .map((message) => (typeof message.content === 'string' ? message.content : ''))
-      .join('\n');
     const executionEnvironment = detectExecutionEnvironment(effectivePrompt, historyText);
     // Linux-native work on a Windows host. shell.run gives PowerShell, so a
     // prompt about apt, a POSIX script or a distro needs the WSL path instead.

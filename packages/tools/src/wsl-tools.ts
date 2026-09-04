@@ -136,6 +136,10 @@ export const wslRunTool: ToolDefinition = {
    * boundary than the Windows shell and must not be treated as one.
    */
   permissionTier: 'mutation',
+  // The command runs in bash inside the distro, not in the Windows host shell,
+  // so the permission engine classifies it in the Linux context. Tiers and
+  // escalations are unchanged; only the context the decision describes is.
+  commandRuntime: 'wsl',
   requiresRead: true,
   requiresWrite: true,
   requiresShell: true,
@@ -149,7 +153,7 @@ export const wslRunTool: ToolDefinition = {
     if (!command) throw new Error('"command" is required.');
 
     const distro = readDistro(input);
-    const classification = classifyCommand(command);
+    const classification = classifyCommand(command, { runtime: 'wsl' });
 
     const requestedCwd = typeof input.cwd === 'string' ? input.cwd.trim() : '';
     const cwd = requestedCwd || root;

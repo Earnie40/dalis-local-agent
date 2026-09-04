@@ -1,9 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
+  assertTargetIdentity,
+  classifyEvidenceOrigin,
   detectExecutionEnvironment,
+  exactEndpointMatch,
   evidenceRequirementFor,
+  executionScopeForAction,
   isOperationalRequest,
   operationalConstraintsInstructions,
+  prohibitedOperationalRequestReason,
   resolveAgentTaskProfile,
 } from '../apps/server/src/operational-task';
 
@@ -42,6 +47,43 @@ describe('operational vs. repository request detection', () => {
   it('does not misfire on coding prose that merely resembles system words', () => {
     // "service layer" / "network module" are code nouns, not host administration.
     expect(isOperationalRequest('refactor the service layer in the network module')).toBe(false);
+  });
+});
+
+describe('operational safety boundary', () => {
+  it('blocks explicit remote compromise even when the user claims to own the target', () => {
+    expect(prohibitedOperationalRequestReason(
+      'scan the Wi-Fi I own, find the desktop, and find a backdoor way into it',
+    )).toMatch(/cannot be executed/i);
+  });
+
+  it('allows authenticated remote administration on an owned system', () => {
+    expect(prohibitedOperationalRequestReason(
+      'open an RDP session to my desktop using my configured credentials',
+    )).toBeUndefined();
+  });
+
+  it('does not block repository work that fixes a backdoor vulnerability', () => {
+    expect(prohibitedOperationalRequestReason(
+      'fix the backdoor vulnerability in the remote access module and add unit tests',
+    )).toBeUndefined();
+  });
+
+  it('preserves the block across a terse follow-up via conversation history', () => {
+    expect(prohibitedOperationalRequestReason(
+      'now do it',
+      'scan my network and find a backdoor way into the desktop',
+    )).toMatch(/authenticated administration path/i);
+  });
+
+  it('warns operational models against the unsupported inferences in the failure trace', () => {
+    const directive = operationalConstraintsInstructions({
+      operational: true,
+      availableTools: LIVE_TOOLS,
+    });
+    expect(directive).toContain('An ARP entry or a MAC address');
+    expect(directive).toContain('local clipboard');
+    expect(directive).toContain('Never replace authentication with a backdoor');
   });
 });
 
@@ -91,6 +133,84 @@ describe('explicit execution-environment constraints', () => {
     });
     expect(directive).toContain('EXECUTION ENVIRONMENT CONSTRAINT');
     expect(directive).not.toContain('OPERATIONAL EXECUTION DIRECTIVE');
+  });
+});
+
+describe('execution-host vs target-host evidence', () => {
+  it('local IP evidence cannot establish remote-target identity', () => {
+    const evidence = classifyEvidenceOrigin({
+      command: 'ipconfig',
+      output: 'IPv4 Address . . . . . . . . . : 192.168.1.12',
+      executionHost: 'local',
+      targetHost: undefined,
+    });
+
+    expect(evidence.origin).toBe('local-execution-host');
+    expect(evidence.requiresTargetScope).toBe(true);
+    expect(evidence.reason).toMatch(/LOCAL EXECUTION HOST/i);
+    expect(evidence.reason).toMatch(/local listener inspection/i);
+    expect(evidence.reason).toMatch(/cannot establish target identity/i);
+  });
+
+  it('local netstat output cannot be attributed to a remote target', () => {
+    const evidence = classifyEvidenceOrigin({
+      command: 'netstat -ano',
+      output: 'TCP    0.0.0.0:80    0.0.0.0:0    LISTENING',
+      executionHost: 'local',
+      targetHost: undefined,
+    });
+
+    expect(evidence.origin).toBe('local-execution-host');
+    expect(evidence.requiresTargetScope).toBe(true);
+    expect(evidence.reason).toMatch(/local listener inspection/i);
+  });
+
+  it('target conclusions require target-scoped evidence', () => {
+    const evidence = classifyEvidenceOrigin({
+      command: 'ssh user@example',
+      output: 'Connected to target host and printed release info.',
+      executionHost: 'local',
+      targetHost: 'example',
+      authenticatedRemoteExecution: true,
+    });
+
+    expect(evidence.origin).toBe('requested-remote-target');
+    expect(evidence.requiresTargetScope).toBe(false);
+    expect(evidence.reason).toMatch(/target-scoped evidence/i);
+  });
+
+  it('runtime fallback preserves the selected execution environment', () => {
+    const profile = resolveAgentTaskProfile({
+      prompt: 'use WSL and run uname -a',
+      availableTools: ['filesystem.list', 'shell.run', 'wsl.run'],
+    });
+
+    expect(profile.executionEnvironment).toBe('wsl');
+    expect(profile.evidenceRequirement?.tools).toEqual(['wsl.run']);
+    expect(profile.directive).toContain('Use wsl.run');
+    expect(profile.directive).toContain('Do NOT run these commands with shell.run');
+    expect(profile.directive).not.toContain('Use shell.run');
+  });
+
+  it('exact port verification does not match unrelated numeric substrings', () => {
+    expect(exactEndpointMatch('0.0.0.0:8080', '0.0.0.0:8080')).toBe(true);
+    expect(exactEndpointMatch('0.0.0.0:8080', '0.0.0.0:8081')).toBe(false);
+    expect(exactEndpointMatch('10.0.0.5:8080', '0.0.0.0:8080')).toBe(false);
+    expect(exactEndpointMatch('TCP 0.0.0.0:8080 LISTENING', '0.0.0.0:8080')).toBe(true);
+    expect(exactEndpointMatch('TCP 0.0.0.0:8080 LISTENING', '8080')).toBe(false);
+  });
+
+  it('normal local-host diagnostics still work correctly', () => {
+    const directive = operationalConstraintsInstructions({
+      operational: true,
+      executionEnvironment: undefined,
+      availableTools: ['system.network.info', 'shell.run'],
+    });
+
+    expect(directive).toContain('LOCAL EXECUTION HOST');
+    expect(directive).toContain('REQUESTED REMOTE TARGET');
+    expect(directive).toContain('local listener inspection');
+    expect(directive).toContain('authenticated remote');
   });
 });
 
@@ -178,5 +298,83 @@ describe('run task profile — evidence follows the task, tools follow the selec
     expect(
       resolveAgentTaskProfile({ prompt: 'ping the gateway', availableTools: ['filesystem.list'] }).directive,
     ).toContain('No live-system tool is selected');
+  });
+});
+
+describe('typed execution scopes and target identity', () => {
+  it('multiple discovered candidates cannot establish target identity by themselves', () => {
+    // A discovery step returned several reachable candidates but nothing that
+    // identifies any of them as the requested target.
+    const assessment = assertTargetIdentity({
+      candidates: ['candidate-a', 'candidate-b', 'candidate-c'],
+    });
+    expect(assessment.established).toBe(false);
+    expect(assessment.reason).toMatch(/reachability is not identity/i);
+
+    // Even a single reachable candidate is not identity on its own.
+    const single = assertTargetIdentity({ candidates: ['only-one'] });
+    expect(single.established).toBe(false);
+    expect(single.reason).toMatch(/reachability is not identity/i);
+  });
+
+  it('target identity requires direct target-scoped or authenticated evidence', () => {
+    expect(
+      assertTargetIdentity({ candidates: ['candidate-a', 'candidate-b'], directTargetEvidence: true }).established,
+    ).toBe(true);
+    expect(
+      assertTargetIdentity({ candidates: ['candidate-a'], authenticatedRemoteExecution: true }).established,
+    ).toBe(true);
+  });
+
+  it('one action can use an alternate runtime without forcing later actions into it', () => {
+    // Each action resolves its own scope from its own runtime; neither binds the
+    // other. An earlier alternate-runtime step does not pin a later host step.
+    const first = executionScopeForAction({ toolName: 'runner', runtime: 'wsl' });
+    const second = executionScopeForAction({ toolName: 'runner', runtime: 'powershell' });
+    expect(first).toBe('LOCAL_ALTERNATE_RUNTIME');
+    expect(second).toBe('LOCAL_WINDOWS');
+    expect(first).not.toBe(second);
+
+    // bash is an alternate local runtime; an established authenticated channel
+    // is the only scope that actually reaches the requested target.
+    expect(executionScopeForAction({ runtime: 'bash' })).toBe('LOCAL_ALTERNATE_RUNTIME');
+    expect(executionScopeForAction({ authenticatedRemoteExecution: true })).toBe('AUTHENTICATED_REMOTE_EXECUTION');
+    // Naming a remote target without an authenticated channel still executes locally.
+    expect(executionScopeForAction({ runtime: 'powershell' })).toBe('LOCAL_WINDOWS');
+  });
+
+  it('local execution evidence is scoped locally and cannot be attributed to another target', () => {
+    const windows = classifyEvidenceOrigin({
+      command: 'ipconfig',
+      output: 'IPv4 Address . . . : 10.0.0.4',
+      executionHost: 'local',
+    });
+    expect(windows.origin).toBe('local-execution-host');
+    expect(windows.scope).toBe('LOCAL_WINDOWS');
+    expect(windows.requiresTargetScope).toBe(true);
+
+    // The same reasoning holds for an alternate local runtime: still local, still
+    // not the requested target.
+    const alternate = classifyEvidenceOrigin({
+      command: 'ip addr',
+      output: 'inet 10.0.0.4/24',
+      executionHost: 'local',
+      executionRuntime: 'wsl',
+    });
+    expect(alternate.origin).toBe('local-execution-host');
+    expect(alternate.scope).toBe('LOCAL_ALTERNATE_RUNTIME');
+    expect(alternate.requiresTargetScope).toBe(true);
+  });
+
+  it('only an authenticated channel yields target-scoped evidence', () => {
+    const authed = classifyEvidenceOrigin({
+      command: 'ssh op@target hostname',
+      output: 'target-host',
+      targetHost: 'target',
+      authenticatedRemoteExecution: true,
+    });
+    expect(authed.origin).toBe('requested-remote-target');
+    expect(authed.scope).toBe('AUTHENTICATED_REMOTE_EXECUTION');
+    expect(authed.requiresTargetScope).toBe(false);
   });
 });

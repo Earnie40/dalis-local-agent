@@ -2,6 +2,7 @@ import { classifyCommand, TIER_ORDER } from './command-classifier';
 import {
   DEFAULT_PERMISSION_POLICY,
   type CommandClassification,
+  type CommandRuntime,
   type PermissionDecision,
   type PermissionPolicy,
   type PermissionTier,
@@ -14,6 +15,12 @@ export interface ToolAuthorizationRequest {
   capabilities: WorkspaceCapabilities;
   /** Set for shell tools so the command can be classified and escalated. */
   command?: string;
+  /**
+   * Where `command` executes, from the registered tool definition (never model
+   * input). Defaults to the host shell. A Linux runtime such as WSL is
+   * classified in its own context rather than with Windows-host assumptions.
+   */
+  commandRuntime?: CommandRuntime;
   /** Set for network tools. */
   requiresNetwork?: boolean;
   /** Set for tools that inspect workspace files, metadata, or repository state. */
@@ -80,7 +87,7 @@ export class PermissionEngine {
     // A shell command's own classification can only raise the tier, never lower
     // the one the tool declared.
     if (request.command !== undefined) {
-      const classification = this.classify(request.command);
+      const classification = this.classify(request.command, request.commandRuntime);
       if (TIER_ORDER[classification.tier] > TIER_ORDER[tier]) {
         tier = classification.tier;
       }
@@ -108,8 +115,8 @@ export class PermissionEngine {
     return this.applyPolicy(tier, reason, layer);
   }
 
-  classify(command: string): CommandClassification {
-    return classifyCommand(command);
+  classify(command: string, runtime: CommandRuntime = 'host'): CommandClassification {
+    return classifyCommand(command, { runtime });
   }
 
   private applyPolicy(

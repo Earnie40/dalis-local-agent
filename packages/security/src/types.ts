@@ -47,6 +47,18 @@ export const DEFAULT_PERMISSION_POLICY: PermissionPolicy = {
   deny: [],
 };
 
+/**
+ * Where a shell-style tool's `command` argument actually executes.
+ *
+ * `host` is the shell of the machine running the agent (PowerShell/cmd on a
+ * Windows host). `wsl` is bash inside a WSL distribution on a Windows host: a
+ * Linux environment with its own PATH, so a command's standing on the Windows
+ * host says nothing about it there. The classifier's tables are runtime-neutral
+ * and every tier rule applies in both; the runtime only changes how an
+ * unclassified command is described, never whether it escalates.
+ */
+export type CommandRuntime = 'host' | 'wsl';
+
 export interface CommandClassification {
   tier: PermissionTier;
   /** Normalized executable, e.g. "git", "npm". */
@@ -55,6 +67,8 @@ export interface CommandClassification {
   operation?: string;
   reason: string;
   layer: SecurityLayer;
+  /** Execution context the command was classified for. */
+  runtime: CommandRuntime;
 }
 
 /**

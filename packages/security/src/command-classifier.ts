@@ -1,7 +1,23 @@
 import type {
   CommandClassification,
+  CommandRuntime,
   PermissionTier,
 } from './types';
+
+export interface ClassifyCommandOptions {
+  /**
+   * Execution context of the command. Defaults to the host shell. The tier
+   * tables and escalation rules are identical for every runtime; the runtime
+   * decides how an unclassified command is described so a Linux command is
+   * never reported in Windows-host terms.
+   */
+  runtime?: CommandRuntime;
+}
+
+const RUNTIME_LABELS: Record<CommandRuntime, string> = {
+  host: 'host shell',
+  wsl: 'WSL Linux runtime',
+};
 
 /**
  * Lightweight classifier tokenizer.
@@ -1013,7 +1029,11 @@ function containsGitInspectionEscalation(
  */
 export function classifyCommand(
   command: string,
+  options: ClassifyCommandOptions = {},
 ): CommandClassification {
+  const runtime: CommandRuntime =
+    options.runtime ?? 'host';
+
   const trimmed =
     command.trim();
 
@@ -1029,6 +1049,8 @@ export function classifyCommand(
 
       layer:
         'unknown-operation',
+
+      runtime,
     };
   }
 
@@ -1055,6 +1077,8 @@ export function classifyCommand(
 
       layer:
         'argument-analysis',
+
+      runtime,
     };
   }
 
@@ -1082,6 +1106,8 @@ export function classifyCommand(
 
       layer:
         'unknown-operation',
+
+      runtime,
     };
   }
 
@@ -1267,13 +1293,19 @@ export function classifyCommand(
 
   /*
    * Unknown always fails upward.
+   *
+   * "Unknown" means the classifier has no table entry for the executable. It
+   * is not a statement about whether the executable exists: the classifier
+   * never consults a PATH, and for a Linux runtime such as WSL the Windows
+   * host's PATH would be the wrong one anyway. The reason names the runtime
+   * so the escalation is described in the context the command runs in.
    */
   else {
     tier =
       'high-impact';
 
     reason =
-      `"${executable}" is not a recognized executable.`;
+      `"${executable}" is not a classified executable for the ${RUNTIME_LABELS[runtime]}; unclassified commands are escalated for approval. This does not check whether it is installed.`;
 
     layer =
       'unknown-operation';
@@ -1397,5 +1429,6 @@ export function classifyCommand(
     operation,
     reason,
     layer,
+    runtime,
   };
 }

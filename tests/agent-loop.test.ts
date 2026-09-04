@@ -204,11 +204,12 @@ describe('agent loop', () => {
       model: 'm', capabilities: VERIFIED, executor: executor(() => ({ output: 'ok', success: true })), prompt: 'Deploy it',
     });
     const blocked = await runAgentLoop({
-      provider: scriptedProvider([{ content: 'TASK_BLOCKED: credentials are unavailable.' }]),
+      provider: scriptedProvider([{ content: 'Credentials are unavailable.\n\nTASK_BLOCKED' }]),
       model: 'm', capabilities: VERIFIED, executor: executor(() => ({ output: 'ok', success: true })), prompt: 'Deploy it',
     });
     expect(waiting.completionState).toBe('WAITING_FOR_USER');
     expect(blocked.completionState).toBe('BLOCKED');
+    expect(blocked.turns).toBe(1);
   });
 
   it('announces and uses a synthesis reserve near a deep audit ceiling', async () => {
@@ -691,5 +692,159 @@ describe('evidence requirement drives per-turn tool exposure', () => {
     expect(provider.requests.at(-1)?.messages.some((message) =>
       typeof message.content === 'string' && message.content.includes('You have not yet used any of these tools successfully: filesystem.list'),
     )).toBe(true);
+  });
+});
+
+describe('completion markers with Markdown formatting', () => {
+  const schema = (name: string): ToolSchema => ({ name, description: name, inputSchema: { type: 'object' } });
+  const runTools = ['wsl.list', 'wsl.run', 'filesystem.list', 'filesystem.search'].map(schema);
+
+  it('accepts **TASK_COMPLETE** after one WSL execution without a completion nudge or duplicate call', async () => {
+    const provider = scriptedProvider([
+      { toolCalls: [call('wsl.run', { command: 'uname -a' })] },
+      { content: 'Kernel: Linux host 6.6.0 #1 SMP x86_64 GNU/Linux\n\n**TASK_COMPLETE**' },
+    ]);
+    const exec = executor(() => ({ output: 'Linux host 6.6.0 #1 SMP x86_64 GNU/Linux', success: true }), runTools);
+
+    const result = await runAgentLoop({
+      provider,
+      model: 'm',
+      capabilities: VERIFIED,
+      executor: exec,
+      prompt: 'use WSL and run uname -a',
+      completionSignalRequired: true,
+      evidenceRequirement: { tools: ['wsl.list', 'wsl.run'], maxNudges: 2 },
+    });
+
+    expect(exec.calls.map((requested) => requested.name)).toEqual(['wsl.run']);
+    expect(result.turns).toBe(2);
+    expect(result.retries).toBe(0);
+    expect(result.completionState).toBe('GOAL_COMPLETE');
+    expect(result.stopReason).toBe('final-answer');
+    expect(provider.requests.at(-1)?.messages.some((message) =>
+      typeof message.content === 'string' && message.content.includes('TASK COMPLETION CHECK'),
+    )).toBe(false);
+  });
+
+  it('accepts emphasized TASK_BLOCKED and TASK_WAITING_FOR_USER declarations', async () => {
+    const blocked = await runAgentLoop({
+      provider: scriptedProvider([{ content: 'wsl.run is not selected for this run.\n\n**TASK_BLOCKED**' }]),
+      model: 'm', capabilities: VERIFIED, executor: executor(() => ({ output: 'ok', success: true })), prompt: 'Deploy it',
+      completionSignalRequired: true,
+    });
+    const waiting = await runAgentLoop({
+      provider: scriptedProvider([{ content: '**TASK_WAITING_FOR_USER:** which distro should I use?' }]),
+      model: 'm', capabilities: VERIFIED, executor: executor(() => ({ output: 'ok', success: true })), prompt: 'Deploy it',
+    });
+    expect(blocked.completionState).toBe('BLOCKED');
+    expect(blocked.turns).toBe(1);
+    expect(waiting.completionState).toBe('WAITING_FOR_USER');
+    expect(waiting.turns).toBe(1);
+  });
+
+  it('a prose mention of the marker is still not a completion declaration', async () => {
+    const provider = scriptedProvider([
+      { content: 'I will emit TASK_COMPLETE once the command has run.' },
+      { content: 'TASK_COMPLETE: the command ran.' },
+    ]);
+    const result = await runAgentLoop({
+      provider,
+      model: 'm',
+      capabilities: VERIFIED,
+      executor: executor(() => ({ output: 'ok', success: true })),
+      prompt: 'Audit',
+      completionSignalRequired: true,
+    });
+    expect(result.turns).toBe(2);
+    expect(provider.requests[1].messages.some((message) =>
+      typeof message.content === 'string' && message.content.includes('TASK COMPLETION CHECK'),
+    )).toBe(true);
+    expect(result.completionState).toBe('GOAL_COMPLETE');
+  });
+});
+
+describe('completion requires successful observed execution', () => {
+  const schema = (name: string): ToolSchema => ({ name, description: name, inputSchema: { type: 'object' } });
+  const runTools = ['wsl.run', 'wsl.list', 'filesystem.list'].map(schema);
+
+  it('a failed required action prevents TASK_COMPLETE and blocks instead', async () => {
+    const provider = scriptedProvider([
+      { toolCalls: [call('wsl.run', { command: 'do-the-thing' })] },
+      { content: 'TASK_COMPLETE: the operation finished successfully.' },
+    ]);
+    const result = await runAgentLoop({
+      provider,
+      model: 'm',
+      capabilities: VERIFIED,
+      // The required action fails every time it runs.
+      executor: executor(() => ({ output: 'command failed', success: false, error: 'tool-error' }), runTools),
+      prompt: 'use WSL and run the operation',
+      completionSignalRequired: true,
+      evidenceRequirement: { tools: ['wsl.run', 'wsl.list'], maxNudges: 1 },
+      maxTurns: 6,
+    });
+
+    // A completion claim that is not backed by a successful required tool result
+    // must not be accepted as done.
+    expect(result.completionState).toBe('BLOCKED');
+    expect(result.answer).toMatch(/^TASK_BLOCKED:/);
+    expect(result.answer).toMatch(/required execution did not succeed/i);
+  });
+
+  it('a proposed command or textual success claim does not satisfy an execution criterion', async () => {
+    const provider = scriptedProvider([
+      // The model never actually calls a tool; it just narrates and declares done.
+      { content: 'I would run `wsl.run uname -a`, which prints the kernel.\n\nTASK_COMPLETE: kernel reported.' },
+      { content: 'TASK_COMPLETE: kernel reported.' },
+    ]);
+    const result = await runAgentLoop({
+      provider,
+      model: 'm',
+      capabilities: VERIFIED,
+      executor: executor(() => ({ output: 'unused', success: true }), runTools),
+      prompt: 'use WSL and run uname -a',
+      completionSignalRequired: true,
+      evidenceRequirement: { tools: ['wsl.run', 'wsl.list'], maxNudges: 1 },
+      maxTurns: 6,
+    });
+
+    expect(result.completionState).toBe('BLOCKED');
+    expect(result.answer).toMatch(/proposed command, plan, or textual success claim/i);
+  });
+});
+
+describe('duplicate failed actions trigger replanning instead of repetition', () => {
+  const schema = (name: string): ToolSchema => ({ name, description: name, inputSchema: { type: 'object' } });
+
+  it('a repeated identical failure produces a replan directive, not another attempt', async () => {
+    let executions = 0;
+    const provider = scriptedProvider([
+      { toolCalls: [call('shell.run', { command: 'flaky' })] },
+      // The model tries the exact same failing call again.
+      { toolCalls: [call('shell.run', { command: 'flaky' })] },
+      { content: 'TASK_BLOCKED: the command keeps failing.' },
+    ]);
+    const exec = executor(() => {
+      executions += 1;
+      return { output: 'boom', success: false, error: 'tool-error' };
+    }, [schema('shell.run')]);
+
+    const result = await runAgentLoop({
+      provider,
+      model: 'm',
+      capabilities: VERIFIED,
+      executor: exec,
+      prompt: 'run the command',
+      maxTurns: 6,
+    });
+
+    // The failing action executed exactly once; the verbatim retry was refused.
+    expect(executions).toBe(1);
+    // The refusal is a replan signal, not the generic "use prior result" nudge.
+    const replanMessage = provider.requests
+      .flatMap((request) => request.messages)
+      .find((message) => typeof message.content === 'string' && message.content.includes('evidence to replan'));
+    expect(replanMessage).toBeDefined();
+    expect(result.completionState).toBe('BLOCKED');
   });
 });

@@ -68,6 +68,9 @@ export class PermissionedToolExecutor implements ToolExecutor {
       tier: tool.permissionTier,
       capabilities: this.options.capabilities,
       command: typeof call.arguments.command === 'string' ? call.arguments.command : undefined,
+      // The runtime comes from the registered definition, so the model cannot
+      // relabel a host command as something else to change its classification.
+      commandRuntime: tool.commandRuntime,
       autoApprove: tool.autoApprove,
       requiresRead: tool.requiresRead,
       requiresWrite: tool.requiresWrite,

@@ -8,6 +8,7 @@ import type {
   ToolSchema,
 } from './types';
 import { isAgentLoopCapable } from './types';
+import { hasCompletionMarker, hasCompletionSignal, stripCompletionMarker } from './completion-markers';
 import {
   buildWorkingStateContext,
   chooseInitialReasoningMode,
@@ -558,6 +559,10 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     },
   ];
   const seenCalls = new Set<string>();
+  // Signatures whose execution failed at least once. A verbatim retry of one of
+  // these is not new work: a repeated identical failure is evidence to replan,
+  // not to run the same losing action again.
+  const failedSignatures = new Set<string>();
   const knownPaths = new Set<string>();
   const changedFiles = new Set<string>();
   const pendingEngineeringArtifacts = new Set<string>();
@@ -801,9 +806,14 @@ ${toolsForTurn.map((tool) => `- ${tool.name}`).join('\n')}`,
         }
       }
 
-      const wantsTaskComplete = /^\s*TASK_COMPLETE:/i.test(content);
-      const waitingForUser = /^\s*TASK_WAITING_FOR_USER:/i.test(content);
-      const taskBlocked = /^\s*TASK_BLOCKED:/i.test(content);
+      // Small/local models format the terminal marker loosely: on its own
+      // line, wrapped in Markdown emphasis, or without the colon. The shared
+      // parser accepts those declarations and rejects incidental mentions in
+      // prose, and the durable graph reads the answer with the same parser so
+      // an accepted marker is never re-executed downstream.
+      const wantsTaskComplete = hasCompletionMarker(content, 'TASK_COMPLETE');
+      const waitingForUser = hasCompletionMarker(content, 'TASK_WAITING_FOR_USER');
+      const taskBlocked = hasCompletionMarker(content, 'TASK_BLOCKED');
       if (waitingForUser) {
         answer = content;
         stopReason = 'final-answer';
@@ -816,6 +826,33 @@ ${toolsForTurn.map((tool) => `- ${tool.name}`).join('\n')}`,
         completionState = 'BLOCKED';
         break;
       }
+
+      // EXECUTION-EVIDENCE COMPLETION GATE
+      //
+      // A completion claim must map to a successful observed tool result for the
+      // required executable outcome. When an evidence requirement is defined but
+      // no required tool has succeeded — it failed, was denied, or the model only
+      // proposed a command or asserted success in prose — TASK_COMPLETE is not
+      // verified execution. The evidence nudges above have already run; a claim
+      // that survives them with no successful required action becomes a blocker
+      // rather than an accepted completion. A failed action never satisfies an
+      // execution criterion.
+      const requiredEvidenceUnmet =
+        Boolean(requirement) && !requirement!.tools.some((tool) => succeededTools.has(tool));
+      if (wantsTaskComplete && requiredEvidenceUnmet) {
+        answer = [
+          'TASK_BLOCKED: required execution did not succeed, so completion cannot be verified.',
+          `No required tool produced a successful result: ${requirement!.tools.join(', ')}.`,
+          'A proposed command, plan, or textual success claim does not satisfy an execution criterion.',
+          `Unverified completion claim (not accepted as evidence):\n${stripCompletionMarker(content).slice(0, 800)}`,
+        ]
+          .join('\n\n')
+          .trim();
+        stopReason = 'no-progress';
+        completionState = 'BLOCKED';
+        break;
+      }
+
       const needsRequiredMutation = wantsTaskComplete && mutationRequiredByGoal && mutationGeneration === 0;
       if (needsRequiredMutation) {
         retries += 1;
@@ -865,9 +902,7 @@ ${toolsForTurn.map((tool) => `- ${tool.name}`).join('\n')}`,
       }
 
       if (completionSignalRequired) {
-        const hasCompletionSignal = /^\s*TASK_(?:COMPLETE|BLOCKED):/i.test(content);
-
-        if (!hasCompletionSignal) {
+        if (!hasCompletionSignal(content)) {
           if (completionNudges < 3) {
             completionNudges += 1;
             messages.push({
@@ -899,7 +934,7 @@ ${toolsForTurn.map((tool) => `- ${tool.name}`).join('\n')}`,
        * TASK_COMPLETE must additionally satisfy the caller-owned evidence gate.
        */
       if (
-        /^\s*TASK_COMPLETE:/i.test(content) &&
+        wantsTaskComplete &&
         options.completionGuard
       ) {
         let completionCheck: {
@@ -1031,21 +1066,36 @@ ${toolsForTurn.map((tool) => `- ${tool.name}`).join('\n')}`,
       const signature = toolCallSignature(call);
       if (seenCalls.has(signature)) {
         rejectedCalls += 1;
-        reasoningMode = escalateReasoningMode(reasoningMode, { rejectedCalls });
+        // A repeated call that previously FAILED is not the same as re-reading a
+        // successful result: it is the model retrying a losing action unchanged.
+        // Treat it as a trigger to replan with a materially different action,
+        // and escalate reasoning so the next turn does not repeat it again.
+        const previouslyFailed = failedSignatures.has(signature);
+        reasoningMode = previouslyFailed
+          ? 'deep'
+          : escalateReasoningMode(reasoningMode, { rejectedCalls });
         recentFailures.push(`duplicate ${call.name}: ${signature}`);
+        if (previouslyFailed) retries += 1;
         messages.push({
           role: 'tool',
           toolName: call.name,
           toolCallId: call.providerCallId ?? call.id,
-          content:
-            `Error: "${call.name}" was already called with these exact arguments and the result is above. ` +
-            'Use that result, call a different relevant tool, or answer the current user request.',
+          content: previouslyFailed
+            ? `Error: "${call.name}" already FAILED with these exact arguments and is being repeated unchanged. ` +
+              'A repeated identical failure is evidence to replan, not to retry. Do not call it again with the same arguments. ' +
+              'Use the failure as evidence: choose a materially different action or a different tool, or report TASK_BLOCKED with the specific blocker.'
+            : `Error: "${call.name}" was already called with these exact arguments and the result is above. ` +
+              'Use that result, call a different relevant tool, or answer the current user request.',
         });
         onEvent?.({
           type: 'tool_result',
           turn: turns,
           toolCall: call,
-          result: { output: 'duplicate call', success: false, error: 'duplicate-call' },
+          result: {
+            output: previouslyFailed ? 'duplicate failed call — replan required' : 'duplicate call',
+            success: false,
+            error: previouslyFailed ? 'duplicate-failed-call' : 'duplicate-call',
+          },
         });
         continue;
       }
@@ -1062,6 +1112,9 @@ ${toolsForTurn.map((tool) => `- ${tool.name}`).join('\n')}`,
       if (result.success) succeededTools.add(call.name);
 
       if (!result.success) {
+        // Remember the exact signature so a later verbatim retry is recognized
+        // as a repeated failure and forces a replan rather than another attempt.
+        failedSignatures.add(signature);
         recentFailures.push(`${call.name}: ${result.error ?? result.output.slice(0, 240)}`);
         reasoningMode = escalateReasoningMode(reasoningMode, {
           failures: recentFailures.length,
@@ -1362,7 +1415,6 @@ export class LocalAgentConversation {
     return result;
   }
 }
-
 
 
 

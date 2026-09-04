@@ -50,7 +50,7 @@ const OPERATIONAL_INTENT = new RegExp(
   [
     // network discovery / administration
     'port\\s*scan',
-    '(?:scan|scanning)\\s+(?:the\\s+)?(?:network|subnet|lan|wi-?fi)',
+    '(?:scan|scanning)\\s+(?:(?:the|my|our|a|an)\\s+)?(?:network|subnet|lan|wi-?fi)',
     'network\\s+scan',
     '\\bsubnet\\b',
     '\\bcidr\\b',
@@ -107,6 +107,22 @@ const COMMAND_EXECUTION_INTENT =
 const REPOSITORY_WORK_INTENT =
   /\b(?:implement|edit|fix|refactor|migrate|patch|rewrite|debug|modify|source\s+code|repository|repo|codebase|unit\s+tests?|test\s+suite|typecheck|lint|diagnostics)\b/i;
 
+// Authorization to administer a host does not authorize compromising it. Keep
+// this deliberately narrow: ordinary network discovery and authenticated
+// remote administration remain operational tasks, while explicit compromise,
+// persistence, credential theft, and access-control bypass intent is rejected
+// before an uncensored/local model receives tools.
+const PROHIBITED_REMOTE_INTRUSION_INTENT = new RegExp(
+  [
+    '\\b(?:find|use|create|install|plant|establish|open)\\b.{0,40}\\bbackdoor\\b',
+    '\\bbackdoor\\b.{0,40}\\b(?:into|access|on|way)\\b',
+    '\\b(?:hack|break)\\s+into\\b',
+    '\\b(?:bypass|evade|disable)\\b.{0,40}\\b(?:authentication|password|credentials?|access\\s+controls?|security\\s+controls?|permissions?)\\b',
+    '\\b(?:dump|steal|harvest)\\b.{0,30}\\bcredentials?\\b',
+  ].join('|'),
+  'i',
+);
+
 function textIsOperational(text: string): boolean {
   if (OPERATIONAL_INTENT.test(text) || IPV4_OR_CIDR.test(text)) return true;
   return (
@@ -129,9 +145,208 @@ export function isOperationalRequest(...texts: Array<string | undefined>): boole
   return present.length > 1 && textIsOperational(present.join('\n'));
 }
 
+/**
+ * Returns a user-facing reason when a live-system request explicitly asks for
+ * compromise or an access-control bypass. Repository work that discusses or
+ * fixes these concepts is not blocked.
+ */
+export function prohibitedOperationalRequestReason(
+  ...texts: Array<string | undefined>
+): string | undefined {
+  const present = texts.filter((text): text is string => Boolean(text && text.trim()));
+  if (!present.length || REPOSITORY_WORK_INTENT.test(present[0])) return undefined;
+  if (!isOperationalRequest(...present)) return undefined;
+  if (!PROHIBITED_REMOTE_INTRUSION_INTENT.test(present.join('\n'))) return undefined;
+  return 'Remote compromise, backdoors, credential theft, and access-control bypasses cannot be executed. Use an authenticated administration path such as RDP, WinRM, SSH, or an approved remote-support tool with explicit credentials and consent.';
+}
+
 /** Tool categories that observe or act on the running machine rather than this project's files. */
 export function isLiveSystemTool(toolName: string): boolean {
   return toolName === 'shell.run' || toolName.startsWith('wsl.') || toolName.startsWith('system.');
+}
+
+/**
+ * The distinct execution scopes a step can act in or produce evidence from.
+ * They are deliberately separate because evidence produced in one scope must
+ * never be attributed to another:
+ *
+ *   LOCAL_WINDOWS               the Windows host shell running the agent
+ *   LOCAL_ALTERNATE_RUNTIME     a different local runtime on that same host
+ *                               (e.g. bash inside WSL) — still the local host
+ *   REQUESTED_REMOTE_TARGET     the machine the task is *about*; being reachable
+ *                               from the local host does not make its identity
+ *                               or state observable from local evidence
+ *   AUTHENTICATED_REMOTE_EXECUTION  an established, authenticated channel that
+ *                               actually executes on the requested target; only
+ *                               this scope can produce target-scoped evidence or
+ *                               cause effects on the target
+ *
+ * The first two are execution hosts; the agent runs commands there. The third
+ * is the subject of the task, not an execution host. The fourth is the only
+ * scope that can both execute on and observe the target, and only "when
+ * actually available" — an established credentialed channel, never assumed.
+ */
+export type ExecutionScope =
+  | 'LOCAL_WINDOWS'
+  | 'LOCAL_ALTERNATE_RUNTIME'
+  | 'REQUESTED_REMOTE_TARGET'
+  | 'AUTHENTICATED_REMOTE_EXECUTION';
+
+/**
+ * The scope a single action executes in. Runtime selection is a property of the
+ * individual action, not the run: one step can use an alternate local runtime
+ * while a later step runs on the Windows host, and neither forces the other.
+ * A tool only reaches the requested target through an already-established
+ * authenticated channel; otherwise it executes locally regardless of the
+ * task's subject.
+ */
+export function executionScopeForAction(input: {
+  toolName?: string;
+  runtime?: ExecutionEnvironment;
+  authenticatedRemoteExecution?: boolean;
+}): ExecutionScope {
+  if (input.authenticatedRemoteExecution) return 'AUTHENTICATED_REMOTE_EXECUTION';
+  if (input.runtime === 'wsl' || input.runtime === 'bash') return 'LOCAL_ALTERNATE_RUNTIME';
+  return 'LOCAL_WINDOWS';
+}
+
+export interface TargetIdentityAssessment {
+  established: boolean;
+  reason: string;
+}
+
+/**
+ * Whether the requested remote target's identity is established. Reachability is
+ * not identity: a discovery step that returns one or many candidates does not,
+ * by itself, identify any of them as the target. Identity requires either
+ * direct target-scoped evidence (hostname, vendor, service banner, or
+ * authenticated management output tying a candidate to the requested target) or
+ * an authenticated remote-execution channel to the target.
+ */
+export function assertTargetIdentity(input: {
+  candidates?: string[];
+  directTargetEvidence?: boolean;
+  authenticatedRemoteExecution?: boolean;
+}): TargetIdentityAssessment {
+  if (input.authenticatedRemoteExecution) {
+    return {
+      established: true,
+      reason: 'Authenticated remote execution against the target establishes target-scoped identity.',
+    };
+  }
+  if (input.directTargetEvidence) {
+    return {
+      established: true,
+      reason: 'Direct target-scoped evidence (hostname, vendor, service banner, or authenticated management) identifies the target.',
+    };
+  }
+
+  const candidates = input.candidates ?? [];
+  if (candidates.length === 0) {
+    return { established: false, reason: 'No candidate has been discovered, so target identity is not established.' };
+  }
+  return {
+    established: false,
+    reason:
+      candidates.length > 1
+        ? `Discovery returned ${candidates.length} reachable candidates but no direct identifying evidence. Reachability is not identity: do not select one as the target without target-scoped evidence.`
+        : 'A single reachable candidate is not identifying evidence. Reachability is not identity: require direct target-scoped evidence before asserting the target.',
+  };
+}
+
+export type EvidenceOrigin = 'local-execution-host' | 'requested-remote-target' | 'unscoped';
+
+export interface EvidenceOriginClassification {
+  origin: EvidenceOrigin;
+  /** The typed execution scope the evidence was produced in, when determinable. */
+  scope?: ExecutionScope;
+  requiresTargetScope: boolean;
+  reason: string;
+}
+
+function isLocalHostEvidenceCommand(command?: string): boolean {
+  if (!command) return false;
+  const normalized = command.toLowerCase();
+  return /\b(?:hostname|ipconfig|get-net(?:adapter|ipconfiguration)|get-service|tasklist|netstat|arp|route|sc\s+query|wmic|systeminfo|ifconfig)\b/.test(normalized);
+}
+
+export function classifyEvidenceOrigin(input: {
+  command?: string;
+  output?: string;
+  executionHost?: 'local' | 'remote' | 'unknown';
+  /** Local runtime the evidence came from, so a WSL result is scoped as an alternate local runtime rather than the Windows host. */
+  executionRuntime?: ExecutionEnvironment;
+  targetHost?: string;
+  authenticatedRemoteExecution?: boolean;
+}): EvidenceOriginClassification {
+  const executionIsLocal = input.executionHost === 'local' || input.executionHost === undefined;
+  const targetIsEstablished = Boolean(input.targetHost) || Boolean(input.authenticatedRemoteExecution);
+  const localScope = executionScopeForAction({ runtime: input.executionRuntime });
+
+  if (targetIsEstablished && (input.authenticatedRemoteExecution || input.targetHost)) {
+    return {
+      origin: 'requested-remote-target',
+      scope: input.authenticatedRemoteExecution ? 'AUTHENTICATED_REMOTE_EXECUTION' : 'REQUESTED_REMOTE_TARGET',
+      requiresTargetScope: false,
+      reason: 'Target-scoped evidence is available from the requested remote target; local execution-host facts do not qualify as target identity.',
+    };
+  }
+
+  if (isLocalHostEvidenceCommand(input.command) || (executionIsLocal && input.output)) {
+    return {
+      origin: 'local-execution-host',
+      scope: localScope,
+      requiresTargetScope: true,
+      reason: 'LOCAL EXECUTION HOST evidence (hostname, IP, service tables, listeners, or local process data) is local listener inspection and not the requested remote target. It cannot establish target identity. Use target-scoped evidence from an authenticated remote channel or direct target output.',
+    };
+  }
+
+  return {
+    origin: 'unscoped',
+    requiresTargetScope: true,
+    reason: 'Evidence is unscoped. Do not infer target identity until the requested remote target is established from direct target evidence.',
+  };
+}
+
+export function exactEndpointMatch(lineOrValue: string, endpoint: string): boolean {
+  const source = lineOrValue.trim();
+  const candidate = endpoint.trim();
+  if (!source || !candidate) return false;
+
+  const normalizeHost = (value: string): string => {
+    const trimmed = value.trim();
+    if (!trimmed) return '';
+    const host = trimmed.replace(/^\[|\]$/g, '');
+    return host.replace(/\s+/g, '');
+  };
+
+  const normalizeEndpoint = (value: string): string | undefined => {
+    const trimmed = value.trim();
+    if (!trimmed) return undefined;
+    const hostMatch = trimmed.match(/^(?:\[([^\]]+)\]|([^:]+)):(\d{1,5})$/);
+    if (hostMatch) {
+      const host = normalizeHost(hostMatch[1] ?? hostMatch[2] ?? '');
+      const port = hostMatch[3];
+      if (!host || !port) return undefined;
+      return `${host}:${port}`;
+    }
+    return undefined;
+  };
+
+  const normalizedCandidate = normalizeEndpoint(candidate);
+  if (!normalizedCandidate) return false;
+
+  const sourceEndpoints = new Set<string>();
+  for (const match of source.matchAll(/(?:\[([^\]]+)\]|([^\s,;]+)):(\d{1,5})/g)) {
+    const host = normalizeHost(match[1] ?? match[2] ?? '');
+    const port = match[3];
+    if (host && port) {
+      sourceEndpoints.add(`${host}:${port}`);
+    }
+  }
+
+  const directEquals = source === candidate || source === normalizedCandidate;
+  return directEquals || sourceEndpoints.has(normalizedCandidate);
 }
 
 /** The repository-inspection tools a coding run must use before answering. */
@@ -292,7 +507,13 @@ export function operationalConstraintsInstructions(input: {
         liveTools
           ? `- Use the live-system tools selected for this run instead: ${liveTools}. Reach for repository tools only if the task is actually to read or change this project's code.`
           : '- No live-system tool is selected for this run, so the task cannot be observed or executed here. Report TASK_BLOCKED naming the missing capability instead of inspecting the repository.',
+        'LOCAL EXECUTION HOST: local hostname, IP, adapter, process, and listener data are evidence about the machine running the agent, not the requested remote target. Do not infer target identity from those values.',
+        'REQUESTED REMOTE TARGET: target conclusions require direct target-scoped evidence from the remote target or an authenticated remote channel. Local-host facts are never sufficient.',
+        '- Distinguish: local listener inspection; remote reachability; remote port/service probing; authenticated remote execution.',
         '- Ground each conclusion in real command output. Do not claim a host was found, a service is running, or an action succeeded without a successful tool result that shows it.',
+        '- An ARP entry or a MAC address similar to the access point does not identify a device. Require direct hostname, vendor, service, or authenticated management evidence before naming a host.',
+        '- A command that changes the local clipboard, process list, or desktop does not affect a remote host. Verify remote effects through the authenticated remote channel that performed them.',
+        '- If the requested remote action requires credentials or a configured management channel that is unavailable, report TASK_BLOCKED. Never replace authentication with a backdoor or access-control bypass.',
       ].join('\n'),
     );
   }

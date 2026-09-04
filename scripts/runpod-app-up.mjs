@@ -137,10 +137,10 @@ async function uploadSource() {
   const stage = `${APP_ROOT}.uploading`;
   const timestamp = new Date().toISOString().replace(/[-:.TZ]/g, '');
   const remoteCommand = present
-    ? `rm -rf -- ${stage} && install -d -m 755 ${stage} && tar -xzf - -C ${stage} && ` +
+    ? `rm -rf -- ${stage} && install -d -m 755 ${stage} && tar --no-same-owner -xzf - -C ${stage} && ` +
       `{ test ! -d ${APP_ROOT}/node_modules || mv ${APP_ROOT}/node_modules ${stage}/node_modules; } && ` +
       `mv ${APP_ROOT} ${APP_ROOT}.backup-${timestamp} && mv ${stage} ${APP_ROOT}`
-    : `rm -rf -- ${stage} && install -d -m 755 ${stage} && tar -xzf - -C ${stage} && mv ${stage} ${APP_ROOT}`;
+    : `rm -rf -- ${stage} && install -d -m 755 ${stage} && tar --no-same-owner -xzf - -C ${stage} && mv ${stage} ${APP_ROOT}`;
 
   const remote = spawn('ssh', [...sshArgs, remoteCommand], {
     windowsHide: true,
@@ -166,11 +166,23 @@ async function uploadSource() {
     new Promise((done, fail) => { archive.once('error', fail); archive.once('close', done); }),
     new Promise((done, fail) => { remote.once('error', fail); remote.once('close', done); }),
   ]);
-  if (archiveCode !== 0 || remoteCode !== 0) {
+  // An editor or a background git process rewrites .git metadata while the
+  // archive streams, so tar exits 1 reporting that a path changed as it was
+  // read. Git writes those files by atomic rename, so the archived copy is
+  // whole. Only that warning is tolerated; any other tar output still fails.
+  const archiveText = Buffer.concat(archiveErrors).toString('utf8');
+  const onlyVolatileWarnings = archiveCode === 1 && archiveText
+    .split(/\r?\n/)
+    .filter((line) => line.trim())
+    .every((line) => /file changed as we read it/.test(line));
+  if ((archiveCode !== 0 && !onlyVolatileWarnings) || remoteCode !== 0) {
     throw new Error(
       Buffer.concat([...archiveErrors, ...remoteErrors]).toString('utf8').trim().slice(-1600) ||
       `Source upload failed (tar ${archiveCode}, ssh ${remoteCode}).`,
     );
+  }
+  if (onlyVolatileWarnings) {
+    console.log('source          benign tar warning ignored (git metadata changed mid-upload)');
   }
 }
 

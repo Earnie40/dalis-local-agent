@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fallbackPlan, normalizeExecutionPlan } from '../apps/server/src/coding-agent-graph';
+import { fallbackPlan, isVerifiedTerminalState, normalizeExecutionPlan, toolObservationFromEvent } from '../apps/server/src/coding-agent-graph';
 
 describe('coding graph planning contract', () => {
   it('rejects invented final summaries and returns an all-pending execution plan', () => {
@@ -63,5 +63,57 @@ describe('coding graph task profiles', () => {
     const plan = normalizeExecutionPlan('Final Summary: the command was run and succeeded.', 'use WSL and run uname -a', 'operational');
     expect(plan.split('\n')[0]).toMatch(/^PENDING — run the requested operation/);
     expect(plan).not.toContain('inspect repository instructions');
+  });
+});
+
+describe('reviewer evidence from observed tool results', () => {
+  it('records a successful live-system result with its arguments and output', () => {
+    const line = toolObservationFromEvent({
+      type: 'tool_result',
+      turn: 1,
+      toolCall: { id: 'c1', name: 'wsl.run', arguments: { command: 'uname -a' } },
+      result: { output: '{\n  "exitCode": 0,\n  "stdout": "Linux host 6.6.0 GNU/Linux"\n}', success: true },
+    });
+    expect(line).toBe('wsl.run {"command":"uname -a"} succeeded: { "exitCode": 0, "stdout": "Linux host 6.6.0 GNU/Linux" }');
+  });
+
+  it('distinguishes denied and failed results and truncates long output', () => {
+    const denied = toolObservationFromEvent({
+      type: 'tool_result', turn: 1,
+      toolCall: { id: 'c1', name: 'wsl.run', arguments: { command: 'rm -rf /' } },
+      result: { output: 'Denied: approval was not granted.', success: false, denied: true, error: 'approval-denied' },
+    });
+    expect(denied).toMatch(/^wsl\.run .* was denied: Denied: approval was not granted\.$/);
+
+    const failed = toolObservationFromEvent({
+      type: 'tool_result', turn: 1,
+      toolCall: { id: 'c2', name: 'shell.run', arguments: { command: 'exit 1' } },
+      result: { output: 'x'.repeat(5000), success: false, error: 'tool-error' },
+    });
+    expect(failed).toMatch(/ failed: x+ …\[truncated\]$/);
+    expect(failed!.length).toBeLessThan(1300);
+  });
+
+  it('ignores events that are not tool results', () => {
+    expect(toolObservationFromEvent({ type: 'model_response', turn: 1, content: 'TASK_COMPLETE' })).toBeUndefined();
+    expect(toolObservationFromEvent({ type: 'tool_call', turn: 1, toolCall: { id: 'c1', name: 'wsl.run', arguments: {} } })).toBeUndefined();
+  });
+});
+
+describe('verified terminal states stop execution immediately', () => {
+  it('treats a blocker, a wait-for-user, and a cancellation as terminal', () => {
+    expect(isVerifiedTerminalState('BLOCKED')).toBe(true);
+    expect(isVerifiedTerminalState('WAITING_FOR_USER')).toBe(true);
+    expect(isVerifiedTerminalState('CANCELLED')).toBe(true);
+  });
+
+  it('does not treat a completion or a recoverable stall as terminal', () => {
+    // Completed runs go through the normal review path; stalls/budget exhaustion
+    // may take one bounded corrective cycle, so neither is a hard stop here.
+    expect(isVerifiedTerminalState('GOAL_COMPLETE')).toBe(false);
+    expect(isVerifiedTerminalState('VERIFICATION_COMPLETE')).toBe(false);
+    expect(isVerifiedTerminalState('IN_PROGRESS')).toBe(false);
+    expect(isVerifiedTerminalState('HARD_BUDGET_EXHAUSTED')).toBe(false);
+    expect(isVerifiedTerminalState('FAILED')).toBe(false);
   });
 });

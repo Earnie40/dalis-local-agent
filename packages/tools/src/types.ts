@@ -1,4 +1,4 @@
-import type { PermissionTier } from '@dacai-local-agent/security';
+import type { CommandRuntime, PermissionTier } from '@dacai-local-agent/security';
 
 export interface ToolExecutionContext {
   workspaceId?: string;
@@ -18,6 +18,13 @@ export interface ToolDefinition {
    * approval pause. Workspace capability checks still run before execution.
    */
   autoApprove?: boolean;
+  /**
+   * Execution context of this tool's `command` argument, for shell-style tools
+   * whose commands do not run in the host shell (for example bash inside WSL).
+   * The permission engine classifies the command in that context. Defaults to
+   * the host shell.
+   */
+  commandRuntime?: CommandRuntime;
   requiresRead?: boolean;
   requiresWrite?: boolean;
   requiresShell?: boolean;

@@ -2,7 +2,9 @@ import { RunnableLambda } from '@langchain/core/runnables';
 import { Annotation, END, MemorySaver, START, StateGraph } from '@langchain/langgraph';
 import { PostgresSaver } from '@langchain/langgraph-checkpoint-postgres';
 import {
+  hasCompletionMarker,
   runAgentLoop,
+  stripCompletionMarker,
   type AgentLoopContextSnapshot,
   type AgentLoopResult,
   type LoopEvent,
@@ -74,7 +76,30 @@ interface StoredExecutionResult {
   durationMs: number;
   usage: AgentLoopResult['usage'];
   workingState: AgentLoopResult['workingState'];
+  /**
+   * Compact records of the tool results the executor observed. For a live
+   * system task these are the evidence: nothing is written to the repository,
+   * so a reviewer that only sees changed files and validation output would
+   * reject every correct run and re-execute the command.
+   */
+  observations?: string[];
   error?: string;
+}
+
+const MAX_STORED_OBSERVATIONS = 12;
+const MAX_OBSERVATION_CHARS = 1200;
+
+/**
+ * One line of reviewer-facing evidence from a tool result event, or undefined
+ * for events that are not tool results.
+ */
+export function toolObservationFromEvent(event: LoopEvent): string | undefined {
+  if (event.type !== 'tool_result' || !event.toolCall || !event.result) return undefined;
+  const args = JSON.stringify(event.toolCall.arguments ?? {});
+  const status = event.result.success ? 'succeeded' : event.result.denied ? 'was denied' : 'failed';
+  const output = (event.result.output ?? '').replace(/\s+/g, ' ').trim();
+  const line = `${event.toolCall.name} ${args.slice(0, 300)} ${status}: ${output}`;
+  return line.length > MAX_OBSERVATION_CHARS ? `${line.slice(0, MAX_OBSERVATION_CHARS)} …[truncated]` : line;
 }
 
 const GraphState = Annotation.Root({
@@ -92,8 +117,22 @@ const GraphState = Annotation.Root({
 
 type CodingGraphState = typeof GraphState.State;
 
-function stripTaskMarker(answer: string): string {
-  return answer.replace(/^\s*TASK_(?:COMPLETE|BLOCKED):\s*/i, '').trim();
+/**
+ * A blocker, a wait-for-user, or a cancellation is a terminal decision the
+ * executor already reached and verified. Re-running execution would discard that
+ * decision and repeat work it already ruled out, so the graph must finalize
+ * immediately on these states instead of routing back into another cycle.
+ */
+export function isVerifiedTerminalState(state: AgentCompletionState): boolean {
+  return state === 'BLOCKED' || state === 'WAITING_FOR_USER' || state === 'CANCELLED';
+}
+
+/** Declared verified completion, read with the same parser the loop used to accept it. */
+function declaresCompletion(execution: StoredExecutionResult | undefined): execution is StoredExecutionResult {
+  return (
+    (execution?.completionState === 'GOAL_COMPLETE' || execution?.completionState === 'VERIFICATION_COMPLETE') &&
+    hasCompletionMarker(execution.answer, 'TASK_COMPLETE')
+  );
 }
 
 const REPOSITORY_EVIDENCE_TOOLS = ['filesystem.list', 'filesystem.search', 'filesystem.read', 'filesystem.stat'];
@@ -167,8 +206,9 @@ async function advisoryCall(resolved: ResolvedModel | undefined, systemPrompt: s
   return response.content?.trim() ?? '';
 }
 
-function compactExecution(result: AgentLoopResult): StoredExecutionResult {
+function compactExecution(result: AgentLoopResult, observations: string[] = []): StoredExecutionResult {
   return {
+    observations: observations.slice(-MAX_STORED_OBSERVATIONS),
     taskId: result.taskId,
     answer: result.answer,
     stopReason: result.stopReason,
@@ -298,6 +338,16 @@ export class DurableCodingAgentGraph {
         return input.contextManager.formatContextString(built);
       };
 
+      // Tool results are recorded as they happen so the reviewer can judge the
+      // run on what the tools actually returned, not only on the executor's
+      // final sentence.
+      const observations: string[] = [];
+      const onEvent = (event: LoopEvent): void => {
+        const observation = toolObservationFromEvent(event);
+        if (observation) observations.push(observation);
+        input.onLoopEvent?.(event);
+      };
+
       const result = await runAgentLoop({
         provider: input.coder.provider,
         model: input.coder.model,
@@ -334,10 +384,10 @@ export class DurableCodingAgentGraph {
             : undefined
           : { tools: REPOSITORY_EVIDENCE_TOOLS, maxNudges: 2 },
         signal: input.signal,
-        onEvent: input.onLoopEvent,
+        onEvent,
       });
 
-      return { phase: 'review' as const, execution: compactExecution(result) };
+      return { phase: 'review' as const, execution: compactExecution(result, observations) };
     });
 
     const review = RunnableLambda.from(async (state: CodingGraphState) => {
@@ -347,9 +397,20 @@ export class DurableCodingAgentGraph {
         return { phase: 'finalize' as const, review: 'REVIEW_FIX: execution result is missing.', reviewPassed: false };
       }
 
-      // Failed/stalled execution is not magically repaired by an advisory reviewer.
+      // A verified terminal state ends the run now. A genuine TASK_BLOCKED or
+      // TASK_WAITING_FOR_USER is a decision, not a stall, so re-executing would
+      // ignore it and repeat work. Finalize immediately without another cycle.
+      if (isVerifiedTerminalState(execution.completionState)) {
+        const feedback = `REVIEW_TERMINAL: executor reached ${execution.completionState}; this is a verified terminal state, so the graph stops immediately without re-execution. ${stripCompletionMarker(execution.answer).slice(0, 1000)}`;
+        input.onGraphEvent?.({ type: 'review', phase: 'review', message: feedback });
+        return { phase: 'finalize' as const, review: feedback, reviewPassed: false };
+      }
+
+      // Failed/stalled execution (no-progress, budget/turn exhaustion, provider
+      // failure) is not a verified terminal decision, so it may take one bounded
+      // corrective cycle. It is not magically repaired by an advisory reviewer.
       if (execution.completionState !== 'GOAL_COMPLETE' && execution.completionState !== 'VERIFICATION_COMPLETE') {
-        const feedback = `REVIEW_FIX: executor ended with ${execution.completionState}; completion was not verified. ${stripTaskMarker(execution.answer).slice(0, 1200)}`;
+        const feedback = `REVIEW_FIX: executor ended with ${execution.completionState}; completion was not verified. ${stripCompletionMarker(execution.answer).slice(0, 1200)}`;
         input.onGraphEvent?.({ type: 'review', phase: 'review', message: feedback });
         return { phase: state.cycle < 1 ? 'execute' as const : 'finalize' as const, review: feedback, reviewPassed: false, cycle: state.cycle + 1 };
       }
@@ -371,11 +432,16 @@ export class DurableCodingAgentGraph {
             'Return REVIEW_FIX: followed by concrete corrective feedback if work is incomplete or inconsistent.',
             'Do not infer tests or files that are not in the evidence.',
             'The plan is intended work only, never evidence that any work happened.',
-          ].join('\n'),
+            'OBSERVED TOOL RESULTS are the runtime\'s own record of what each tool returned; they are evidence even when the executor answer does not repeat them.',
+            operational
+              ? 'This goal is a live-system operation, not repository work: no changed files or validation runs are expected. A successful observed result from the required runtime tool whose output answers the goal supports REVIEW_PASS. Do not ask for a command to be re-run when its successful output is already observed.'
+              : '',
+          ].filter(Boolean).join('\n'),
           [
             `ORIGINAL GOAL:\n${state.goal}`,
             `PLAN:\n${state.plan}`,
             `EXECUTOR ANSWER:\n${execution.answer}`,
+            `OBSERVED TOOL RESULTS:\n${execution.observations?.join('\n') || '(none)'}`,
             `CHANGED FILES:\n${ws.changedFiles.join('\n') || '(none)'}`,
             `VALIDATION:\n${ws.validationResults.join('\n') || '(none)'}`,
             `STOP REASON: ${execution.stopReason}`,
@@ -400,7 +466,7 @@ export class DurableCodingAgentGraph {
     const finalize = RunnableLambda.from(async (state: CodingGraphState) => {
       emitPhase('finalize', 'Finalizing durable coding-agent result.');
       const execution = state.execution;
-      if ((execution?.completionState === 'GOAL_COMPLETE' || execution?.completionState === 'VERIFICATION_COMPLETE') && /^\s*TASK_COMPLETE:/i.test(execution.answer) && state.reviewPassed) {
+      if (declaresCompletion(execution) && state.reviewPassed) {
         await input.memoryStore.saveSafe({
           scope: 'workspace',
           scopeKey: state.workspaceId,
@@ -449,7 +515,7 @@ export class DurableCodingAgentGraph {
     if (!result.execution) {
       throw new Error('Durable coding graph completed without an execution result.');
     }
-    if (!result.reviewPassed && (result.execution.completionState === 'GOAL_COMPLETE' || result.execution.completionState === 'VERIFICATION_COMPLETE') && /^\s*TASK_COMPLETE:/i.test(result.execution.answer)) {
+    if (!result.reviewPassed && declaresCompletion(result.execution)) {
       return {
         ...result.execution,
         answer: `TASK_BLOCKED: BLOCKED — independent review did not pass after the bounded correction cycle. ${result.review.slice(0, 1200)}`,
