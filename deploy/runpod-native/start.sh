@@ -34,20 +34,46 @@ if ! curl -fsS --max-time 3 http://127.0.0.1:11434/api/tags >/dev/null 2>&1; the
 fi
 curl -fsS --max-time 3 http://127.0.0.1:11434/api/tags >/dev/null
 
-media_ready() {
-  curl -fsS --max-time 3 http://127.0.0.1:8090/v1/health 2>/dev/null | \
-    python3 -c 'import json,sys; body=json.load(sys.stdin); raise SystemExit(0 if body.get("backdropModel") else 1)' 2>/dev/null
+# Media is an optional capability, not a prerequisite for the stack.
+#
+# This gate previously required one specific model to be resident and then
+# called itself bare under `set -Eeuo pipefail`, with stderr discarded. A single
+# absent weights directory therefore terminated the whole script silently, so
+# the API, the web UI, PostgreSQL and GPU routing never started and the pod
+# looked entirely dead for a reason nothing logged.
+#
+# An unavailable capability must report itself unavailable and let everything
+# else run. It must never be reported as working, and it must never take the
+# rest of the stack down with it.
+media_reachable() {
+  curl -fsS --max-time 3 http://127.0.0.1:8090/v1/health >/dev/null 2>&1
 }
 
-if ! curl -fsS --max-time 3 http://127.0.0.1:8090/v1/health >/dev/null 2>&1; then
+if ! media_reachable; then
   setsid /workspace/dacais-media/run-media.sh \
     > "${LOG_ROOT}/media.log" 2>&1 < /dev/null &
 fi
 for _ in $(seq 1 300); do
-  media_ready && break
+  media_reachable && break
   sleep 1
 done
-media_ready
+
+if media_reachable; then
+  curl -fsS --max-time 5 http://127.0.0.1:8090/v1/health 2>/dev/null | python3 -c '
+import json, sys
+body = json.load(sys.stdin)
+names = [key for key in body if key.endswith("Model")]
+resident = sorted(key for key in names if body.get(key))
+missing = sorted(key for key in names if not body.get(key))
+print("media           reachable; resident models: " + (", ".join(resident) or "none"))
+if missing:
+    print("media           unavailable (no weights): " + ", ".join(missing))
+    print("media           those capabilities report blocked; the rest of the stack starts normally.")
+' || printf 'media           health payload could not be parsed; continuing with media degraded.\n'
+else
+  printf 'media           did not become reachable; image/video generation is unavailable.\n'
+  printf 'media           continuing so the API, web UI and local fallback still start.\n'
+fi
 
 stop_managed_process() {
   local pid_file=$1
