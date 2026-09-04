@@ -34,7 +34,9 @@ import { ApprovalRegistry, approvalOptionsFromEnv } from './approvals';
 // server with cwd=apps/server, where neither .env nor config/ exists.
 const repoRoot = fileURLToPath(new URL('../../../', import.meta.url));
 
-loadEnv({ path: `${repoRoot}.env` });
+// Local overrides win over the shared .env file. Both files are ignored and
+// may contain workstation-specific credentials or tunnel endpoints.
+loadEnv({ path: [`${repoRoot}.env.local`, `${repoRoot}.env`] });
 
 let loaded: AppConfigLoadResult;
 try {

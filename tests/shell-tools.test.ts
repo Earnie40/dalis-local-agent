@@ -2,7 +2,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { gitTool, minimalEnv, parseTestCounts, runProcess, shellRunTool } from '../packages/tools/src/shell-tools';
+import { executableForPlatform, gitTool, minimalEnv, parseTestCounts, runProcess, shellRunTool } from '../packages/tools/src/shell-tools';
 import { PermissionEngine } from '../packages/security/src/permission-engine';
 
 const root = mkdtempSync(join(tmpdir(), 'dacai-shell-'));
@@ -11,6 +11,10 @@ const ctx = { workspaceRoot: root };
 const capabilities = { read: true, write: true, shell: true, network: true };
 
 describe('environment sanitization', () => {
+  it('uses Windows command shims when spawning package managers without a shell', () => {
+    expect(executableForPlatform('pnpm')).toBe(process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm');
+  });
+
   it('does not pass credentials to child processes', () => {
     const env = minimalEnv({
       PATH: '/usr/bin',

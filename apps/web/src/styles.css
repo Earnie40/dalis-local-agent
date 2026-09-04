@@ -60,6 +60,7 @@ body {
 .conversation {
   display: flex;
   align-items: stretch;
+  min-height: 48px;
   border-radius: 8px;
 }
 
@@ -70,6 +71,7 @@ body {
 
 .conversation-open {
   flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -80,6 +82,11 @@ body {
   padding: 8px 10px;
   cursor: pointer;
   overflow: hidden;
+}
+
+.conversation-open:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 .conversation-title {
@@ -393,13 +400,43 @@ button.icon {
 
 .agent-session {
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
   min-width: 180px;
   max-width: 260px;
   text-align: left;
+  padding: 0;
+  overflow: hidden;
+}
+
+.agent-session-open {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  align-items: flex-start;
   padding: 6px 10px;
   overflow: hidden;
+  color: inherit;
+  text-align: left;
+  background: transparent;
+  border: 0;
+}
+
+.agent-session-delete {
+  flex: 0 0 auto;
+  align-self: stretch;
+  padding: 0 8px;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-left: 1px solid var(--border);
+  font-size: 18px;
+  line-height: 1;
+}
+
+.agent-session-delete:hover:not(:disabled),
+.agent-session-delete:focus-visible {
+  color: var(--danger, #ef4444);
+  background: color-mix(in srgb, var(--danger, #ef4444) 12%, transparent);
 }
 
 .agent-session strong,
@@ -546,6 +583,24 @@ button.icon {
   align-items: flex-end;
   padding: 16px 28px;
   border-bottom: 1px solid var(--border);
+}
+
+.agent-identity {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 220px;
+  padding: 9px 11px;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.agent-identity span {
+  color: var(--muted);
+  font-size: 11px;
 }
 
 .field {

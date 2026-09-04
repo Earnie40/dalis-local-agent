@@ -47,6 +47,7 @@ import {
 import {
   buildGroundedEditPrompt,
   analyzeImageForEdit,
+  interpretMediaInstruction,
   VisionUnavailableError,
 } from '../vision';
 import { LoopTraceRecorder } from '@dacai-local-agent/training-traces';
@@ -145,6 +146,8 @@ const DESCRIPTIVE_IMAGE_INTENT =
   /\b(?:woman|women|man|men|female|male|person|people|model|character|characters|fashion|outfit|portrait|face|body|figure|landscape|mountain|beach|ocean|cityscape|architecture|interior|still[- ]life|product|animal|dog|cat|bird|flower|sunset|night[- ]sky)\b/i;
 const NON_IMAGE_REQUEST_INTENT =
   /\b(?:code|coding|repository|repo|file|function|class|bug|error|test|typescript|javascript|python|api|endpoint|database|sql|regex|command|terminal|shell|explain|describe|analy[sz]e|inspect|identify|what|who|where|when|why|how)\b/i;
+const REPOSITORY_TASK_INTENT =
+  /\b(?:audit|repository|repo|codebase|source code|locate files?|find files?|modify files?|edit files?|implementation|symbols?|callers?|dependencies|tests?|fixtures?|documentation|do not edit|without modifying)\b/i;
 
 const IMAGE_EDIT_INTENT =
   /\b(?:edit|modify|update|transform|retouch|restyle|change|remove|replace|add)\b[\s\S]{0,160}\b(?:image|photo|picture|portrait|artwork)\b|\b(?:make|turn)\b[\s\S]{0,80}\b(?:this|the\s+attached|the\s+uploaded)\b[\s\S]{0,40}\b(?:image|photo|picture|portrait)\b|\b(?:attached|uploaded)\b[\s\S]{0,40}\b(?:image|photo|picture|portrait)\b[\s\S]{0,160}\b(?:edit|modify|update|transform|retouch|restyle|change|remove|replace|add|make|turn)\b/;
@@ -166,6 +169,8 @@ export function isImageGenerationRequest(
   options: MediaIntentOptions = {},
 ): boolean {
   const normalized = prompt.toLowerCase();
+  const explicitlyRequestedMediaTool = [...requestedTools].includes('image.generate');
+  if (!explicitlyRequestedMediaTool && REPOSITORY_TASK_INTENT.test(normalized)) return false;
   // In the Agent image workflow, attaching a supported image makes a
   // non-empty instruction an edit request even when it is shorthand such as
   // "brighter, warmer tone". Inspection/readback requests stay in the normal
@@ -216,7 +221,10 @@ export function lastGeneratedImageFromHistory(
 }
 
 export function isVideoGenerationRequest(prompt: string, requestedTools: Iterable<string> = []): boolean {
-  return VIDEO_GENERATION_INTENT.test(prompt.toLowerCase()) || [...requestedTools].includes('video.generate');
+  const normalized = prompt.toLowerCase();
+  const explicitlyRequestedMediaTool = [...requestedTools].includes('video.generate');
+  if (!explicitlyRequestedMediaTool && REPOSITORY_TASK_INTENT.test(normalized)) return false;
+  return VIDEO_GENERATION_INTENT.test(normalized) || explicitlyRequestedMediaTool;
 }
 
 export function classifyDirectMediaRequest(
@@ -1625,6 +1633,26 @@ export function registerAgentRoutes(
 
         const outputPath = `generated/${kind}-${runId}.${format}`;
         const cleanedPrompt = effectivePrompt.replace(/^yougenerate\b/i, 'generate');
+        const interpretedMedia = await interpretMediaInstruction(
+          deps.registry,
+          cleanedPrompt,
+          historyText,
+          controller.signal,
+        );
+        const interpretedPrompt = interpretedMedia.instruction;
+        void activity.emit({
+          type: 'decision',
+          status: 'running',
+          title: 'Interpreted the media request',
+          message: interpretedPrompt,
+          toolName: mediaTool,
+          metadata: {
+            intentAlias: interpretedMedia.alias,
+            intentModel: interpretedMedia.model,
+            targetRegions: interpretedMedia.targetRegions,
+            preserve: interpretedMedia.preserve,
+          },
+        });
         let editSize: { width: number; height: number } | undefined;
         if (imageGenerationRun && sourceImage) {
           try {
@@ -1660,7 +1688,7 @@ export function registerAgentRoutes(
                 const grounded = await buildGroundedEditPrompt(
                   deps.registry,
                   attachment,
-                  cleanedPrompt,
+                  interpretedPrompt,
                   controller.signal,
                 );
                 groundedPrompt = grounded.editPrompt;
@@ -1677,7 +1705,7 @@ export function registerAgentRoutes(
                 const analyzed = await analyzeImageForEdit(
                   deps.registry,
                   attachment,
-                  cleanedPrompt,
+                  interpretedPrompt,
                   controller.signal,
                 );
                 sourceDescription = analyzed.description;
@@ -1685,7 +1713,7 @@ export function registerAgentRoutes(
                   `${region.label} at ${region.location}${region.box ? ` (${region.box.left},${region.box.top})-(${region.box.right},${region.box.bottom})` : ''}: ${region.visibleDetails}`,
                 ).join('; ');
                 spatialInstruction = [
-                  cleanedPrompt,
+                  interpretedPrompt,
                   analyzed.targetRegions.length ? `Target regions: ${analyzed.targetRegions.join(', ')}.` : '',
                   regions ? `Use these visible region anchors: ${regions}.` : '',
                   'Preserve every other subject, pose, composition, and background detail unless explicitly changed.',
@@ -1727,9 +1755,9 @@ export function registerAgentRoutes(
         }
 
         const effectiveImagePrompt = imageEditRun && !isImg2Img
-          ? (spatialInstruction ?? cleanedPrompt)
-          : (groundedPrompt ?? cleanedPrompt);
-        const realismRequested = /\b(realistic|photorealistic|photoreal|lifelike|true[- ]to[- ]life)\b/i.test(cleanedPrompt);
+          ? (spatialInstruction ?? interpretedPrompt)
+          : (groundedPrompt ?? interpretedPrompt);
+        const realismRequested = /\b(realistic|photorealistic|photoreal|lifelike|true[- ]to[- ]life)\b/i.test(interpretedPrompt);
         const argumentsForTool: Record<string, unknown> = imageGenerationRun
           ? {
               prompt: (!imageEditRun && realismRequested)
@@ -1753,7 +1781,7 @@ export function registerAgentRoutes(
               outputPath,
             }
           : {
-              prompt: cleanedPrompt,
+              prompt: interpretedPrompt,
               ...(sourceImage ? { sourcePath: sourceImage.path } : {}),
               width: 1024,
               height: 576,

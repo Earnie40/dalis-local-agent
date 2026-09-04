@@ -29,7 +29,7 @@
 #     - tool calling VERIFIED
 #     - structured tool channel VERIFIED
 #     - multi-turn agent loop VERIFIED
-#     - planner, reasoner and supporting autonomous roles
+#     - planner, reasoner and supporting roles
 #
 #   qwen2.5-coder
 #     - tool calling VERIFIED through text-json
@@ -72,7 +72,7 @@ models:
   # Do not replace this with an advisory-only model.
   agent:
     provider: local_ollama
-    model: qwen3:8b
+    model: huihui_ai/qwen3-abliterated:8b
     temperature: 0.15
 
   # ---------------------------------------------------------------------------
@@ -271,7 +271,7 @@ models:
   # selectable, so a run can still be pinned to the GPU explicitly.
   gpu_agent:
     provider: remote_gpu_ollama
-    model: qwen3:8b
+    model: huihui_ai/qwen3-abliterated:8b
     temperature: 0.15
 
   gpu_planner:

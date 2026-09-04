@@ -16,10 +16,10 @@ Do not "fix" this by editing routing code. The routing code is behaving correctl
 
 | Pod | Id | GPU | Status | Notes |
 |---|---|---|---|---|
-| dacais-anatomy-image-video | `xd621ikwpgvkmb` | A100 SXM 80 GB | **RUNNING** $1.59/hr | live target, 275 GB network volume |
+| dacais-anatomy-image-video-blackwell | `aiw9z53r0fsdiz` | Blackwell GPU | **RUNNING** | active target |
 | dacais-l40s-image-video | `2d2zi6xdotory8` | L40S | EXITED | old host was capacity-starved, storage host-local |
 
-Live pod reachable at `root@216.81.248.127 -p 12101` with `~/.ssh/id_ed25519`.
+Live pod reachable at `root@216.243.220.170 -p 16806` with `~/.ssh/id_ed25519`.
 
 Account balance was **$8.44** at time of writing — roughly 5 hours of runway at
 $1.59/hr. Budget accordingly before starting anything long.
@@ -29,7 +29,7 @@ $1.59/hr. Budget accordingly before starting anything long.
 Only one, and it is media-only:
 
 ```
-ssh ... -N -L 127.0.0.1:18090:127.0.0.1:8090 root@216.81.248.127
+ssh ... -N -L 127.0.0.1:18090:127.0.0.1:8090 root@216.243.220.170 -p 16806
 ```
 
 That serves `DACAI_MEDIA_BASE_URL`. There is **no** `11435 -> 11434` inference

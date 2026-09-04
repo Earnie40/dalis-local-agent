@@ -68,6 +68,13 @@ export function minimalEnv(
   return result;
 }
 
+/** Windows exposes npm/pnpm shims as .cmd files; shell=false must name them. */
+export function executableForPlatform(file: string): string {
+  return process.platform === 'win32' && /^(?:pnpm|npm|npx|yarn)$/.test(file)
+    ? `${file}.cmd`
+    : file;
+}
+
 function appendBounded(
   current: string,
   chunk: Buffer | string,
@@ -173,7 +180,7 @@ export function runProcess(
 
       const child =
         spawn(
-          file,
+          executableForPlatform(file),
           args ?? [],
           {
             cwd:

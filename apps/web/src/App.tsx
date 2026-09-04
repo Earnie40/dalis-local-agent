@@ -11,7 +11,6 @@ import { MediaStudioPanel } from './MediaStudioPanel';
 import {
   api,
   streamChat,
-  type AliasCapabilities,
   type Conversation,
   type Message,
   type MediaInfrastructureStatus,
@@ -72,8 +71,8 @@ export function App() {
   const [activeId, setActiveId] = useState<string | undefined>();
   const [messages, setMessages] = useState<Message[]>([]);
   const [aliases, setAliases] = useState<ModelAlias[]>([]);
-  const [alias, setAlias] = useState('chat');
-  const [capabilities, setCapabilities] = useState<AliasCapabilities | undefined>();
+  // One user-facing agent; provider and specialist routing stay server-side.
+  const alias = 'agent';
   const [input, setInput] = useState('');
   const [stream, setStream] = useState<StreamState>(EMPTY_STREAM);
   const [error, setError] = useState<string | undefined>();
@@ -132,13 +131,6 @@ export function App() {
     const timer = window.setInterval(refresh, 5_000);
     return () => { active = false; window.clearInterval(timer); };
   }, []);
-
-  // Capability is fetched per alias so the UI can say plainly whether a model
-  // is agent-capable or advisory-class, rather than implying every model is equal.
-  useEffect(() => {
-    setCapabilities(undefined);
-    api.capabilities(alias).then(setCapabilities).catch(() => undefined);
-  }, [alias]);
 
   useEffect(() => {
     if (!activeId) {
@@ -261,9 +253,13 @@ export function App() {
 
   const remove = useCallback(
     async (id: string) => {
-      await api.deleteConversation(id).catch(() => undefined);
-      if (id === activeId) startNew();
-      await refreshConversations();
+      try {
+        await api.deleteConversation(id);
+        setConversations((current) => current.filter((conversation) => conversation.id !== id));
+        if (id === activeId) startNew();
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
     },
     [activeId, refreshConversations, startNew],
   );
@@ -335,16 +331,21 @@ export function App() {
               key={conversation.id}
               className={`conversation ${conversation.id === activeId ? 'active' : ''}`}
             >
-              <button className="conversation-open" onClick={() => setActiveId(conversation.id)}>
+              <button type="button" className="conversation-open" onClick={() => setActiveId(conversation.id)}>
                 <span className="conversation-title">{conversation.title}</span>
                 <span className="muted small">
                   {conversation.messageCount ?? 0} messages · {conversation.model ?? 'unknown model'}
                 </span>
               </button>
               <button
+                type="button"
                 className="icon"
                 title="Delete conversation"
-                onClick={() => void remove(conversation.id)}
+                aria-label={`Delete conversation ${conversation.title}`}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  void remove(conversation.id);
+                }}
               >
                 ×
               </button>
@@ -355,26 +356,11 @@ export function App() {
 
         {mode === 'chat' && (
         <div className="model-picker">
-          <label htmlFor="alias">Model</label>
-          <select id="alias" value={alias} onChange={(event) => setAlias(event.target.value)}>
-            {aliases.map((entry) => (
-              <option key={entry.alias} value={entry.alias}>
-                {entry.alias} — {entry.model}
-              </option>
-            ))}
-          </select>
-
-          {capabilities && (
-            <p className="muted small">
-              <span className={`badge ${capabilities.agentLoopCapable ? 'ok' : 'warn'}`}>
-                {capabilities.classification}
-              </span>{' '}
-              tools: {capabilities.capabilities.toolCalling}
-              {capabilities.capabilities.toolCallChannel
-                ? ` (${capabilities.capabilities.toolCallChannel})`
-                : ''}
-            </p>
-          )}
+          <label>Agent</label>
+          <div className="agent-identity">
+            <strong>DACAIS Agent</strong>
+            <span>Automatically routes chat, vision, media, and tools</span>
+          </div>
         </div>
         )}
       </aside>
@@ -397,7 +383,7 @@ export function App() {
         </main>
       ) : mode === 'agent' ? (
         <main className="chat">
-          <AgentPanel aliases={aliases} />
+          <AgentPanel />
         </main>
       ) : mode === 'delegate' ? (
         <main className="chat">
@@ -452,12 +438,7 @@ export function App() {
                     <span>{(stream.elapsedMs / 1000).toFixed(1)}s</span>
                   </p>
                 )}
-                {stream.thinkingText && (
-                  <details className="thinking-preview">
-                    <summary>Qwen reasoning preview</summary>
-                    <pre>{stream.thinkingText}</pre>
-                  </details>
-                )}
+                {stream.thinking && <p className="muted small">The agent is processing the latest evidence…</p>}
                 <Markdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
                   {stream.text}
                 </Markdown>

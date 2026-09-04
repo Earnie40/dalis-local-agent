@@ -14,9 +14,12 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 
-for (const line of readFileSync('.env', 'utf8').split(/\r?\n/)) {
-  const match = line.match(/^([A-Z][A-Z0-9_]*)=(.*)$/);
-  if (match && !process.env[match[1]]) process.env[match[1]] = match[2].trim();
+for (const envFile of ['.env', '.env.local']) {
+  if (!existsSync(envFile)) continue;
+  for (const line of readFileSync(envFile, 'utf8').split(/\r?\n/)) {
+    const match = line.match(/^([A-Z][A-Z0-9_]*)=(.*)$/);
+    if (match && !process.env[match[1]]) process.env[match[1]] = match[2].trim();
+  }
 }
 
 const { discoverRunpodSshEndpoint, formatRunpodConnection } = await import(
@@ -46,6 +49,7 @@ const mediaSources = [
   ['download_svd_model.py'],
   ['download_anatomy_models.py'],
   ['provision-anatomy-edit.sh'],
+  ['gpu_runtime.py'],
 ].map(([name, override]) => ({ name, source: resolve(override || mediaSourceDirectory, override ? '' : name) }));
 const localPort = Number(process.env.DACAI_MEDIA_LOCAL_PORT ?? 18090);
 const endpoint = await discoverRunpodSshEndpoint({ apiKey: process.env.RUNPOD_API_KEY, podId });
@@ -104,13 +108,13 @@ ROOT=/workspace/dacais-media
 export DACAIS_MEDIA_ROOT="$ROOT"
 export DACAIS_MEDIA_HOST=127.0.0.1
 export DACAIS_MEDIA_PORT=8090
-MODEL_PYTHON="$(command -v python3)"
-for CANDIDATE in "$ROOT/venvs/anatomy-edit/bin/python" "$ROOT/venvs/sadtalker/bin/python" "$MODEL_PYTHON"; do
-  if test -x "$CANDIDATE" && "$CANDIDATE" -c 'import torch, diffusers, transformers, huggingface_hub; raise SystemExit(0 if torch.cuda.is_available() else 1)' >/dev/null 2>&1; then
-    MODEL_PYTHON="$CANDIDATE"
-    break
-  fi
-done
+if test -x "$ROOT/venvs/anatomy-edit/bin/python"; then
+  MODEL_PYTHON="$ROOT/venvs/anatomy-edit/bin/python"
+elif test -x "$ROOT/venvs/sadtalker/bin/python"; then
+  MODEL_PYTHON="$ROOT/venvs/sadtalker/bin/python"
+else
+  MODEL_PYTHON="$(command -v python3)"
+fi
 export DACAIS_SDXL_PYTHON="$MODEL_PYTHON"
 export DACAIS_SDXL_MODEL_ROOT="$ROOT/models/sdxl-base"
 export DACAIS_INSTRUCT_EDIT_PYTHON="$MODEL_PYTHON"
@@ -123,7 +127,7 @@ export DACAIS_ANATOMY_VIDEO_MODEL_ROOT="$ROOT/models/wan2.2-ti2v-5b"
 export DACAIS_SVD_PYTHON="$MODEL_PYTHON"
 export DACAIS_SVD_MODEL_ROOT="$ROOT/models/svd-xt"
 export HF_HOME="$ROOT/cache/huggingface"
-exec python3 "$ROOT/service/media_service.py"
+exec "$MODEL_PYTHON" "$ROOT/service/media_service.py"
 LAUNCHER
 chmod +x "$ROOT/run-media.sh"
 if ${syncService ? 'true' : '! curl -fsS --max-time 2 http://127.0.0.1:8090/v1/health >/dev/null 2>&1'}; then

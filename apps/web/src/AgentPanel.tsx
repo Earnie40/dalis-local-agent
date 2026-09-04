@@ -1,12 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { api, streamAgent, type AgentActivityEvent, type AgentEvent, type ModelAlias, type Upload, type Workspace } from './api';
+import { api, streamAgent, type AgentActivityEvent, type AgentEvent, type Upload, type Workspace } from './api';
 import { AttachmentBar } from './AttachmentBar';
 import {
   agentConversationHistory,
   chooseAgentWorkspace,
-  type AgentCapabilityStatus,
 } from './agent-ui-state';
 import { agentArtifactUrl, extractAgentArtifacts, type AgentArtifact } from './agent-artifacts';
 import { LiveMonitor, activityMonitorLines } from './LiveMonitor';
@@ -27,7 +26,6 @@ interface AgentSession {
 
 const AGENT_SESSIONS_KEY = 'dacai.agent.sessions.v1';
 const AGENT_WORKSPACE_KEY = 'dacai.agent.workspace.v1';
-const AGENT_MODEL_KEY = 'dacai.agent.model.v1';
 const IMAGE_GENERATION_INTENT =
   /(?:\b|you)(?:generate|create|make|produce|render|draw|paint|illustrate|design|edit|modify|update|transform)\b[\s\S]{0,160}\b(?:ai\s+)?(?:image|photo|picture|portrait|artwork)\b|\b(?:ai\s+)?(?:image|photo|picture|portrait|artwork)\b[\s\S]{0,160}\b(?:generate|create|make|produce|render|draw|paint|illustrate|design|edit|modify|update|transform)\b|\b(?:image|photo|picture|portrait|artwork)\s+of\b/;
 const DESCRIPTIVE_IMAGE_INTENT =
@@ -115,10 +113,10 @@ function matchesActivityFilter(event: AgentActivityEvent, filter: ActivityFilter
  * workspace with real filesystem/git/test tools, every call passes the
  * permission engine, and each step is shown as it happens.
  */
-export function AgentPanel({ aliases }: { aliases: ModelAlias[] }) {
+export function AgentPanel() {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [workspaceId, setWorkspaceId] = useState(() => savedPreference(AGENT_WORKSPACE_KEY, ''));
-  const [alias, setAlias] = useState(() => savedPreference(AGENT_MODEL_KEY, 'coder'));
+  const alias = 'agent';
   const [role, setRole] = useState<'coding' | 'adversarial-twin-simulator' | 'tomahawk1'>('coding');
   const [runMode, setRunMode] = useState<'interactive' | 'coding' | 'repository_audit' | 'deep_research'>('coding');
   const [prompt, setPrompt] = useState('');
@@ -138,8 +136,6 @@ export function AgentPanel({ aliases }: { aliases: ModelAlias[] }) {
   /** Approval ids already answered, so the buttons disable after one click. */
   const [answered, setAnswered] = useState<Record<string, boolean>>({});
   const [draft, setDraft] = useState({ displayName: '', rootPath: '', write: false, shell: false, network: true });
-  const [modelCapabilities, setModelCapabilities] = useState<Record<string, AgentCapabilityStatus>>({});
-  const [checkingModel, setCheckingModel] = useState<string>();
   const [activityFilter, setActivityFilter] = useState<ActivityFilter>('all');
   const [followActivity, setFollowActivity] = useState(true);
 
@@ -164,17 +160,6 @@ export function AgentPanel({ aliases }: { aliases: ModelAlias[] }) {
     if (workspaceId) localStorage.setItem(AGENT_WORKSPACE_KEY, workspaceId);
   }, [workspaceId]);
 
-  useEffect(() => {
-    if (alias) localStorage.setItem(AGENT_MODEL_KEY, alias);
-  }, [alias]);
-
-  useEffect(() => {
-    setModelCapabilities((current) => Object.fromEntries(aliases.map((entry) => [
-      entry.alias,
-      current[entry.alias] ?? entry.agentCapability ?? 'unknown',
-    ])));
-  }, [aliases]);
-
   const refresh = useCallback(async () => {
     const { workspaces: list } = await api.listWorkspaces();
     setWorkspaces(list);
@@ -185,45 +170,10 @@ export function AgentPanel({ aliases }: { aliases: ModelAlias[] }) {
     refresh().catch((e) => setError(String(e)));
   }, [refresh]);
 
-  const agentAliases = useMemo(
-    () => aliases.filter((entry) => entry.enabled),
-    [aliases],
-  );
-  const selectedModelCapability = modelCapabilities[alias]
-    ?? aliases.find((entry) => entry.alias === alias)?.agentCapability
-    ?? 'unknown';
-  const selectedAliasConfigured = aliases.some((entry) => entry.alias === alias);
   const imageGenerationRequest = useMemo(
     () => isImageGenerationPrompt(prompt, attachments),
     [attachments, prompt],
   );
-
-  useEffect(() => {
-    if (!alias || !selectedAliasConfigured || selectedModelCapability === 'verified') return;
-    if (selectedModelCapability === 'unsupported') {
-      setError(`${alias} cannot run the general tool loop, but it remains selectable for direct image generation.`);
-      return;
-    }
-
-    let cancelled = false;
-    setCheckingModel(alias);
-    api.capabilities(alias)
-      .then((result) => {
-        if (cancelled) return;
-        const status: AgentCapabilityStatus = result.agentLoopCapable ? 'verified' : 'unsupported';
-        setModelCapabilities((current) => ({ ...current, [alias]: status }));
-        if (!result.agentLoopCapable) {
-          setError(`${alias} cannot run the general tool loop, but it can still submit direct image requests.`);
-        }
-      })
-      .catch((e) => {
-        if (!cancelled) setError(`Could not verify ${alias} for agent use: ${e instanceof Error ? e.message : String(e)}`);
-      })
-      .finally(() => {
-        if (!cancelled) setCheckingModel(undefined);
-      });
-    return () => { cancelled = true; };
-  }, [alias, aliases, modelCapabilities, selectedAliasConfigured, selectedModelCapability]);
 
   useEffect(() => {
     if (followActivity) activityRef.current?.scrollTo({ top: activityRef.current.scrollHeight, behavior: 'smooth' });
@@ -245,7 +195,7 @@ export function AgentPanel({ aliases }: { aliases: ModelAlias[] }) {
     // stored upload and appends it, so the transcript keeps what was typed.
     const text = prompt.trim();
     const directImageRequest = isImageGenerationPrompt(text, attachments);
-    if (!text || !workspaceId || running || (!directImageRequest && selectedModelCapability !== 'verified')) return;
+    if (!text || !workspaceId || running) return;
 
     setError(undefined);
     setPrompt('');
@@ -310,7 +260,7 @@ export function AgentPanel({ aliases }: { aliases: ModelAlias[] }) {
       setRunning(false);
       setAttachments([]);
     }
-  }, [activityEvents, alias, appendActivity, attachments, events, prompt, role, runMode, running, selectedModelCapability, selectedTools, sessionId, toolSelectionCustomized, workspaceId]);
+  }, [activityEvents, alias, appendActivity, attachments, events, prompt, role, runMode, running, selectedTools, sessionId, toolSelectionCustomized, workspaceId]);
 
   const addWorkspace = useCallback(async () => {
     try {
@@ -407,13 +357,25 @@ export function AgentPanel({ aliases }: { aliases: ModelAlias[] }) {
     setError(undefined);
   }, [running]);
 
+  const deleteSession = useCallback((id: string) => {
+    if (running) return;
+    setSessions((current) => current.filter((session) => session.id !== id));
+    if (sessionId === id) {
+      setSessionId(undefined);
+      setEvents([]);
+      setActivityEvents([]);
+      setPrompt('');
+      setAttachments([]);
+      setError(undefined);
+    }
+  }, [running, sessionId]);
+
   const openSession = useCallback((session: AgentSession) => {
     if (running) return;
     setSessionId(session.id);
     setEvents(session.events);
     setActivityEvents(session.activityEvents ?? []);
     if (session.workspaceId) setWorkspaceId(session.workspaceId);
-    if (session.alias) setAlias(session.alias);
     if (session.role) setRole(session.role);
     if (session.runMode) setRunMode(session.runMode);
     setPrompt('');
@@ -446,14 +408,26 @@ export function AgentPanel({ aliases }: { aliases: ModelAlias[] }) {
   return (
     <div className="agent">
       <aside className="agent-sessions">
-        <button className="primary" onClick={newSession}>+ New agent conversation</button>
+        <button type="button" className="primary" onClick={newSession}>+ New agent conversation</button>
         <div className="agent-session-list">
           {sessions.length === 0 && <p className="muted small">No saved agent conversations.</p>}
           {sessions.map((session) => (
-            <button key={session.id} className={`agent-session ${session.id === sessionId ? 'active' : ''}`} onClick={() => openSession(session)}>
-              <strong>{session.title}</strong>
-              <span>{new Date(session.updatedAt).toLocaleString()}</span>
-            </button>
+            <div key={session.id} className={`agent-session ${session.id === sessionId ? 'active' : ''}`}>
+              <button type="button" className="agent-session-open" onClick={() => openSession(session)}>
+                <strong>{session.title}</strong>
+                <span>{new Date(session.updatedAt).toLocaleString()}</span>
+              </button>
+              <button
+                type="button"
+                className="agent-session-delete"
+                aria-label={`Delete conversation ${session.title}`}
+                title="Delete conversation"
+                onClick={() => deleteSession(session.id)}
+                disabled={running}
+              >
+                ×
+              </button>
+            </div>
           ))}
         </div>
       </aside>
@@ -490,20 +464,15 @@ export function AgentPanel({ aliases }: { aliases: ModelAlias[] }) {
         </div>
 
         <div className="field">
-          <label htmlFor="agent-alias">Model</label>
-          <select id="agent-alias" value={alias} onChange={(e) => setAlias(e.target.value)}>
-            {agentAliases.map((entry) => (
-              <option key={entry.alias} value={entry.alias}>
-                {entry.alias} — {entry.model}{(modelCapabilities[entry.alias] ?? entry.agentCapability) === 'verified' ? '' : ' · verify on selection'}
-              </option>
-            ))}
-          </select>
+          <label htmlFor="agent-alias">Agent</label>
+          <div className="agent-identity" id="agent-alias">
+            <strong>DACAIS Agent</strong>
+            <span>One agent for chat, coding, vision, media, and tools</span>
+          </div>
           <p className="muted small">
             {imageGenerationRequest
-              ? 'Direct image generation does not depend on the selected text model’s tool channel.'
-              : checkingModel === alias ? 'Verifying structured tool support…' : selectedModelCapability === 'verified'
-              ? 'Verified for conversational coding and tool use.'
-              : 'This model must pass tool verification before Run is enabled.'}
+              ? 'The agent will use vision understanding and the configured media backend automatically.'
+              : 'The backend selects the best available model and falls back locally when needed.'}
           </p>
         </div>
 
@@ -707,7 +676,7 @@ export function AgentPanel({ aliases }: { aliases: ModelAlias[] }) {
             <button
               type="submit"
               className="primary"
-              disabled={!prompt.trim() || !workspaceId || (!imageGenerationRequest && (selectedModelCapability !== 'verified' || Boolean(checkingModel)))}
+              disabled={!prompt.trim() || !workspaceId}
             >
               Run
             </button>

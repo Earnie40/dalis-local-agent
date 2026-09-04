@@ -13,6 +13,8 @@ import torch
 from diffusers import StableDiffusionXLImg2ImgPipeline, StableDiffusionXLPipeline
 from PIL import Image
 
+import gpu_runtime
+
 ORIGINAL_STDOUT = sys.stdout
 MODEL_ROOT = Path(os.environ.get("DACAIS_SDXL_MODEL_ROOT", "/opt/dacais-sdxl/stable-diffusion-xl-base-1.0"))
 WIDTH = int(os.environ.get("DACAIS_SDXL_WIDTH", "1344"))
@@ -23,6 +25,8 @@ NEGATIVE = os.environ.get(
     "text, watermark, logo, signature, low quality, lowres, blurry, "
     "distorted, deformed, disfigured, extra limbs, bad anatomy",
 )
+# Free VRAM needed to decode the latent in one pass instead of slicing the VAE.
+UNSLICED_DECODE_GIB = float(os.environ.get("DACAIS_SDXL_UNSLICED_DECODE_GIB", "12"))
 
 
 def emit(value: dict) -> None:
@@ -50,7 +54,18 @@ def main() -> int:
         emit({"type": "error", "error": f"SDXL weights are not installed at {MODEL_ROOT}"})
         return 1
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    # SDXL ships fp16 weights and is numerically tuned for them; the Blackwell
+    # gain comes from the tensor-core paths below, not from changing precision.
     dtype = torch.float16 if device == "cuda" else torch.float32
+    profile = None
+    sliced = True
+    if device == "cuda":
+        try:
+            profile = gpu_runtime.verify_kernels()
+        except RuntimeError as error:
+            emit({"type": "error", "error": str(error)})
+            return 1
+        gpu_runtime.configure_backends(profile)
     with contextlib.redirect_stdout(sys.stderr):
         pipeline = StableDiffusionXLPipeline.from_pretrained(
             str(MODEL_ROOT), torch_dtype=dtype, variant="fp16", use_safetensors=True,
@@ -58,13 +73,21 @@ def main() -> int:
         edit_pipeline = StableDiffusionXLImg2ImgPipeline(**pipeline.components)
         pipeline.set_progress_bar_config(disable=True)
         edit_pipeline.set_progress_bar_config(disable=True)
-        enable_vae_slicing(pipeline)
+        # Slicing kept peak VRAM low enough for the backdrop worker to coexist
+        # with the realtime renderer. With the headroom genuinely free, one-pass
+        # decoding is faster for the same pixels.
+        sliced = not (device == "cuda" and gpu_runtime.has_headroom(UNSLICED_DECODE_GIB))
+        if sliced:
+            enable_vae_slicing(pipeline)
     emit({
         "type": "worker_ready",
         "model": "stabilityai/stable-diffusion-xl-base-1.0",
         "width": WIDTH,
         "height": HEIGHT,
         "device": device,
+        "gpu": profile.name if profile else None,
+        "computeCapability": profile.sm if profile else None,
+        "vaeSlicing": sliced,
     })
 
     for line in sys.stdin:

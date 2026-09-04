@@ -207,9 +207,9 @@ export function activityForLoopEvent(event: ActivityLoopEvent): ActivityInput | 
     return {
       type: 'reasoning_summary',
       status: 'info',
-      title: 'Model reasoning preview',
-      message: event.content ? `Qwen emitted this reasoning preview (not guaranteed to be complete or faithful):\n${event.content}` : event.message,
-      metadata: { source: 'provider-emitted', label: 'not-hidden-internals' },
+      title: 'Model is thinking',
+      message: 'The selected model is processing the latest evidence before its next public action.',
+      metadata: { source: 'provider-emitted', label: 'summary-only' },
     };
   }
   if (event.type === 'tool_call' && toolName) {

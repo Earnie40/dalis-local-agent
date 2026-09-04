@@ -23,6 +23,7 @@ describe('agent tool selection', () => {
     expect(isImageGenerationRequest('cinematic mountain landscape at sunset')).toBe(true);
     expect(isImageGenerationRequest('Improve this repository documentation')).toBe(false);
     expect(isImageGenerationRequest('Explain the model class in this repository')).toBe(false);
+    expect(isImageGenerationRequest('Audit the repository to locate every file that must be modified to improve conversational image/video editing.')).toBe(false);
     expect(isImageGenerationRequest('Use the selected tool', ['image.generate'])).toBe(true);
   });
 

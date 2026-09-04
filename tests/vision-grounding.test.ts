@@ -3,6 +3,7 @@ import type { ProviderRegistry } from '@dacai-local-agent/providers';
 import {
   buildGroundedEditPrompt,
   analyzeImageForEdit,
+  interpretMediaInstruction,
   describeImage,
   evaluateSourceConditionedMedia,
   VISION_ALIAS,
@@ -137,6 +138,20 @@ describe('analyzeImageForEdit', () => {
     const result = await analyzeImageForEdit(registry, attachment, 'change the center region');
     expect(result.regions).toHaveLength(12);
     expect(result.regions[0].box).toBeUndefined();
+  });
+});
+
+describe('interpretMediaInstruction', () => {
+  it('turns conversational media wording into a bounded executable instruction', async () => {
+    const registry = registryWith(vi.fn(async () => ({ content: JSON.stringify({
+      instruction: 'Change the subject outfit to a red evening gown while preserving the pose and beach background.',
+      targetRegions: ['subject clothing'],
+      preserve: ['pose', 'background', 'lighting'],
+    }) })));
+    const result = await interpretMediaInstruction(registry, 'Can you make her look ready for a gala but keep the beach?', 'User asked for a portrait edit.');
+    expect(result.instruction).toContain('red evening gown');
+    expect(result.targetRegions).toEqual(['subject clothing']);
+    expect(result.preserve).toContain('background');
   });
 });
 

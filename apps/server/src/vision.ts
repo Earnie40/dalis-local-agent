@@ -45,6 +45,14 @@ export interface VisionEditAnalysis {
   model: string;
 }
 
+export interface MediaIntentInterpretation {
+  instruction: string;
+  targetRegions: string[];
+  preserve: string[];
+  alias: string;
+  model: string;
+}
+
 export class VisionUnavailableError extends Error {
   constructor(message: string) {
     super(message);
@@ -106,6 +114,76 @@ function parseVisionAnalysis(raw: string, instruction: string, alias: string, mo
       targetRegions: [],
       alias,
       model,
+    };
+  }
+}
+
+/**
+ * Converts conversational wording into a compact media instruction before
+ * pixels are analyzed. This keeps the general agent responsible for intent
+ * while the vision model remains responsible for visible facts and regions.
+ */
+export async function interpretMediaInstruction(
+  registry: ProviderRegistry,
+  instruction: string,
+  conversationContext?: string,
+  signal?: AbortSignal,
+): Promise<MediaIntentInterpretation> {
+  let resolved;
+  try {
+    resolved = await registry.resolveAlias('agent', {
+      requireToolCalling: false,
+      skipCapabilityProbe: true,
+      signal,
+    });
+  } catch (error) {
+    throw new VisionUnavailableError(
+      `The unified agent could not interpret the media request: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
+  const response = await resolved.provider.chat({
+    model: resolved.model,
+    systemPrompt:
+      'You interpret a user request for an image or video editor. Preserve the user intent; do not invent visual facts. ' +
+      'Return JSON only with a concise executable instruction, target regions named by the user, and details to preserve. ' +
+      'Do not answer the user or add commentary.',
+    messages: [{
+      role: 'user',
+      content: [
+        conversationContext ? `Recent conversation context:\n${conversationContext.slice(-6_000)}` : '',
+        `Current media request:\n${instruction.trim()}`,
+        'Return exactly: {"instruction":"...","targetRegions":["..."],"preserve":["..."]}',
+      ].filter(Boolean).join('\n\n'),
+    }],
+    temperature: 0.1,
+    signal,
+  });
+
+  const raw = (response.content ?? '').trim();
+  const match = raw.match(/\{[\s\S]*\}/);
+  try {
+    const parsed = JSON.parse(match ? match[0] : raw) as Record<string, unknown>;
+    const interpreted = regionText(parsed.instruction);
+    if (!interpreted) throw new Error('empty instruction');
+    return {
+      instruction: interpreted,
+      targetRegions: Array.isArray(parsed.targetRegions)
+        ? parsed.targetRegions.filter((value): value is string => typeof value === 'string').map(regionText).filter(Boolean).slice(0, 8)
+        : [],
+      preserve: Array.isArray(parsed.preserve)
+        ? parsed.preserve.filter((value): value is string => typeof value === 'string').map(regionText).filter(Boolean).slice(0, 8)
+        : [],
+      alias: resolved.alias ?? 'agent',
+      model: resolved.model,
+    };
+  } catch {
+    return {
+      instruction: instruction.trim().slice(0, MAX_REGION_TEXT_CHARS),
+      targetRegions: [],
+      preserve: [],
+      alias: resolved.alias ?? 'agent',
+      model: resolved.model,
     };
   }
 }

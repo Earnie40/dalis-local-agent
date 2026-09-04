@@ -18,13 +18,13 @@ exposes a defect.
 
 ## Active RunPod deployment
 
-- Active pod: `xd621ikwpgvkmb` (`dacais-anatomy-image-video`)
+- Active pod: `aiw9z53r0fsdiz` (`dacais-anatomy-image-video-blackwell`)
 - Secure Cloud, `US-KS-2`
 - GPU: NVIDIA A100 SXM4 80 GB, billed at the reported $1.59/hour
 - System RAM observed: 2 TiB total, about 1.9 TiB available before model loading
 - Persistent network volume: `dcfkb7hdoo` (`dacais-anatomy-models`), 275 GB,
   STANDARD, mounted at `/workspace`
-- Current direct SSH endpoint: `root@216.81.248.127:12101`
+- Current direct SSH endpoint: `root@216.243.220.170:16806`
 - Use the workstation's existing `~/.ssh/id_ed25519`; do not copy credentials
   into source or the handoff.
 
@@ -93,7 +93,7 @@ Provisioning fixes already made:
    A100 should select CUDA mode because it has more than 60 GiB VRAM.
 8. After the final request, verify the corresponding anatomy worker exits and
    VRAM returns to baseline after the configured 180-second idle timeout.
-9. Update the local non-secret RunPod target to `xd621ikwpgvkmb` only after live
+9. Update the local non-secret RunPod target to `aiw9z53r0fsdiz` only after live
    verification succeeds. Preserve every other `.env` value and never display
    credentials.
 10. Rerun relevant syntax/tests after any defect fix, inspect diffs, and report
