@@ -97,6 +97,15 @@ export interface AgentLoopOptions {
   prompt: string;
 
   /**
+   * Raw base64 images attached to `prompt`, without a data: prefix.
+   *
+   * These are what let a vision model actually see an uploaded picture rather
+   * than reason about its filename. A model without verified vision ignores
+   * them; the caller decides whether to attach them at all.
+   */
+  promptImages?: string[];
+
+  /**
    * Recent conversation that occurred BEFORE `prompt`.
    *
    * This is what lets a follow-up such as "what is that from?" resolve "that"
@@ -526,7 +535,14 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   const history = trimHistory(options.history, maxHistoryMessages);
   const currentGoal = options.prompt.trim();
   const baseSystemPrompt = buildRuntimeSystemPrompt(options.systemPrompt, currentGoal, history.length > 0);
-  const messages: CompletionMessage[] = [...history, { role: 'user', content: options.prompt }];
+  const messages: CompletionMessage[] = [
+    ...history,
+    {
+      role: 'user',
+      content: options.prompt,
+      ...(options.promptImages?.length ? { images: options.promptImages } : {}),
+    },
+  ];
   const seenCalls = new Set<string>();
   const knownPaths = new Set<string>();
   const changedFiles = new Set<string>();
@@ -676,6 +692,9 @@ ${toolsForTurn.map((tool) => `- ${tool.name}`).join('\n')}`,
         toolName: message.toolName,
         toolCallId: message.toolCallId,
         toolCalls: message.toolCalls,
+        // Without this the attached image is silently dropped one layer above
+        // the provider, and a vision model receives only the filename.
+        images: message.images,
         providerContinuationItems: message.providerContinuationItems,
       })),
       tools: toolsForTurn.length ? toolsForTurn : undefined,

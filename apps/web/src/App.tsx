@@ -7,6 +7,7 @@ import { ChatMonitor } from './LiveMonitor';
 import { useStickToBottom } from './use-stick-to-bottom';
 import { DelegationPanel } from './DelegationPanel';
 import { IntelligencePanel } from './IntelligencePanel';
+import { MediaStudioPanel } from './MediaStudioPanel';
 import {
   api,
   streamChat,
@@ -15,7 +16,11 @@ import {
   type Message,
   type MediaInfrastructureStatus,
   type ModelAlias,
+  type Upload,
+  type Workspace,
 } from './api';
+import { AttachmentBar } from './AttachmentBar';
+import { chooseAgentWorkspace } from './agent-ui-state';
 
 const StudioPanel = lazy(() => import('./StudioPanel').then((module) => ({ default: module.StudioPanel })));
 
@@ -58,6 +63,10 @@ const EMPTY_STREAM: StreamState = {
   thinkingText: '',
 };
 
+// The same key the agent panel persists, so choosing a workspace in one
+// place does not silently disagree with the other.
+const WORKSPACE_KEY = 'dacai.agent.workspace.v1';
+
 export function App() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeId, setActiveId] = useState<string | undefined>();
@@ -68,8 +77,17 @@ export function App() {
   const [input, setInput] = useState('');
   const [stream, setStream] = useState<StreamState>(EMPTY_STREAM);
   const [error, setError] = useState<string | undefined>();
-  const [mode, setMode] = useState<'chat' | 'agent' | 'delegate' | 'intelligence' | 'studio'>('chat');
+  const [mode, setMode] = useState<'chat' | 'agent' | 'delegate' | 'intelligence' | 'studio' | 'media'>('chat');
   const [mediaStatus, setMediaStatus] = useState<MediaInfrastructureStatus | undefined>();
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [workspaceId, setWorkspaceId] = useState(() => {
+    try {
+      return localStorage.getItem(WORKSPACE_KEY) ?? '';
+    } catch {
+      return '';
+    }
+  });
+  const [attachments, setAttachments] = useState<Upload[]>([]);
 
   const abortRef = useRef<AbortController | undefined>(undefined);
   const transcriptScroll = useStickToBottom<HTMLDivElement>([messages, stream.text]);
@@ -85,7 +103,25 @@ export function App() {
       .listModels()
       .then(({ aliases: list }) => setAliases(list.filter((entry) => entry.enabled)))
       .catch((e) => setError(String(e)));
+    // Chat itself has no tools, but an attachment has to be stored somewhere;
+    // uploads land in the selected workspace so the agent panel can act on them.
+    api
+      .listWorkspaces()
+      .then(({ workspaces: list }) => {
+        setWorkspaces(list);
+        setWorkspaceId((current) => chooseAgentWorkspace(list, current));
+      })
+      .catch(() => undefined);
   }, [refreshConversations]);
+
+  useEffect(() => {
+    if (!workspaceId) return;
+    try {
+      localStorage.setItem(WORKSPACE_KEY, workspaceId);
+    } catch {
+      /* a browser with storage disabled just loses the preference */
+    }
+  }, [workspaceId]);
 
   useEffect(() => {
     let active = true;
@@ -160,7 +196,14 @@ export function App() {
 
       try {
         await streamChat(
-          { conversationId, message: text, alias, retry: options.retry },
+          {
+            conversationId,
+            message: text,
+            alias,
+            retry: options.retry,
+            workspaceId: workspaceId || undefined,
+            attachments: attachments.length ? attachments.map((upload) => upload.id) : undefined,
+          },
           {
             onStart: (meta) => {
               conversationId = meta.conversationId;
@@ -193,6 +236,7 @@ export function App() {
       } finally {
         abortRef.current = undefined;
         setStream(EMPTY_STREAM);
+        setAttachments([]);
         // Re-read from the database so what is displayed is what was persisted.
         if (conversationId) {
           await api
@@ -203,7 +247,7 @@ export function App() {
         await refreshConversations().catch(() => undefined);
       }
     },
-    [activeId, alias, input, refreshConversations, stream.active],
+    [activeId, alias, attachments, input, refreshConversations, stream.active, workspaceId],
   );
 
   const stop = useCallback(() => abortRef.current?.abort(), []);
@@ -272,6 +316,9 @@ export function App() {
           <button className={mode === 'studio' ? 'active' : ''} onClick={() => setMode('studio')}>
             Studio
           </button>
+          <button className={mode === 'media' ? 'active' : ''} onClick={() => setMode('media')}>
+            Media
+          </button>
         </div>
 
         {mode === 'chat' && (
@@ -339,6 +386,10 @@ export function App() {
               <StudioPanel aliases={aliases} />
             </Suspense>
           </StudioErrorBoundary>
+        </main>
+      ) : mode === 'media' ? (
+        <main className="media-host">
+          <MediaStudioPanel aliases={aliases} />
         </main>
       ) : mode === 'intelligence' ? (
         <main className="chat">
@@ -451,6 +502,13 @@ export function App() {
               }
             }}
           />
+          <AttachmentBar
+            workspaceId={workspaceId || undefined}
+            uploads={attachments}
+            onChange={setAttachments}
+            disabled={stream.active}
+            noWorkspaceHint="Register a workspace in the Agent tab to attach files."
+          />
           <div className="actions">
             {stream.active ? (
               <button type="button" className="danger" onClick={stop}>
@@ -464,6 +522,18 @@ export function App() {
             <button type="button" disabled={!canRetry} onClick={() => void send({ retry: true })}>
               Retry
             </button>
+            {workspaces.length > 0 && (
+              <select
+                className="composer-workspace"
+                value={workspaceId}
+                title="Workspace that stores attached files"
+                onChange={(event) => setWorkspaceId(event.target.value)}
+              >
+                {workspaces.map((workspace) => (
+                  <option key={workspace.id} value={workspace.id}>{workspace.displayName}</option>
+                ))}
+              </select>
+            )}
           </div>
         </form>
       </main>

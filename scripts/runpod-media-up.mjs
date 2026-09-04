@@ -3,11 +3,15 @@
  * loopback-only SSH tunnel open for image/video tools.
  *
  * Usage:
- *   node --import tsx scripts/runpod-media-up.mjs [--pod-id <id>]
+ *   node --import tsx scripts/runpod-media-up.mjs [--pod-id <id>] [--sync-service]
+ *
+ * --sync-service atomically copies the checked local media service and model
+ * runners to the persistent GPU volume before restart. It is intentionally explicit:
+ * normal tunnel diagnostics must never overwrite a separately deployed service.
  */
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 
 for (const line of readFileSync('.env', 'utf8').split(/\r?\n/)) {
@@ -27,6 +31,19 @@ const podIndex = argv.indexOf('--pod-id');
 const podId = podIndex >= 0 ? argv[podIndex + 1] : process.env.RUNPOD_ID;
 const identityIndex = argv.indexOf('--identity-file');
 const requestedIdentity = identityIndex >= 0 ? argv[identityIndex + 1] : undefined;
+const syncService = argv.includes('--sync-service');
+const mediaSourceDirectory = resolve(
+  process.env.DACAI_MEDIA_SERVICE_SOURCE_DIR?.trim()
+    || 'C:/Users/Kyleh/deepbrain-avatar-poc/runpod',
+);
+const mediaSources = [
+  ['media_service.py', process.env.DACAI_MEDIA_SERVICE_SOURCE?.trim()],
+  ['instruct_edit_runner.py'],
+  ['anatomy_edit_runner.py'],
+  ['anatomy_video_runner.py'],
+  ['download_anatomy_models.py'],
+  ['provision-anatomy-edit.sh'],
+].map(([name, override]) => ({ name, source: resolve(override || mediaSourceDirectory, override ? '' : name) }));
 const localPort = Number(process.env.DACAI_MEDIA_LOCAL_PORT ?? 18090);
 const endpoint = await discoverRunpodSshEndpoint({ apiKey: process.env.RUNPOD_API_KEY, podId });
 if (!endpoint) {
@@ -53,9 +70,30 @@ function run(command, args, input, timeoutMs = 30_000) {
   });
 }
 
+async function syncMediaService() {
+  if (!syncService) return;
+  for (const entry of mediaSources) {
+    if (!existsSync(entry.source)) throw new Error(`The media-service source is missing: ${entry.source}`);
+    // Source code only — no .env or credentials are read or transferred.
+    const source = readFileSync(entry.source, 'utf8');
+    const mode = entry.name.endsWith('.sh') ? '755' : '644';
+    const remote = `/workspace/dacais-media/service/${entry.name}`;
+    const install = await run('ssh', [...baseArgs,
+      `install -d -m 755 /workspace/dacais-media/service && umask 077 && tee ${remote}.uploading >/dev/null && chmod ${mode} ${remote}.uploading && mv ${remote}.uploading ${remote}`,
+    ], source, 45_000);
+    if (install.code !== 0) {
+      throw new Error(`Could not sync ${entry.name}: ${install.stderr.trim().slice(-800) || 'remote copy failed'}`);
+    }
+    console.log(`media source    synced ${entry.source}`);
+  }
+}
+
+await syncMediaService();
+
 const remoteSetup = `
 set -e
 ROOT=/workspace/dacais-media
+mkdir -p "$ROOT/logs"
 test -f "$ROOT/service/media_service.py"
 cat > "$ROOT/run-media.sh" <<'LAUNCHER'
 #!/bin/bash
@@ -65,13 +103,20 @@ export DACAIS_MEDIA_HOST=127.0.0.1
 export DACAIS_MEDIA_PORT=8090
 export DACAIS_SDXL_PYTHON="$(command -v python3)"
 export DACAIS_SDXL_MODEL_ROOT="$ROOT/models/sdxl-base"
+export DACAIS_INSTRUCT_EDIT_PYTHON="$(command -v python3)"
+export DACAIS_INSTRUCT_PIX2PIX_MODEL_ROOT="$ROOT/models/sdxl-instructpix2pix-768"
+export DACAIS_ANATOMY_EDIT_PYTHON="\${DACAIS_ANATOMY_EDIT_PYTHON:-$ROOT/venvs/anatomy-edit/bin/python}"
+export DACAIS_ANATOMY_VIDEO_PYTHON="\${DACAIS_ANATOMY_VIDEO_PYTHON:-$ROOT/venvs/anatomy-edit/bin/python}"
+export DACAIS_ANATOMY_GENERATION_MODEL_ROOT="$ROOT/models/qwen-image-2512"
+export DACAIS_ANATOMY_EDIT_MODEL_ROOT="$ROOT/models/qwen-image-edit-2511"
+export DACAIS_ANATOMY_VIDEO_MODEL_ROOT="$ROOT/models/wan2.2-ti2v-5b"
 export DACAIS_SVD_PYTHON="$(command -v python3)"
 export DACAIS_SVD_MODEL_ROOT="$ROOT/models/svd-xt"
 export HF_HOME="$ROOT/cache/huggingface"
 exec python3 "$ROOT/service/media_service.py"
 LAUNCHER
 chmod +x "$ROOT/run-media.sh"
-if ! curl -fsS --max-time 2 http://127.0.0.1:8090/v1/health >/dev/null 2>&1; then
+if ${syncService ? 'true' : '! curl -fsS --max-time 2 http://127.0.0.1:8090/v1/health >/dev/null 2>&1'}; then
   pkill -f '[m]edia_service.py' >/dev/null 2>&1 || true
   setsid "$ROOT/run-media.sh" > "$ROOT/logs/media-service.log" 2>&1 < /dev/null &
 fi

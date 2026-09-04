@@ -1,5 +1,6 @@
 import { fileURLToPath } from 'node:url';
 import Fastify from 'fastify';
+import fastifyMultipart from '@fastify/multipart';
 import { config as loadEnv } from 'dotenv';
 import { loadAppConfigResult, redactDatabaseUrl, runMigrations, verifyConnection } from '@dacai-local-agent/shared';
 import type { AppConfigLoadResult } from '@dacai-local-agent/shared';
@@ -21,10 +22,13 @@ import { registerMemoryRoutes } from './routes/memory';
 import { registerInfrastructureRoutes } from './routes/infrastructure';
 import { registerIntelligenceRoutes } from './routes/intelligence';
 import { registerStudioRoutes } from './routes/studio';
+import { registerUploadRoutes } from './routes/uploads';
+import { MAX_UPLOAD_BYTES } from './workspace-uploads';
+import { registerMediaStudioRoutes } from './routes/media-studio';
 import { RunpodService } from './infrastructure/runpod-service';
 import { resolveRunpodPodPresence } from './infrastructure/runpod-pod-status';
 import { RunpodMediaManager } from './infrastructure/runpod-media-manager';
-import { ApprovalRegistry } from './approvals';
+import { ApprovalRegistry, approvalOptionsFromEnv } from './approvals';
 
 // Resolved against this file, not the working directory: `pnpm dev` runs the
 // server with cwd=apps/server, where neither .env nor config/ exists.
@@ -57,6 +61,13 @@ const { config, warnings } = loaded;
 
 const server = Fastify({
   logger: true,
+});
+
+// Workspace uploads are the only multipart route group. The per-file cap
+// mirrors MAX_UPLOAD_BYTES in workspace-uploads.ts so an oversized body is
+// rejected while streaming instead of after it is fully buffered.
+void server.register(fastifyMultipart, {
+  limits: { fileSize: MAX_UPLOAD_BYTES, files: 10 },
 });
 
 // The web app is served from a different origin in development. Both spellings
@@ -107,7 +118,12 @@ const gpuAvailabilityProbe = new GpuAvailabilityProbe({
 registry.setGpuAvailabilityProbe(gpuAvailabilityProbe);
 /** Shared so a pending LIVE_VALIDATION approval (security.ts) surfaces through the same
  *  /api/approvals endpoints the UI already polls for interactive tool-call approvals. */
-const approvals = new ApprovalRegistry();
+const approvals = new ApprovalRegistry(approvalOptionsFromEnv());
+if (approvals.isAutoApproving) {
+  server.log.warn(
+    'DACAI_AUTO_APPROVE_ALL is set: mutation and escalated tool calls run without a human approval click.',
+  );
+}
 const runpodMediaManager = new RunpodMediaManager();
 server.addHook('onClose', async () => {
   runpodService.stop();
@@ -273,6 +289,8 @@ registerMemoryRoutes(server);
 registerInfrastructureRoutes(server, runpodService, runpodMediaManager, registry);
 registerIntelligenceRoutes(server, { config, registry });
 registerStudioRoutes(server, { registry });
+registerUploadRoutes(server);
+registerMediaStudioRoutes(server, { registry, media: runpodMediaManager });
 
 server.get('/api/status', async () => ({
   ok: true,

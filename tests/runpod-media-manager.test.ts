@@ -140,6 +140,23 @@ describe('Runpod media supervisor', () => {
     });
   });
 
+  it('waits for a video model before admitting a long-form video job', async () => {
+    const manager = new RunpodMediaManager({
+      env: {
+        DACAI_IMAGE_BACKEND: 'dacais-media', DACAI_VIDEO_BACKEND: 'dacais-media',
+        DACAI_MEDIA_TRANSPORT: 'loopback', DACAI_MEDIA_BASE_URL: 'http://127.0.0.1:8090',
+      },
+      fetchImpl: (async () => new Response(JSON.stringify({ backdropModel: 'sdxl' }), { status: 200 })) as typeof fetch,
+      startupAttempts: 1,
+      sleep: async () => undefined,
+    });
+
+    expect(await manager.ensureVideoReady()).toMatchObject({
+      ready: false,
+      service: { healthy: true, imageModel: true, videoModel: false },
+    });
+  });
+
   it('fails closed when production HTTPS has no token', async () => {
     const manager = new RunpodMediaManager({
       env: {

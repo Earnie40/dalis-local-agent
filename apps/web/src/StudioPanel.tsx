@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { ModelAlias } from './api';
-import { generateStudioProject } from './api';
+import type { ModelAlias, Upload, Workspace } from './api';
+import { api, generateStudioProject } from './api';
+import { AttachmentBar } from './AttachmentBar';
+import { chooseAgentWorkspace } from './agent-ui-state';
 import {
   buildStandaloneStudioDocument,
   buildStudioDocument,
@@ -38,6 +40,9 @@ const FILES: Array<{ key: StudioFileKey; name: string; language: string }> = [
 ];
 
 const STORAGE_KEY = 'dacai.studio.project.v1';
+const WORKSPACE_KEY = 'dacai.agent.workspace.v1';
+// Mirrors STUDIO_MAX_ATTACHMENT_CHARS in apps/server/src/routes/studio.ts.
+const MAX_ATTACHMENT_CHARS = 20_000;
 const LAYOUT_KEY = 'dacai.studio.layout.v1';
 
 function cloneFiles(files: StudioFiles): StudioFiles {
@@ -104,6 +109,15 @@ export function StudioPanel({ aliases }: StudioPanelProps) {
   const editorRef = useRef<HTMLTextAreaElement>(null);
   const assistantToggleRef = useRef<HTMLButtonElement>(null);
   const generationAbortRef = useRef<AbortController | undefined>(undefined);
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [workspaceId, setWorkspaceId] = useState(() => {
+    try {
+      return localStorage.getItem(WORKSPACE_KEY) ?? '';
+    } catch {
+      return '';
+    }
+  });
+  const [attachments, setAttachments] = useState<Upload[]>([]);
   const revisionRef = useRef(revision);
   const consoleCountRef = useRef(0);
   const consoleBytesRef = useRef(0);
@@ -279,6 +293,18 @@ export function StudioPanel({ aliases }: StudioPanelProps) {
     window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
   };
 
+  // Studio itself never touches the filesystem; the workspace is only the
+  // store an uploaded file is written to before its text is inlined here.
+  useEffect(() => {
+    api
+      .listWorkspaces()
+      .then(({ workspaces: list }) => {
+        setWorkspaces(list);
+        setWorkspaceId((current) => chooseAgentWorkspace(list, current));
+      })
+      .catch(() => undefined);
+  }, []);
+
   const sendToAssistant = async () => {
     const prompt = chatInput.trim();
     if (!prompt || generating) return;
@@ -308,6 +334,14 @@ export function StudioPanel({ aliases }: StudioPanelProps) {
         revision: requestRevision,
         files: requestFiles,
         history,
+        // Only text can be inlined: the studio route has no filesystem access,
+        // so a binary upload has no meaning here and is left out.
+        attachments: attachments
+          .filter((upload) => upload.kind === 'text' && upload.textPreview)
+          .map((upload) => ({
+            name: upload.name,
+            text: (upload.textPreview ?? '').slice(0, MAX_ATTACHMENT_CHARS),
+          })),
       }, controller.signal);
       const stale = revisionRef.current !== response.update.baseRevision;
       const changed = response.update.changedFiles.length > 0;
@@ -329,6 +363,7 @@ export function StudioPanel({ aliases }: StudioPanelProps) {
       if (!controller.signal.aborted) setGenerationError(error instanceof Error ? error.message : String(error));
     } finally {
       if (generationAbortRef.current === controller) generationAbortRef.current = undefined;
+      setAttachments([]);
       setGenerating(false);
     }
   };
@@ -560,12 +595,31 @@ export function StudioPanel({ aliases }: StudioPanelProps) {
                     }
                   }}
                 />
+                <AttachmentBar
+                  workspaceId={workspaceId || undefined}
+                  uploads={attachments}
+                  onChange={setAttachments}
+                  disabled={generating}
+                  noWorkspaceHint="Register a workspace in the Agent tab to attach files."
+                />
                 <div>
                   <p>Current files are sent to the selected model. Do not include secrets.</p>
                   {generating ? (
                     <button type="button" className="danger" onClick={() => generationAbortRef.current?.abort()}>Stop</button>
                   ) : (
                     <button type="submit" className="primary" disabled={!chatInput.trim()}>Build</button>
+                  )}
+                  {workspaces.length > 0 && (
+                    <select
+                      className="composer-workspace"
+                      value={workspaceId}
+                      title="Workspace that stores attached files"
+                      onChange={(event) => setWorkspaceId(event.target.value)}
+                    >
+                      {workspaces.map((workspace) => (
+                        <option key={workspace.id} value={workspace.id}>{workspace.displayName}</option>
+                      ))}
+                    </select>
                   )}
                 </div>
               </form>

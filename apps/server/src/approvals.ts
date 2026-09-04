@@ -9,6 +9,12 @@ import type { PermissionDecision } from '@dacai-local-agent/security';
  * request denies on timeout, a disconnected client denies immediately, and an
  * unknown id resolves nothing. Approval is only ever granted by an explicit
  * decision arriving for a live request.
+ *
+ * The single exception is single-operator mode (DACAI_AUTO_APPROVE_ALL). Where
+ * the only user is also the only approver, the click adds no safety — it just
+ * expires while the operator is still reading the prompt — so the gate resolves
+ * immediately instead. It stays opt-in and off by default, because it removes
+ * the human check every other path here preserves.
  */
 
 export interface PendingApproval {
@@ -40,9 +46,44 @@ export interface ApprovalRequestInput {
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 
+export interface ApprovalRegistryOptions {
+  /** Resolve every approval-gated call immediately. Single-operator use only. */
+  autoApproveAll?: boolean;
+  /** Overrides the per-request deny-on-silence deadline. */
+  defaultTimeoutMs?: number;
+}
+
+function truthy(value: string | undefined): boolean {
+  return value?.toLowerCase() === 'true' || value === '1';
+}
+
+/** Reads single-operator mode and the approval deadline from the environment. */
+export function approvalOptionsFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): ApprovalRegistryOptions {
+  const configured = Number(env.DACAI_APPROVAL_TIMEOUT_MS);
+  return {
+    autoApproveAll: truthy(env.DACAI_AUTO_APPROVE_ALL),
+    defaultTimeoutMs:
+      Number.isFinite(configured) && configured > 0 ? configured : undefined,
+  };
+}
+
 export class ApprovalRegistry {
   private readonly waiters = new Map<string, Waiter>();
   private readonly approveAllRuns = new Set<string>();
+  private readonly autoApproveAll: boolean;
+  private readonly defaultTimeoutMs: number;
+
+  constructor(options: ApprovalRegistryOptions = {}) {
+    this.autoApproveAll = options.autoApproveAll ?? false;
+    this.defaultTimeoutMs = options.defaultTimeoutMs ?? DEFAULT_TIMEOUT_MS;
+  }
+
+  /** True when the gate resolves everything without a human decision. */
+  get isAutoApproving(): boolean {
+    return this.autoApproveAll;
+  }
 
   /**
    * Creates a pending request and resolves when a decision arrives, the
@@ -61,6 +102,14 @@ export class ApprovalRegistry {
       requestedAt: new Date().toISOString(),
     };
 
+    // Single-operator mode still announces the call through onRequested, so the
+    // activity journal records what ran and why. It just never parks the run
+    // waiting for a click only this operator could give.
+    if (this.autoApproveAll) {
+      input.onRequested?.(approval);
+      return Promise.resolve(true);
+    }
+
     if (this.approveAllRuns.has(input.runId)) return Promise.resolve(true);
 
     return new Promise<boolean>((resolve) => {
@@ -72,7 +121,7 @@ export class ApprovalRegistry {
         resolve(approved);
       };
 
-      const timer = setTimeout(() => settle(false), input.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+      const timer = setTimeout(() => settle(false), input.timeoutMs ?? this.defaultTimeoutMs);
       this.waiters.set(id, { approval, resolve: settle, timer });
 
       input.onRequested?.(approval);

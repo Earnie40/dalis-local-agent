@@ -131,7 +131,8 @@ export function createVideoGenerationTools(services: VideoGenerationServices = D
 
       const connection = resolveMediaConnection(services.env);
       const base = connection.baseUrl;
-      const response = await services.fetch(`${base}${source ? '/v1/animate-image' : '/v1/generate-backdrop'}`, {
+      const wanRequest = Boolean(prompt);
+      const response = await services.fetch(`${base}${wanRequest ? '/v1/anatomy-video' : '/v1/animate-image'}`, {
         method: 'POST',
         redirect: 'error',
         headers: connection.headers,
@@ -150,6 +151,7 @@ export function createVideoGenerationTools(services: VideoGenerationServices = D
           noiseAug: decimal(input.noiseAug, 0.02, 0, 1, 'noiseAug'),
           sourceFps: integer(input.sourceFps, 7, 1, 30, 'sourceFps'),
           animate: true,
+          mode: wanRequest ? 'anatomy' : 'auto',
           sourceMediaBase64: sourceData?.toString('base64'),
           sourceMimeType: mimeType,
         }),
@@ -157,6 +159,7 @@ export function createVideoGenerationTools(services: VideoGenerationServices = D
       if (!response.ok) throw new Error(`DACAIS media video backend failed: ${await responseError(response)}`);
       const body = await response.json() as {
         videoBase64?: unknown; videoModel?: unknown; model?: unknown; videoFrames?: unknown; peakVramMb?: unknown;
+        anatomyValidation?: unknown;
       };
       const video = decodeMp4(body.videoBase64);
       await mkdir(dirname(output.absolute), { recursive: true });
@@ -173,6 +176,9 @@ export function createVideoGenerationTools(services: VideoGenerationServices = D
         model: typeof body.videoModel === 'string' ? body.videoModel : body.model,
         frames: typeof body.videoFrames === 'number' ? body.videoFrames : undefined,
         peakVramMb: typeof body.peakVramMb === 'number' ? body.peakVramMb : undefined,
+        anatomyValidation: wanRequest && body.anatomyValidation && typeof body.anatomyValidation === 'object'
+          ? body.anatomyValidation
+          : undefined,
       };
     },
   }];

@@ -56,6 +56,39 @@ export interface MediaInfrastructureStatus {
   checkedAt: string;
 }
 
+export type MediaUploadKind = 'image' | 'audio';
+
+export interface MediaUpload {
+  path: string;
+  bytes: number;
+  kind: MediaUploadKind;
+}
+
+export interface MediaCharacterInput {
+  id: string;
+  name: string;
+  imagePath: string;
+  voice: {
+    kind: 'stock' | 'cloned';
+    voice?: string;
+    voiceId?: string;
+    referencePath?: string;
+    consent?: boolean;
+  };
+}
+
+export interface MediaVideoJob {
+  id: string;
+  workspaceId: string;
+  kind: 'video';
+  status: 'queued' | 'planning' | 'rendering' | 'complete' | 'failed' | 'cancelled';
+  createdAt: string;
+  updatedAt: string;
+  progress?: { phase: string; completed: number; total: number; message: string };
+  error?: string;
+  artifact?: { path: string; bytes: number; sha256: string; durationRequestedSeconds: number; segments: number };
+}
+
 async function json<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API}${path}`, {
     ...init,
@@ -63,6 +96,52 @@ async function json<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
   return response.json() as Promise<T>;
+}
+
+export interface Upload {
+  id: string;
+  name: string;
+  /** Workspace-relative path the agent's tools can read. */
+  path: string;
+  bytes: number;
+  mimeType: string;
+  kind: 'text' | 'binary';
+  uploadedAt: string;
+  /** Text files only; used to inline content where there is no workspace. */
+  textPreview?: string;
+  truncated?: boolean;
+}
+
+/**
+ * Uploads one or more files to a workspace. The Content-Type header is left
+ * unset on purpose: the browser must supply it so the multipart boundary
+ * matches the body it generated.
+ */
+export async function uploadWorkspaceFiles(
+  workspaceId: string,
+  files: readonly File[],
+  signal?: AbortSignal,
+): Promise<Upload[]> {
+  const form = new FormData();
+  for (const file of files) form.append('files', file, file.name);
+
+  const response = await fetch(`${API}/api/workspaces/${encodeURIComponent(workspaceId)}/uploads`, {
+    method: 'POST',
+    body: form,
+    signal,
+  });
+
+  const detail = await response.text().catch(() => '');
+  if (!response.ok) {
+    let message = detail;
+    try {
+      message = (JSON.parse(detail) as { error?: string }).error ?? detail;
+    } catch {
+      /* retain the bounded server error text */
+    }
+    throw new Error(message || `Upload failed with status ${response.status}.`);
+  }
+  return (JSON.parse(detail) as { uploads: Upload[] }).uploads;
 }
 
 export interface Workspace {
@@ -252,6 +331,13 @@ export const api = {
   createWorkspace: (body: { displayName: string; rootPath: string; write: boolean; shell: boolean; network?: boolean }) =>
     json<{ workspace: Workspace }>('/api/workspaces', { method: 'POST', body: JSON.stringify(body) }),
   deleteWorkspace: (id: string) => json<{ ok: boolean }>(`/api/workspaces/${id}`, { method: 'DELETE' }),
+  listUploads: (workspaceId: string) =>
+    json<{ uploads: Upload[] }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/uploads`),
+  deleteUpload: (workspaceId: string, uploadId: string) =>
+    json<{ ok: boolean }>(
+      `/api/workspaces/${encodeURIComponent(workspaceId)}/uploads/${encodeURIComponent(uploadId)}`,
+      { method: 'DELETE' },
+    ),
   listConversations: () => json<{ conversations: Conversation[] }>('/api/conversations'),
   getConversation: (id: string) =>
     json<{ conversation: Conversation; messages: Message[] }>(`/api/conversations/${id}`),
@@ -260,6 +346,20 @@ export const api = {
   capabilities: (alias: string) => json<AliasCapabilities>(`/api/models/${alias}/capabilities`),
   mediaStatus: () => json<MediaInfrastructureStatus>('/api/infrastructure/media/status'),
   reconnectMedia: () => json<MediaInfrastructureStatus>('/api/infrastructure/media/reconnect', { method: 'POST' }),
+  uploadMedia: (body: { workspaceId: string; name: string; mimeType: string; dataBase64: string }) =>
+    json<{ upload: MediaUpload }>('/api/media/uploads', { method: 'POST', body: JSON.stringify(body) }),
+  generateMediaImage: (body: {
+    workspaceId: string; prompt: string; negativePrompt?: string; sourcePath?: string; outputName?: string;
+    width?: number; height?: number; strength?: number;
+  }) => json<{ artifact: { path: string; bytes: number; sha256: string; model?: string } }>('/api/media/images', {
+    method: 'POST', body: JSON.stringify(body),
+  }),
+  createMediaVideo: (body: {
+    workspaceId: string; prompt: string; durationSeconds: 30 | 60 | 120 | 300 | 600 | 900 | 1800;
+    alias: string; outputName?: string; characters: MediaCharacterInput[]; referencePaths: string[];
+  }) => json<{ job: MediaVideoJob }>('/api/media/videos', { method: 'POST', body: JSON.stringify(body) }),
+  mediaVideo: (id: string) => json<{ job: MediaVideoJob }>(`/api/media/videos/${encodeURIComponent(id)}`),
+  cancelMediaVideo: (id: string) => json<{ cancelled: boolean }>(`/api/media/videos/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
   usage: () => json<{ summary: Array<{ usageClass: string; source: string; requests: number; outputTokens: number }> }>(
     '/api/usage',
   ),
@@ -404,6 +504,8 @@ export interface StudioGenerateRequest {
   revision: number;
   files: StudioFiles;
   history: Array<{ role: 'user' | 'assistant'; content: string }>;
+  /** Studio is filesystem-free, so attachment text is sent inline. */
+  attachments?: Array<{ name: string; text: string }>;
 }
 
 export interface StudioGenerateResponse {
@@ -453,7 +555,14 @@ export async function generateStudioProject(
  * frame is buffered until its terminating blank line appears.
  */
 export async function streamChat(
-  body: { conversationId?: string; message: string; alias: string; retry?: boolean },
+  body: {
+    conversationId?: string;
+    message: string;
+    alias: string;
+    retry?: boolean;
+    workspaceId?: string;
+    attachments?: string[];
+  },
   handlers: StreamHandlers,
   signal: AbortSignal,
 ): Promise<void> {
@@ -519,6 +628,7 @@ export async function streamAgent(
     sessionId?: string;
     history?: Array<{ role: 'user' | 'assistant'; content: string }>;
     runMode?: 'interactive' | 'coding' | 'repository_audit' | 'deep_research';
+    attachments?: string[];
   },
   onEvent: (event: AgentEvent) => void,
   signal: AbortSignal,

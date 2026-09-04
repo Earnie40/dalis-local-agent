@@ -19,20 +19,21 @@
     "@dacai-local-agent/orchestrator": "workspace:*",
     "@dacai-local-agent/providers": "workspace:*",
     "@dacai-local-agent/rag": "workspace:*",
+    "@dacai-local-agent/repository-index": "workspace:*",
     "@dacai-local-agent/security": "workspace:*",
     "@dacai-local-agent/shared": "workspace:*",
     "@dacai-local-agent/telemetry": "workspace:*",
     "@dacai-local-agent/tools": "workspace:^",
     "@dacai-local-agent/training-traces": "workspace:^",
     "@dacai-local-agent/workspace": "workspace:*",
+    "@fastify/multipart": "^10.1.1",
     "@langchain/core": "^1.2.6",
     "@langchain/langgraph": "^1.4.9",
     "@langchain/langgraph-checkpoint-postgres": "^1.0.4",
     "dotenv": "^17.4.2",
     "fastify": "^5.4.0",
     "langchain": "^1.5.5",
-    "zod": "^3.25.0",
-    "@dacai-local-agent/repository-index": "workspace:*"
+    "zod": "^3.25.0"
   },
   "devDependencies": {
     "tsx": "^4.19.3",

@@ -167,6 +167,28 @@ models:
     temperature: 0.2
 
   # ---------------------------------------------------------------------------
+  # VISION / IMAGE UNDERSTANDING
+  # ---------------------------------------------------------------------------
+  #
+  # The only aliases that can actually SEE an uploaded image. Every other model
+  # in this file is text-only and receives, at most, a filename and a workspace
+  # path.
+  #
+  # Used when a run has an image attachment: the agent can describe the picture,
+  # locate subjects and anatomy within it, answer questions about it, and check
+  # a generated edit against what was asked for.
+  #
+  #   qwen2.5vl:7b
+  #     - image understanding VERIFIED on the L40S pod
+  #     - tool calling NOT assumed; the runtime probe still decides
+  #
+  # Install with: ollama pull qwen2.5vl:7b
+  vision:
+    provider: local_ollama
+    model: qwen2.5vl:7b
+    temperature: 0.2
+
+  # ---------------------------------------------------------------------------
   # FAST ADVISORY MODEL
   # ---------------------------------------------------------------------------
   #
@@ -285,6 +307,11 @@ models:
   gpu_qwen_uncensored:
     provider: remote_gpu_ollama
     model: huihui_ai/qwen3-abliterated:8b
+    temperature: 0.2
+
+  gpu_vision:
+    provider: remote_gpu_ollama
+    model: qwen2.5vl:7b
     temperature: 0.2
 
   # ---------------------------------------------------------------------------

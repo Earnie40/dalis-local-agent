@@ -6,6 +6,8 @@ import { ConversationStore, deriveTitle, UsageStore } from '@dacai-local-agent/s
 import { sanitizeText } from '@dacai-local-agent/security';
 import type { ProviderRegistry } from '@dacai-local-agent/providers';
 import { ContextManager } from '@dacai-local-agent/context';
+import { PostgresWorkspaceRegistry } from '@dacai-local-agent/workspace';
+import { loadUploadsForPrompt, renderUploadsForPrompt } from '../workspace-uploads';
 import { beginSessionActivity, touchSessionActivity } from '../session-preflight';
 
 interface ChatBody {
@@ -15,6 +17,8 @@ interface ChatBody {
   workspaceId?: string;
   /** Regenerate the last answer instead of appending a new exchange. */
   retry?: boolean;
+  /** Ids of files uploaded to `workspaceId` and attached to this message. */
+  attachments?: string[];
 }
 
 /**
@@ -44,6 +48,7 @@ export function registerChatRoutes(
   const conversations = new ConversationStore();
   const usage = new UsageStore();
   const contextManager = new ContextManager();
+  const workspaces = new PostgresWorkspaceRegistry();
 
   server.get('/api/conversations', async () => ({ conversations: await conversations.list() }));
 
@@ -88,6 +93,17 @@ export function registerChatRoutes(
       return reply.code(400).send({ error: (error as Error).message });
     }
 
+    // Chat has no tools, so an attachment is only ever inlined text; a
+    // binary upload contributes its workspace path for the agent panel to
+    // act on instead. Without a workspace there is nothing to resolve.
+    const attachmentWorkspace = body.workspaceId
+      ? await workspaces.get(body.workspaceId)
+      : undefined;
+    const attachedUploads = attachmentWorkspace && body.attachments?.length
+      ? await loadUploadsForPrompt(attachmentWorkspace.rootPath, body.attachments)
+      : [];
+    const attachmentSection = renderUploadsForPrompt(attachedUploads);
+
     const conversation = body.conversationId
       ? await conversations.get(body.conversationId)
       : await conversations.create({
@@ -106,6 +122,9 @@ export function registerChatRoutes(
         conversationId: conversation.id,
         role: 'user',
         content: body.message,
+        metadata: attachedUploads.length
+          ? { attachments: attachedUploads.map(({ name, path, bytes, mimeType }) => ({ name, path, bytes, mimeType })) }
+          : undefined,
       });
     }
 
@@ -222,9 +241,14 @@ export function registerChatRoutes(
       for await (const event of provider.stream({
         model: resolved.model,
         systemPrompt,
-        messages: history.map((message) => ({
+        messages: history.map((message, index) => ({
           role: message.role === 'tool' ? 'tool' : message.role,
-          content: message.content,
+          // Appended to the outgoing copy only: the persisted transcript
+          // keeps the message the user actually typed.
+          content:
+            attachmentSection && index === history.length - 1 && message.role === 'user'
+              ? message.content + attachmentSection
+              : message.content,
         })),
         temperature: resolved.temperature,
         signal: controller.signal,

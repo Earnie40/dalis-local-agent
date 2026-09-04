@@ -16,6 +16,17 @@ export interface CompletionMessage {
   content: string;
   toolName?: string;
 
+  /**
+   * Raw base64 image payloads attached to this turn, without a data: prefix.
+   *
+   * This is the only channel through which a model ever sees pixels. Providers
+   * that cannot accept images must drop the field rather than stringify it: a
+   * base64 blob pasted into `content` would blow the context window and teach
+   * the model nothing. Whether a model can use these is decided by the runtime
+   * vision capability probe, never assumed from the model name.
+   */
+  images?: string[];
+
   /** Structured requests made by this assistant turn, retained for replay. */
   toolCalls?: NormalizedToolCall[];
 
@@ -354,6 +365,12 @@ export interface ChatMessage {
   content: string;
 
   toolName?: string;
+
+  /**
+   * Raw base64 images for this turn, without a data: prefix. Mirrors
+   * CompletionMessage.images; providers without vision must drop it.
+   */
+  images?: string[];
 
   /** Structured requests made by this assistant turn, retained for replay. */
   toolCalls?: NormalizedToolCall[];

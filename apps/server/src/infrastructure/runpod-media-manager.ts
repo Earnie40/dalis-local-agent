@@ -146,6 +146,41 @@ export class RunpodMediaManager {
     };
   }
 
+  /**
+   * Long-form jobs need both the media service and its short-video model. Keep
+   * this separate from image readiness so an image request never waits for a
+   * video model that is still loading.
+   */
+  async ensureVideoReady(): Promise<RunpodMediaStatus> {
+    let media;
+    try { media = resolveMediaConnection(this.env); }
+    catch { return this.initialize(); }
+
+    let health = await this.health(media.baseUrl, media.headers);
+    if (health.healthy && health.videoModel) {
+      return { ...this.status(), ready: true, service: health, error: undefined, checkedAt: now() };
+    }
+
+    void this.initialize();
+    const attempts = Math.min(this.startupAttempts, 24);
+    for (let attempt = 0; attempt < attempts && !this.stopped; attempt += 1) {
+      await this.sleep(this.startupPollMs);
+      health = await this.health(media.baseUrl, media.headers);
+      if (health.healthy && health.videoModel) {
+        return { ...this.status(), ready: true, service: health, error: undefined, checkedAt: now() };
+      }
+    }
+
+    const status = this.status();
+    return {
+      ...status,
+      ready: false,
+      service: health,
+      error: status.error ?? 'The media endpoint did not advertise a video model before the startup timeout.',
+      checkedAt: now(),
+    };
+  }
+
   start(): void {
     if (!this.state.configured || this.monitor) return;
     this.stopped = false;

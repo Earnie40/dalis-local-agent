@@ -28,6 +28,46 @@ loopback-only tunnel, and reconnects if the tunnel drops. The sidebar reports
 developer should start the pod manually. The legacy `pnpm run runpod:media`
 command remains available for diagnostics but is not needed during normal dev.
 
+After changing the media service or one of its model runners, explicitly
+refresh the persistent GPU-volume service before testing a feature that depends
+on the new endpoints:
+
+```powershell
+pnpm run runpod:media -- --sync-service
+```
+
+This copies only the checked service/runner/provisioning source files (never
+`.env` or credentials),
+restarts it on the already-selected pod, verifies `/v1/health`, and opens the
+loopback diagnostic tunnel. It does not create, start, or resize a pod.
+
+## Complete adult-human anatomy lane
+
+Anatomy-sensitive prompts do not use the SDXL edit or SVD animation fallbacks:
+
+- prompt-only images use `Qwen/Qwen-Image-2512`;
+- edits use `Qwen/Qwen-Image-Edit-2511`;
+- localized pelvis/genital, limb, hand, or foot edits use a MediaPipe-derived
+  feathered region lock so unrelated source pixels are restored exactly;
+- anatomy-sensitive video uses `Wan-AI/Wan2.2-TI2V-5B-Diffusers` and rejects
+  full-body output when sampled pose landmarks disappear or limb proportions
+  drift beyond the configured tolerance.
+
+All three checkpoints are Apache-2.0 and pinned by immutable revision. They are
+large (roughly 140 GiB total), so model acquisition is deliberately opt-in:
+
+```bash
+cd /workspace/dacais-media/service
+DACAIS_ALLOW_LARGE_MODEL_DOWNLOAD=1 ./provision-anatomy-edit.sh
+```
+
+The provisioner checks CUDA, VRAM, available RAM, and persistent disk before it
+downloads anything. Set `DACAIS_ANATOMY_COMPONENTS=generate,edit` (or another
+comma-separated subset) to provision only selected lanes. A sub-60 GiB GPU uses
+CPU/model offload; 60 GiB or larger keeps the active Qwen/Wan pipeline on CUDA.
+Only one anatomy image model is resident at a time, and idle workers release
+their pipeline after three minutes.
+
 Readiness is available without exposing credentials:
 
 ```text
@@ -94,6 +134,9 @@ Before a real production push:
 2. Put TLS and access control in front of port 8090; do not publish raw HTTP.
 3. Inject secrets at runtime and rotate any credential used during staging.
 4. Verify `/ping`, authenticated `/v1/health`, image generation, image editing,
-   text-to-video, and image animation from the deployed Dacai server.
+   anatomy image generation, region-locked anatomy editing, anatomy video with
+   its validation report, text-to-video, image animation, and a short multi-scene `video.story.generate`
+   run (including `/v1/concat-video` and the streamed final artifact) from the
+   deployed Dacai server.
 5. Configure monitoring, request limits, GPU cost alerts, backups for persistent
    media, and a stop/rollback procedure.

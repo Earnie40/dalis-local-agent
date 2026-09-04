@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createImageGenerationTools,
+  imageEditRequiresAnatomyPipeline,
   imageGenerationConfigured,
   imageGenerationRequiresNetwork,
 } from '../packages/tools/src/image-generation-tools';
@@ -68,7 +69,106 @@ describe('photoreal image generation tool', () => {
     expect(fetchMock).toHaveBeenCalledWith('https://api.openai.com/v1/images/generations', expect.any(Object));
   });
 
-  it('generates and edits through the loopback DACAIS media API', async () => {
+  it('generates and edits through /v1/instruct-edit by default in instruction mode', async () => {
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const request = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      expect(String(url)).toBe('http://127.0.0.1:18090/v1/instruct-edit');
+      expect(request).toMatchObject({ prompt: 'make her hair blonde', mode: 'auto', sourceMimeType: 'image/png' });
+      expect(request.sourceMediaBase64).toBe(PNG.toString('base64'));
+      expect((init?.headers as Record<string, string>).Authorization).toBe('Bearer local-media-token');
+      return new Response(JSON.stringify({
+        imageBase64: PNG.toString('base64'), model: 'diffusers/sdxl-instructpix2pix-768', seed: 9,
+      }), { status: 200 });
+    });
+    const tool = createImageGenerationTools({
+      env: { DACAI_IMAGE_BACKEND: 'dacais-media', DACAI_MEDIA_TOKEN: 'local-media-token' },
+      fetch: fetchMock as typeof fetch,
+    })[0];
+    const root = await workspace();
+    await writeFile(join(root, 'source.png'), PNG);
+
+    const result = await tool.execute({
+      prompt: 'make her hair blonde', sourcePath: 'source.png', outputPath: 'edited.png', seed: 9,
+    }, { workspaceRoot: root }) as Record<string, unknown>;
+
+    expect(result).toMatchObject({ path: 'edited.png', backend: 'dacais-media', seed: 9 });
+  });
+
+  it('routes body-geometry edits to the anatomy model without a generic SDXL fallback', async () => {
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      expect(String(url)).toBe('http://127.0.0.1:18090/v1/anatomy-edit');
+      const request = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      expect(request).toMatchObject({
+        prompt: 'make both people walk naturally with correct hands and legs',
+        mode: 'anatomy',
+        sourceMimeType: 'image/png',
+      });
+      return new Response(JSON.stringify({
+        imageBase64: PNG.toString('base64'), model: 'Qwen/Qwen-Image-Edit-2511', seed: 17,
+      }), { status: 200 });
+    });
+    const tool = createImageGenerationTools({
+      env: { DACAI_IMAGE_BACKEND: 'dacais-media' },
+      fetch: fetchMock as typeof fetch,
+    })[0];
+    const root = await workspace();
+    await writeFile(join(root, 'source.png'), PNG);
+
+    const result = await tool.execute({
+      prompt: 'make both people walk naturally with correct hands and legs',
+      sourcePath: 'source.png',
+      outputPath: 'walking.png',
+      seed: 17,
+    }, { workspaceRoot: root }) as Record<string, unknown>;
+
+    expect(result).toMatchObject({ model: 'Qwen/Qwen-Image-Edit-2511', seed: 17 });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('routes prompt-only human anatomy generation away from SDXL', async () => {
+    const fetchMock = vi.fn(async (url: string | URL | Request) => {
+      expect(String(url)).toBe('http://127.0.0.1:18090/v1/anatomy-generate');
+      return new Response(JSON.stringify({
+        imageBase64: PNG.toString('base64'), model: 'Qwen/Qwen-Image-2512', seed: 31,
+      }), { status: 200 });
+    });
+    const tool = createImageGenerationTools({
+      env: { DACAI_IMAGE_BACKEND: 'dacais-media' }, fetch: fetchMock as typeof fetch,
+    })[0];
+
+    const result = await tool.execute({
+      prompt: 'adult full-body medical anatomy reference, side view', outputPath: 'anatomy.png', seed: 31,
+    }, { workspaceRoot: await workspace() }) as Record<string, unknown>;
+
+    expect(result).toMatchObject({ model: 'Qwen/Qwen-Image-2512', seed: 31 });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails closed when the anatomy model is unavailable', async () => {
+    const fetchMock = vi.fn(async () => new Response('anatomy model is not installed', { status: 501 }));
+    const tool = createImageGenerationTools({
+      env: { DACAI_IMAGE_BACKEND: 'dacais-media' },
+      fetch: fetchMock as typeof fetch,
+    })[0];
+    const root = await workspace();
+    await writeFile(join(root, 'source.png'), PNG);
+
+    await expect(tool.execute({
+      prompt: 'correct the full-body pose', sourcePath: 'source.png', outputPath: 'corrected.png',
+    }, { workspaceRoot: root })).rejects.toThrow('Anatomy-capable image backend failed');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('detects anatomy-sensitive instructions without stealing ordinary semantic edits', () => {
+    expect(imageEditRequiresAnatomyPipeline('fix her hands and make the full-body pose natural')).toBe(true);
+    expect(imageEditRequiresAnatomyPipeline('make both people walk side by side')).toBe(true);
+    expect(imageEditRequiresAnatomyPipeline('accurate adult vulva and perineal anatomy')).toBe(true);
+    expect(imageEditRequiresAnatomyPipeline('male medical reference showing the glans and foreskin')).toBe(true);
+    expect(imageEditRequiresAnatomyPipeline('make her hair blonde')).toBe(false);
+    expect(imageEditRequiresAnatomyPipeline('replace the cloudy sky')).toBe(false);
+  });
+
+  it('generates and edits through the fallback img2img /v1/edit-image API', async () => {
     const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const request = JSON.parse(String(init?.body)) as Record<string, unknown>;
       expect(String(url)).toBe('http://127.0.0.1:18090/v1/edit-image');
@@ -80,7 +180,7 @@ describe('photoreal image generation tool', () => {
       }), { status: 200 });
     });
     const tool = createImageGenerationTools({
-      env: { DACAI_IMAGE_BACKEND: 'dacais-media', DACAI_MEDIA_TOKEN: 'local-media-token' },
+      env: { DACAI_IMAGE_BACKEND: 'dacais-media', DACAI_MEDIA_TOKEN: 'local-media-token', DACAI_IMAGE_EDIT_MODE: 'img2img' },
       fetch: fetchMock as typeof fetch,
     })[0];
     const root = await workspace();

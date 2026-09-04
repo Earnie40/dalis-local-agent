@@ -219,6 +219,36 @@ describe('executor honours the gate', () => {
     expect(asked).toBe(0);
   });
 
+  it('normalizes a single generated artifact into hash evidence', async () => {
+    const registry = new ToolRegistry();
+    registry.register({
+      name: 'image.generate',
+      description: 'generate image',
+      inputSchema: { type: 'object' },
+      permissionTier: 'safe',
+      timeoutMs: 5_000,
+      execute: async () => ({
+        path: 'generated/new.png',
+        format: 'png',
+        bytes: 8,
+        sha256: 'a'.repeat(64),
+      }),
+    });
+    const executor = new PermissionedToolExecutor({
+      registry,
+      capabilities: { read: true, write: true, shell: false, network: false },
+      context: {},
+    });
+
+    const result = await executor.execute({ id: 'generated', name: 'image.generate', arguments: {} });
+
+    expect(result.evidence).toEqual([{
+      kind: 'artifact_hash',
+      summary: 'image.generate verified artifact generated/new.png',
+      detail: { path: 'generated/new.png', sha256: 'a'.repeat(64), format: 'png', bytes: 8 },
+    }]);
+  });
+
   it('redacts secrets from tool errors before returning them', async () => {
     const registry = new ToolRegistry();
     registry.register({

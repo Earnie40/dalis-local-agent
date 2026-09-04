@@ -17,3 +17,7 @@ coverage
 **/.pytest_cache
 runpodssh.txt
 runpodssh.txt.pub
+
+# Files uploaded through the chat/agent/studio composers. These are user data
+# dropped into the workspace at runtime, not source.
+.dacai/uploads/

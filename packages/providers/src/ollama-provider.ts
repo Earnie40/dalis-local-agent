@@ -1795,6 +1795,9 @@ export function buildOllamaChatBody(
     messages: messages.map((message) => ({
       role: message.role,
       content: message.content,
+      // Ollama takes images as raw base64 on the message itself. Sent only
+      // when present, so a text-only model never sees an unexpected field.
+      ...('images' in message && message.images?.length ? { images: message.images } : {}),
       ...(message.role === 'assistant' && message.toolCalls?.length
         ? {
             tool_calls: message.toolCalls.map((call) => ({

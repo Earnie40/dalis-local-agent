@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { api, streamAgent, type AgentActivityEvent, type AgentEvent, type ModelAlias, type Workspace } from './api';
+import { api, streamAgent, type AgentActivityEvent, type AgentEvent, type ModelAlias, type Upload, type Workspace } from './api';
+import { AttachmentBar } from './AttachmentBar';
 import {
   agentConversationHistory,
   chooseAgentWorkspace,
@@ -30,7 +31,18 @@ const AGENT_MODEL_KEY = 'dacai.agent.model.v1';
 const IMAGE_GENERATION_INTENT =
   /(?:\b|you)(?:generate|create|make|produce|render|draw|paint|illustrate|design|edit|modify|update|transform)\b[\s\S]{0,160}\b(?:ai\s+)?(?:image|photo|picture|portrait|artwork)\b|\b(?:ai\s+)?(?:image|photo|picture|portrait|artwork)\b[\s\S]{0,160}\b(?:generate|create|make|produce|render|draw|paint|illustrate|design|edit|modify|update|transform)\b|\b(?:image|photo|picture|portrait|artwork)\s+of\b/;
 
-function isImageGenerationPrompt(value: string): boolean {
+const EDITABLE_IMAGE_MIME_TYPES = ['image/png', 'image/jpeg', 'image/webp'];
+
+function hasEditableImage(uploads: readonly Upload[]): boolean {
+  return uploads.some((upload) => EDITABLE_IMAGE_MIME_TYPES.includes(upload.mimeType.toLowerCase()));
+}
+
+/**
+ * Mirrors the server's classification: an attached picture makes any
+ * instruction an image request, even one that never says "image".
+ */
+function isImageGenerationPrompt(value: string, uploads: readonly Upload[] = []): boolean {
+  if (hasEditableImage(uploads) && value.trim().length > 0) return true;
   return IMAGE_GENERATION_INTENT.test(value.toLowerCase());
 }
 
@@ -106,7 +118,7 @@ export function AgentPanel({ aliases }: { aliases: ModelAlias[] }) {
   const [activityEvents, setActivityEvents] = useState<AgentActivityEvent[]>([]);
   const [sessions, setSessions] = useState<AgentSession[]>([]);
   const [sessionId, setSessionId] = useState<string>();
-  const [attachment, setAttachment] = useState<{ name: string; content: string }>();
+  const [attachments, setAttachments] = useState<Upload[]>([]);
   const [selectedTools, setSelectedTools] = useState<string[]>([
     'filesystem.list', 'filesystem.read', 'filesystem.search', 'filesystem.stat', 'git.run', 'tests.run', 'system.network.info',
     'web.fetch', 'web.search',
@@ -126,7 +138,6 @@ export function AgentPanel({ aliases }: { aliases: ModelAlias[] }) {
   const abortRef = useRef<AbortController | undefined>(undefined);
   const logScroll = useStickToBottom<HTMLDivElement>([events]);
   const activityRef = useRef<HTMLElement>(null);
-  const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     try {
@@ -174,7 +185,10 @@ export function AgentPanel({ aliases }: { aliases: ModelAlias[] }) {
     ?? aliases.find((entry) => entry.alias === alias)?.agentCapability
     ?? 'unknown';
   const selectedAliasConfigured = aliases.some((entry) => entry.alias === alias);
-  const imageGenerationRequest = useMemo(() => isImageGenerationPrompt(prompt), [prompt]);
+  const imageGenerationRequest = useMemo(
+    () => isImageGenerationPrompt(prompt, attachments),
+    [attachments, prompt],
+  );
 
   useEffect(() => {
     if (!alias || !selectedAliasConfigured || selectedModelCapability === 'verified') return;
@@ -219,8 +233,10 @@ export function AgentPanel({ aliases }: { aliases: ModelAlias[] }) {
   }, []);
 
   const run = useCallback(async () => {
-    const text = `${prompt.trim()}${attachment ? `\n\nAttached file (${attachment.name}):\n${attachment.content}` : ''}`.trim();
-    const directImageRequest = isImageGenerationPrompt(text);
+    // File content is no longer spliced into the prompt: the server reads the
+    // stored upload and appends it, so the transcript keeps what was typed.
+    const text = prompt.trim();
+    const directImageRequest = isImageGenerationPrompt(text, attachments);
     if (!text || !workspaceId || running || (!directImageRequest && selectedModelCapability !== 'verified')) return;
 
     setError(undefined);
@@ -262,6 +278,7 @@ export function AgentPanel({ aliases }: { aliases: ModelAlias[] }) {
         sessionId: activeSessionId,
         history: agentConversationHistory(events),
         runMode,
+        attachments: attachments.length ? attachments.map((upload) => upload.id) : undefined,
       }, (event) => {
         if (event.type === 'activity' && event.activity) {
           appendActivity(activeSessionId, event.activity);
@@ -280,8 +297,9 @@ export function AgentPanel({ aliases }: { aliases: ModelAlias[] }) {
     } finally {
       abortRef.current = undefined;
       setRunning(false);
+      setAttachments([]);
     }
-  }, [activityEvents, alias, appendActivity, attachment, events, prompt, role, runMode, running, selectedModelCapability, selectedTools, sessionId, toolSelectionCustomized, workspaceId]);
+  }, [activityEvents, alias, appendActivity, attachments, events, prompt, role, runMode, running, selectedModelCapability, selectedTools, sessionId, toolSelectionCustomized, workspaceId]);
 
   const addWorkspace = useCallback(async () => {
     try {
@@ -368,7 +386,7 @@ export function AgentPanel({ aliases }: { aliases: ModelAlias[] }) {
     setEvents([]);
     setActivityEvents([]);
     setPrompt('');
-    setAttachment(undefined);
+    setAttachments([]);
     setError(undefined);
   }, [running]);
 
@@ -382,24 +400,13 @@ export function AgentPanel({ aliases }: { aliases: ModelAlias[] }) {
     if (session.role) setRole(session.role);
     if (session.runMode) setRunMode(session.runMode);
     setPrompt('');
-    setAttachment(undefined);
+    setAttachments([]);
     // Server persistence is the source of truth for completed/reconnected runs.
     void Promise.all((session.runIds ?? []).map((runId) => api.agentActivity(runId)))
       .then((results) => results.flatMap((result) => result.events))
       .then((replayed) => replayed.forEach((event) => appendActivity(session.id, event)))
       .catch((e) => setError(e instanceof Error ? e.message : String(e)));
   }, [appendActivity, running]);
-
-  const readAttachment = useCallback((file: File) => {
-    if (file.size > 1_000_000) {
-      setError('Attachments are limited to 1 MB.');
-      return;
-    }
-    const reader = new FileReader();
-    reader.onload = () => setAttachment({ name: file.name, content: String(reader.result ?? '') });
-    reader.onerror = () => setError(`Could not read ${file.name}.`);
-    reader.readAsText(file);
-  }, []);
 
   const done = events.find((e) => e.type === 'done');
   const filteredActivity = useMemo(
@@ -668,18 +675,13 @@ export function AgentPanel({ aliases }: { aliases: ModelAlias[] }) {
             }
           }}
         />
-        <input
-          ref={fileRef}
-          hidden
-          type="file"
-          onChange={(e) => {
-            const file = e.target.files?.[0];
-            if (file) readAttachment(file);
-            e.currentTarget.value = '';
-          }}
+        <AttachmentBar
+          workspaceId={workspaceId}
+          uploads={attachments}
+          onChange={setAttachments}
+          disabled={running}
         />
         <div className="actions">
-          <button type="button" onClick={() => fileRef.current?.click()}>Attach</button>
           {running ? (
             <button type="button" className="danger" onClick={() => abortRef.current?.abort()}>
               Stop
@@ -694,12 +696,6 @@ export function AgentPanel({ aliases }: { aliases: ModelAlias[] }) {
             </button>
           )}
         </div>
-        {attachment && (
-          <span className="attachment">
-            Attached: {attachment.name}{' '}
-            <button type="button" onClick={() => setAttachment(undefined)}>×</button>
-          </span>
-        )}
       </form>
     </div>
   );

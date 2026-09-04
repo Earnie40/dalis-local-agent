@@ -19,12 +19,12 @@ async function workspace(): Promise<string> {
 }
 
 describe('video generation tool', () => {
-  it('generates a text-to-video MP4 through the DACAIS media service', async () => {
+  it('generates a text-to-video MP4 through the Wan media service', async () => {
     const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
-      expect(String(url)).toBe('http://127.0.0.1:18090/v1/generate-backdrop');
-      expect(JSON.parse(String(init?.body))).toMatchObject({ prompt: 'cinematic ocean', animate: true, frames: 20 });
+      expect(String(url)).toBe('http://127.0.0.1:18090/v1/anatomy-video');
+      expect(JSON.parse(String(init?.body))).toMatchObject({ prompt: 'cinematic ocean', animate: true, frames: 20, mode: 'anatomy' });
       return new Response(JSON.stringify({
-        videoBase64: MP4.toString('base64'), videoModel: 'stabilityai/stable-video-diffusion-img2vid-xt', videoFrames: 20,
+        videoBase64: MP4.toString('base64'), videoModel: 'Wan-AI/Wan2.2-TI2V-5B-Diffusers', videoFrames: 20,
       }), { status: 200 });
     });
     const tool = createVideoGenerationTools({ env: { DACAI_VIDEO_BACKEND: 'dacais-media' }, fetch: fetchMock as typeof fetch })[0];
@@ -56,6 +56,33 @@ describe('video generation tool', () => {
       .rejects.toThrow('Video generation is not enabled');
   });
 
+  it('routes anatomy-sensitive video prompts to the Wan human-motion lane', async () => {
+    const root = await workspace();
+    await writeFile(join(root, 'source.png'), PNG);
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      expect(String(url)).toBe('http://127.0.0.1:18090/v1/anatomy-video');
+      expect(JSON.parse(String(init?.body))).toMatchObject({
+        prompt: 'two adults walking side by side with consistent full-body anatomy',
+        mode: 'anatomy', sourceMediaBase64: PNG.toString('base64'),
+      });
+      return new Response(JSON.stringify({
+        videoBase64: MP4.toString('base64'),
+        videoModel: 'Wan-AI/Wan2.2-TI2V-5B-Diffusers', videoFrames: 25,
+      }), { status: 200 });
+    });
+    const tool = createVideoGenerationTools({
+      env: { DACAI_VIDEO_BACKEND: 'dacais-media' }, fetch: fetchMock as typeof fetch,
+    })[0];
+
+    const result = await tool.execute({
+      prompt: 'two adults walking side by side with consistent full-body anatomy',
+      sourcePath: 'source.png', outputPath: 'walking.mp4',
+    }, { workspaceRoot: root }) as Record<string, unknown>;
+
+    expect(result).toMatchObject({ model: 'Wan-AI/Wan2.2-TI2V-5B-Diffusers', frames: 25 });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it('requires explicit authenticated HTTPS for production backends and rejects unsafe paths/data/overwrites', async () => {
     const root = await workspace();
     const remote = createVideoGenerationTools({
@@ -76,7 +103,7 @@ describe('video generation tool', () => {
       fetch: productionFetch as typeof fetch,
     })[0];
     await production.execute({ prompt: 'x', outputPath: 'production.mp4' }, { workspaceRoot: root });
-    expect(productionFetch).toHaveBeenCalledWith('https://media.example.com/v1/generate-backdrop', expect.any(Object));
+    expect(productionFetch).toHaveBeenCalledWith('https://media.example.com/v1/anatomy-video', expect.any(Object));
 
     const invalid = createVideoGenerationTools({
       env: { DACAI_VIDEO_BACKEND: 'dacais-media' },

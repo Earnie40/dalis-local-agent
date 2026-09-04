@@ -167,6 +167,25 @@ function extractEvidence(
 
   const record = raw as Record<string, unknown>;
   const evidence: Array<{ kind: string; summary: string; detail?: Record<string, unknown> }> = [];
+  const artifactKeys = new Set<string>();
+
+  const appendArtifactEvidence = (item: Record<string, unknown>): void => {
+    if (typeof item.path !== 'string' || typeof item.sha256 !== 'string') return;
+    if (!/^[a-f0-9]{64}$/i.test(item.sha256)) return;
+    const key = `${item.path}\u0000${item.sha256.toLowerCase()}`;
+    if (artifactKeys.has(key)) return;
+    artifactKeys.add(key);
+    evidence.push({
+      kind: 'artifact_hash',
+      summary: `${toolName} verified artifact ${item.path}`,
+      detail: {
+        path: item.path,
+        sha256: item.sha256.toLowerCase(),
+        ...(typeof item.format === 'string' ? { format: item.format } : {}),
+        ...(typeof item.bytes === 'number' ? { bytes: item.bytes } : {}),
+      },
+    });
+  };
 
   if (typeof record.exitCode === 'number') {
     evidence.push({
@@ -180,21 +199,17 @@ function extractEvidence(
     evidence.push({ kind: 'http_status', summary: `${toolName} returned HTTP ${record.status}` });
   }
 
+  // Media tools return one artifact directly, while engineering tools return
+  // an artifacts array. Normalize both shapes into objective hash evidence so
+  // callers never need to infer completion from model text or a pre-existing
+  // path mentioned in a filesystem observation.
+  appendArtifactEvidence(record);
+
   if (Array.isArray(record.artifacts)) {
     for (const artifact of record.artifacts.slice(0, 50)) {
       if (!artifact || typeof artifact !== 'object') continue;
       const item = artifact as Record<string, unknown>;
-      if (typeof item.path !== 'string' || typeof item.sha256 !== 'string') continue;
-      evidence.push({
-        kind: 'artifact_hash',
-        summary: `${toolName} verified artifact ${item.path}`,
-        detail: {
-          path: item.path,
-          sha256: item.sha256,
-          ...(typeof item.format === 'string' ? { format: item.format } : {}),
-          ...(typeof item.bytes === 'number' ? { bytes: item.bytes } : {}),
-        },
-      });
+      appendArtifactEvidence(item);
     }
   }
 

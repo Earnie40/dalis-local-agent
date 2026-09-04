@@ -1,7 +1,8 @@
+import { readFile } from 'node:fs/promises';
 import type { OutgoingHttpHeaders } from 'node:http';
 import type { FastifyInstance } from 'fastify';
 import type { AppConfig } from '@dacai-local-agent/shared';
-import { runAgentLoop, AgentCapabilityError, type CompletionMessage } from '@dacai-local-agent/agent-core';
+import { runAgentLoop, AgentCapabilityError, type CompletionMessage, type LoopToolResult } from '@dacai-local-agent/agent-core';
 import { ContextManager } from '@dacai-local-agent/context';
 import { MemoryStore } from '@dacai-local-agent/memory';
 import type { ProviderRegistry } from '@dacai-local-agent/providers';
@@ -29,9 +30,22 @@ import {
   SMART_CONTRACT_TOOLS,
   ENGINEERING_TOOLS,
 } from '@dacai-local-agent/tools';
-import { DEFAULT_PERMISSION_POLICY, PermissionEngine } from '@dacai-local-agent/security';
+import { DEFAULT_PERMISSION_POLICY, PermissionEngine, resolveWithinWorkspace } from '@dacai-local-agent/security';
 import type { PermissionPolicy } from '@dacai-local-agent/security';
 import { PostgresWorkspaceRegistry } from '@dacai-local-agent/workspace';
+import {
+  fitGenerationSize,
+  loadUploadsForPrompt,
+  readImageDimensions,
+  renderUploadsForPrompt,
+  loadVisionAttachments,
+  selectEditableImage,
+} from '../workspace-uploads';
+import {
+  buildGroundedEditPrompt,
+  describeImage,
+  VisionUnavailableError,
+} from '../vision';
 import { LoopTraceRecorder } from '@dacai-local-agent/training-traces';
 import { PermissionAuditStore, UsageStore } from '@dacai-local-agent/shared';
 import { createId } from '@dacai-local-agent/shared';
@@ -107,13 +121,88 @@ interface AgentBody {
   sessionId?: string;
   /** Visible user/assistant turns from this browser conversation. */
   history?: Array<{ role: 'user' | 'assistant'; content: string }>;
+  /** Ids of files uploaded to this workspace and attached to the prompt. */
+  attachments?: string[];
 }
 
 const IMAGE_GENERATION_INTENT =
   /(?:\b|you)(?:generate|create|make|produce|render|draw|paint|illustrate|design|edit|modify|update|transform)\b[\s\S]{0,160}\b(?:ai\s+)?(?:image|photo|picture|portrait|artwork)\b|\b(?:ai\s+)?(?:image|photo|picture|portrait|artwork)\b[\s\S]{0,160}\b(?:generate|create|make|produce|render|draw|paint|illustrate|design|edit|modify|update|transform)\b|\b(?:image|photo|picture|portrait|artwork)\s+of\b/;
 
-export function isImageGenerationRequest(prompt: string, requestedTools: Iterable<string> = []): boolean {
-  return IMAGE_GENERATION_INTENT.test(prompt.toLowerCase()) || [...requestedTools].includes('image.generate');
+const IMAGE_EDIT_INTENT =
+  /\b(?:edit|modify|update|transform|retouch|restyle|change|remove|replace|add)\b[\s\S]{0,160}\b(?:image|photo|picture|portrait|artwork)\b|\b(?:make|turn)\b[\s\S]{0,80}\b(?:this|the\s+attached|the\s+uploaded)\b[\s\S]{0,40}\b(?:image|photo|picture|portrait)\b|\b(?:attached|uploaded)\b[\s\S]{0,40}\b(?:image|photo|picture|portrait)\b[\s\S]{0,160}\b(?:edit|modify|update|transform|retouch|restyle|change|remove|replace|add|make|turn)\b/;
+
+const ATTACHED_IMAGE_INSPECTION_INTENT =
+  /^\s*(?:(?:please\s+)?(?:describe|analy[sz]e|inspect|identify|explain|summarize|read|transcribe|extract|compare)\b|(?:what|who|where|when|why|how|which)\b|(?:can|could|would|will)\s+you\s+(?:describe|analy[sz]e|inspect|identify|explain|tell|read|transcribe|extract)\b)/;
+
+const VIDEO_GENERATION_INTENT =
+  /\b(?:generate|create|make|produce|render|animate)\b[\s\S]{0,100}\b(?:video|clip|animation|footage)\b|\banimate\b[\s\S]{0,100}\b(?:image|photo|picture|portrait)\b|\b(?:video|clip|animation|footage)\b[\s\S]{0,100}\b(?:generate|create|make|produce|render|animate)\b/;
+
+export interface MediaIntentOptions {
+  /** True when a PNG/JPEG/WebP upload is attached to this request. */
+  hasImageAttachment?: boolean;
+}
+
+export function isImageGenerationRequest(
+  prompt: string,
+  requestedTools: Iterable<string> = [],
+  options: MediaIntentOptions = {},
+): boolean {
+  const normalized = prompt.toLowerCase();
+  // In the Agent image workflow, attaching a supported image makes a
+  // non-empty instruction an edit request even when it is shorthand such as
+  // "brighter, warmer tone". Inspection/readback requests stay in the normal
+  // agent path and cannot accidentally mutate the image.
+  if (
+    options.hasImageAttachment &&
+    normalized.trim().length > 0 &&
+    !ATTACHED_IMAGE_INSPECTION_INTENT.test(normalized)
+  ) return true;
+  return IMAGE_GENERATION_INTENT.test(normalized) || [...requestedTools].includes('image.generate');
+}
+
+export function isImageEditRequest(prompt: string, options: MediaIntentOptions = {}): boolean {
+  const normalized = prompt.toLowerCase();
+  return IMAGE_EDIT_INTENT.test(normalized) || Boolean(
+    options.hasImageAttachment &&
+    normalized.trim().length > 0 &&
+    !ATTACHED_IMAGE_INSPECTION_INTENT.test(normalized),
+  );
+}
+
+export function isVideoGenerationRequest(prompt: string, requestedTools: Iterable<string> = []): boolean {
+  return VIDEO_GENERATION_INTENT.test(prompt.toLowerCase()) || [...requestedTools].includes('video.generate');
+}
+
+export function classifyDirectMediaRequest(
+  prompt: string,
+  requestedTools: Iterable<string> = [],
+  options: MediaIntentOptions = {},
+): 'image' | 'video' | undefined {
+  if (isVideoGenerationRequest(prompt, requestedTools)) return 'video';
+  if (isImageGenerationRequest(prompt, requestedTools, options)) return 'image';
+  return undefined;
+}
+
+export function verifiedGeneratedArtifact(
+  result: LoopToolResult,
+  expectedPath: string,
+  expectedFormat: 'png' | 'mp4',
+): { path: string; sha256: string; bytes?: number } | undefined {
+  if (!result.success) return undefined;
+  const normalizedExpected = expectedPath.replaceAll('\\', '/');
+  for (const evidence of result.evidence ?? []) {
+    if (evidence.kind !== 'artifact_hash' || !evidence.detail) continue;
+    const path = typeof evidence.detail.path === 'string' ? evidence.detail.path.replaceAll('\\', '/') : '';
+    const sha256 = typeof evidence.detail.sha256 === 'string' ? evidence.detail.sha256.toLowerCase() : '';
+    const format = typeof evidence.detail.format === 'string' ? evidence.detail.format.toLowerCase() : '';
+    if (path !== normalizedExpected || format !== expectedFormat || !/^[a-f0-9]{64}$/.test(sha256)) continue;
+    return {
+      path,
+      sha256,
+      ...(typeof evidence.detail.bytes === 'number' ? { bytes: evidence.detail.bytes } : {}),
+    };
+  }
+  return undefined;
 }
 
 export function normalizeAgentConversationHistory(value: AgentBody['history']): CompletionMessage[] {
@@ -563,7 +652,10 @@ export function registerAgentRoutes(
     config: AppConfig;
     registry: ProviderRegistry;
     approvals: ApprovalRegistry;
-    media?: { ensureImageReady(): Promise<{ ready: boolean; error?: string }> };
+    media?: {
+      ensureImageReady(): Promise<{ ready: boolean; error?: string }>;
+      ensureVideoReady(): Promise<{ ready: boolean; error?: string }>;
+    };
   },
 ): void {
   const workspaces = new PostgresWorkspaceRegistry();
@@ -750,12 +842,33 @@ export function registerAgentRoutes(
       recoveredRun?.resumePrompt ??
       requestedPrompt;
     const conversationHistory = normalizeAgentConversationHistory(body.history);
+
+    // Attachments are appended only to the model-facing prompt. The run
+    // objective, acceptance criteria and image prompt keep the text the user
+    // actually typed, so an attached file never rewrites what the run is for.
+    const attachedUploads = body.attachments?.length
+      ? await loadUploadsForPrompt(workspace.rootPath, body.attachments)
+      : [];
+    const promptWithAttachments = effectivePrompt + renderUploadsForPrompt(attachedUploads);
+    // The most recently attached PNG/JPEG/WebP is what an edit acts on.
+    const editableImage = selectEditableImage(attachedUploads);
+    // Pixels for a vision-capable model. Without these the model only ever
+    // sees the filename and cannot relate the prompt to what is depicted.
+    const visionAttachments = await loadVisionAttachments(workspace.rootPath, attachedUploads);
+    const promptImages = visionAttachments.map((attachment) => attachment.base64);
     const advancedRequested = new Set(body.tools ?? []);
     const prompt = effectivePrompt.toLowerCase();
-    const imageGenerationRun = isImageGenerationRequest(effectivePrompt, advancedRequested);
-    // Image generation is executed by the media subsystem, so do not make it
+    // Video intent wins over image intent for prompts such as "animate this
+    // image". Otherwise that phrase would be incorrectly routed to a new PNG.
+    const directMediaKind = classifyDirectMediaRequest(effectivePrompt, advancedRequested, {
+      hasImageAttachment: Boolean(editableImage),
+    });
+    const imageGenerationRun = directMediaKind === 'image';
+    const videoGenerationRun = directMediaKind === 'video';
+    const directMediaRun = directMediaKind !== undefined;
+    // Media generation is executed by the media subsystem, so do not make it
     // wait for or recover the separate Ollama GPU route.
-    const runpodPreflight = imageGenerationRun
+    const runpodPreflight = directMediaRun
       ? undefined
       : await deps.registry.gpuAvailability(sessionBoundary.refreshPreflight);
 
@@ -782,9 +895,9 @@ export function registerAgentRoutes(
       requestedAliases.map(async (alias) => ({
           alias,
           resolved: await deps.registry.resolveAlias(alias, {
-            requireToolCalling: !imageGenerationRun,
-            preferLocal: imageGenerationRun,
-            skipCapabilityProbe: imageGenerationRun,
+            requireToolCalling: !directMediaRun,
+            preferLocal: directMediaRun,
+            skipCapabilityProbe: directMediaRun,
 
             // A named single alias or an item in the explicit participant list
             // is the only consent signal passed to the manual paid-provider
@@ -838,7 +951,7 @@ export function registerAgentRoutes(
     const simulationTools = body.role === 'adversarial-twin-simulator' ? createAdversarialSimulationTools() : [];
     const wantsQuality = /\b(test|property|fuzz|mutation|invariant|coverage)\b/.test(prompt);
     const wantsVision = /\b(image|screenshot|mockup|visual|ui|layout|design)\b/.test(prompt);
-    const wantsVideoGeneration = /\b(generate|create|make|produce|render|animate)\b[\s\S]{0,80}\b(video|clip|animation|footage|image)\b|\b(video|clip|animation|footage)\b[\s\S]{0,80}\b(generate|create|make|produce|render)\b/.test(prompt);
+    const wantsVideoGeneration = isVideoGenerationRequest(effectivePrompt, advancedRequested);
     const wantsSmartContract =
       /\b(solidity|smart ?contract|\.sol\b|reentrancy|erc-?(20|721|1155)|evm|delegatecall|onlyowner)\b/.test(prompt);
     const wantsEngineering =
@@ -879,7 +992,7 @@ export function registerAgentRoutes(
       ...(imageGenerationRun
         ? createImageGenerationTools()
         : []),
-      ...((wantsVideoGeneration || advancedRequested.has('video.generate')) && workspace.capabilities.read && workspace.capabilities.write && workspace.capabilities.network
+      ...(wantsVideoGeneration && workspace.capabilities.read && workspace.capabilities.write && workspace.capabilities.network
         ? VIDEO_GENERATION_TOOLS
         : []),
       // Read-only static review. Needs no capability beyond the read access every
@@ -898,9 +1011,10 @@ export function registerAgentRoutes(
           )
         : []),
     ];
+    const forcedMediaTool = imageGenerationRun ? 'image.generate' : videoGenerationRun ? 'video.generate' : undefined;
     const selected = selectAgentTools(
       enabled,
-      imageGenerationRun && body.tools ? [...new Set([...body.tools, 'image.generate'])] : body.tools,
+      forcedMediaTool && body.tools ? [...new Set([...body.tools, forcedMediaTool])] : body.tools,
     );
     for (const tool of selected) tools.register(tool);
     const resolvedRunMode = resolveAgentRunMode({
@@ -1362,105 +1476,230 @@ export function registerAgentRoutes(
 
       let parallelExecution: Awaited<ReturnType<typeof executeParallelParticipants>> | undefined;
       let result;
-      if (imageGenerationRun && !isParallel) {
-        const imageTool = 'image.generate';
-        if (!permissionedExecutor.listTools().some((tool) => tool.name === imageTool)) {
-          throw new Error('Image generation is unavailable because image.generate was removed by explicit tool selection.');
+      if (directMediaRun && !isParallel) {
+        const kind = imageGenerationRun ? 'image' as const : 'video' as const;
+        const format = imageGenerationRun ? 'png' as const : 'mp4' as const;
+        const mediaTool = imageGenerationRun ? 'image.generate' : 'video.generate';
+        if (!permissionedExecutor.listTools().some((tool) => tool.name === mediaTool)) {
+          throw new Error(`${kind === 'image' ? 'Image' : 'Video'} generation is unavailable because ${mediaTool} is not authorized for this run.`);
         }
-        const outputPath = `generated/image-${runId}.png`;
-        const cleanedImagePrompt = effectivePrompt.replace(/^yougenerate\b/i, 'generate');
-        const realismRequested = /\b(realistic|photorealistic|photoreal|lifelike|true[- ]to[- ]life)\b/i.test(cleanedImagePrompt);
+
+        const sourceImage = editableImage;
+        const imageEditRun = imageGenerationRun && isImageEditRequest(effectivePrompt, {
+          hasImageAttachment: Boolean(sourceImage),
+        });
+        if (imageEditRun && !sourceImage) {
+          throw new Error('Image editing requires an attached PNG, JPEG, or WebP source image.');
+        }
+
+        const outputPath = `generated/${kind}-${runId}.${format}`;
+        const cleanedPrompt = effectivePrompt.replace(/^yougenerate\b/i, 'generate');
+        let editSize: { width: number; height: number } | undefined;
+        if (imageGenerationRun && sourceImage) {
+          try {
+            const bytes = await readFile(resolveWithinWorkspace(workspace.rootPath, sourceImage.path));
+            const intrinsic = readImageDimensions(bytes);
+            if (intrinsic) editSize = fitGenerationSize(intrinsic);
+          } catch {
+            // An unreadable header only costs the aspect ratio; image.generate
+            // still reports the real failure if the file is genuinely gone.
+          }
+        }
+        // SDXL img2img re-renders the entire frame from the prompt it is given.
+        // "make her hair blonde" describes almost nothing, so every unstated
+        // part of the scene is free to drift and the subject comes back as a
+        // different person. With instruction-following edit models (InstructPix2Pix,
+        // LEdits++), the raw user instruction is sent directly. For the legacy
+        // img2img fallback path, ask the vision model what is actually in the
+        // photo and build a full caption of the intended result instead.
+        const editMode = (process.env.DACAI_IMAGE_EDIT_MODE || 'auto').trim().toLowerCase();
+        const isImg2Img = editMode === 'img2img';
+
+        let groundedPrompt: string | undefined;
+        let sourceDescription: string | undefined;
+        if (imageEditRun && sourceImage) {
+          const attachment = visionAttachments.find((entry) => entry.upload.id === sourceImage.id);
+          if (attachment) {
+            try {
+              if (isImg2Img) {
+                const grounded = await buildGroundedEditPrompt(
+                  deps.registry,
+                  attachment,
+                  cleanedPrompt,
+                  controller.signal,
+                );
+                groundedPrompt = grounded.editPrompt;
+                sourceDescription = grounded.description;
+                void activity.emit({
+                  type: 'inspection',
+                  status: 'running',
+                  title: 'Read the attached image',
+                  message: grounded.description,
+                  toolName: mediaTool,
+                  metadata: { visionAlias: grounded.alias, visionModel: grounded.model },
+                });
+              } else {
+                const described = await describeImage(
+                  deps.registry,
+                  attachment,
+                  'Describe this image.',
+                  controller.signal,
+                );
+                sourceDescription = described.description;
+                void activity.emit({
+                  type: 'inspection',
+                  status: 'running',
+                  title: 'Read the attached image',
+                  message: described.description,
+                  toolName: mediaTool,
+                  metadata: { visionAlias: described.alias, visionModel: described.model },
+                });
+              }
+            } catch (error) {
+              // Editing without grounding is worse, not impossible. Say so
+              // rather than silently producing a drifted result.
+              void activity.emit({
+                type: 'warning',
+                status: 'running',
+                title: 'Editing without seeing the image',
+                message: error instanceof VisionUnavailableError
+                  ? `${error.message} The edit will run on the instruction alone and may not preserve the original.`
+                  : 'The vision model could not describe the attachment; the edit will run on the instruction alone.',
+                toolName: mediaTool,
+              });
+            }
+          }
+        }
+
+        const effectiveImagePrompt = imageEditRun && !isImg2Img
+          ? cleanedPrompt
+          : (groundedPrompt ?? cleanedPrompt);
+        const realismRequested = /\b(realistic|photorealistic|photoreal|lifelike|true[- ]to[- ]life)\b/i.test(cleanedPrompt);
+        const argumentsForTool: Record<string, unknown> = imageGenerationRun
+          ? {
+              prompt: (!imageEditRun && realismRequested)
+                ? `${effectiveImagePrompt}. Photorealistic editorial photography, natural skin texture, realistic pores and fine facial details, physically accurate lighting, authentic anatomy, subtle imperfections, professional lens depth of field, high dynamic range.`
+                : effectiveImagePrompt,
+              negativePrompt: (!imageEditRun && realismRequested)
+                ? 'cartoon, illustration, CGI, 3D render, plastic skin, airbrushed skin, waxy face, oversmoothed texture, distorted anatomy, extra fingers, asymmetrical eyes, duplicate features, text, watermark, logo, blur, low detail'
+                : undefined,
+              width: editSize?.width ?? 1024,
+              height: editSize?.height ?? 1024,
+              steps: realismRequested ? 40 : 28,
+              guidance: realismRequested ? 7.5 : 7,
+              quality: 'high',
+              ...(sourceImage
+                ? {
+                    sourcePath: sourceImage.path,
+                    strength: 0.55,
+                    mode: ['anatomy', 'instructpix2pix', 'ledits', 'img2img'].includes(editMode) ? editMode : 'auto',
+                  }
+                : {}),
+              outputPath,
+            }
+          : {
+              prompt: cleanedPrompt,
+              ...(sourceImage ? { sourcePath: sourceImage.path } : {}),
+              width: 1024,
+              height: 576,
+              frames: 25,
+              outputPath,
+            };
         const call = {
-          id: `image-${runId}`,
-          name: imageTool,
-          arguments: {
-            prompt: realismRequested
-              ? `${cleanedImagePrompt}. Photorealistic editorial photography, natural skin texture, realistic pores and fine facial details, physically accurate lighting, authentic anatomy, subtle imperfections, professional lens depth of field, high dynamic range.`
-              : cleanedImagePrompt,
-            negativePrompt: realismRequested
-              ? 'cartoon, illustration, CGI, 3D render, plastic skin, airbrushed skin, waxy face, oversmoothed texture, distorted anatomy, extra fingers, asymmetrical eyes, duplicate features, text, watermark, logo, blur, low detail'
-              : undefined,
-            width: 1024,
-            height: 1024,
-            steps: realismRequested ? 40 : 28,
-            guidance: realismRequested ? 7.5 : 7,
-            quality: 'high',
-            outputPath,
-          },
-        } as const;
+          id: `${kind}-${runId}`,
+          name: mediaTool,
+          arguments: argumentsForTool,
+        };
         const turn = 1;
+        const startedAt = Date.now();
         write('tool_call', { turn, tool: call.name, arguments: call.arguments });
         void activity.emit({
           type: 'file_edit',
           status: 'running',
-          title: 'Starting AI image generation',
-          message: 'The image request was recognized and is being sent to the configured GPU media backend.',
-          toolName: imageTool,
+          title: `Starting AI ${kind} ${imageEditRun ? 'editing' : 'generation'}`,
+          message: `The ${kind} request was recognized and is being sent directly to the configured GPU media backend.`,
+          toolName: mediaTool,
           filePath: outputPath,
-          metadata: { backend: process.env.DACAI_IMAGE_BACKEND ?? 'unconfigured', provider: resolved.instance.id },
+          metadata: {
+            backend: imageGenerationRun ? process.env.DACAI_IMAGE_BACKEND ?? 'unconfigured' : process.env.DACAI_VIDEO_BACKEND ?? 'unconfigured',
+            provider: resolved.instance.id,
+            sourcePath: sourceImage?.path,
+            grounded: Boolean(groundedPrompt),
+            sourceDescription,
+          },
         });
-        if (process.env.DACAI_IMAGE_BACKEND?.trim().toLowerCase() === 'dacais-media') {
+        if (
+          (imageGenerationRun && process.env.DACAI_IMAGE_BACKEND?.trim().toLowerCase() === 'dacais-media') ||
+          (videoGenerationRun && process.env.DACAI_VIDEO_BACKEND?.trim().toLowerCase() === 'dacais-media')
+        ) {
           // Await the supervisor already started at server boot. This closes the
-          // race where the first image request arrived while the pod, service,
-          // or private SSH tunnel was still being restored.
-          const mediaStatus = await deps.media?.ensureImageReady();
+          // race where the first media request arrives while the pod, service,
+          // or private SSH tunnel is still being restored.
+          const mediaStatus = imageGenerationRun
+            ? await deps.media?.ensureImageReady()
+            : await deps.media?.ensureVideoReady();
           if (mediaStatus && !mediaStatus.ready) {
             void activity.emit({
               type: 'warning',
               status: 'running',
               title: 'Media recovery is still converging',
-              message: mediaStatus.error ?? 'The image tool will retry the private media endpoint.',
-              toolName: imageTool,
+              message: mediaStatus.error ?? `The ${kind} tool will retry the private media endpoint.`,
+              toolName: mediaTool,
             });
           }
         }
         // Generated media is an output artifact, not a repository source edit.
         // Execute through the permission boundary directly so source-code
         // transaction, impact-analysis, shell, and validation gates cannot
-        // misclassify this bounded image write and stop it before the backend.
-        const imageResult = await permissionedExecutor.execute(call, controller.signal);
+        // misclassify this bounded media write and stop it before the backend.
+        const mediaResult = await permissionedExecutor.execute(call, controller.signal);
+        const artifact = verifiedGeneratedArtifact(mediaResult, outputPath, format);
+        const completed = artifact !== undefined;
+        const evidenceError = mediaResult.success && !artifact
+          ? `${mediaTool} returned success without matching path and SHA-256 evidence for ${outputPath}.`
+          : undefined;
         write('tool_result', {
           turn,
           tool: call.name,
           arguments: call.arguments,
-          success: imageResult.success,
-          denied: imageResult.denied,
-          output: imageResult.output.slice(0, 4000),
-          message: imageResult.error,
+          success: completed,
+          denied: mediaResult.denied,
+          output: mediaResult.output.slice(0, 4000),
+          message: evidenceError ?? mediaResult.error,
         });
         await activity.emit({
-          type: imageResult.success ? 'success' : imageResult.denied ? 'warning' : 'error',
-          status: imageResult.success ? 'success' : imageResult.denied ? 'blocked' : 'failed',
-          title: imageResult.success ? 'AI image generated' : 'AI image generation failed',
-          message: imageResult.success
-            ? `Image saved to ${outputPath}.`
-            : imageResult.error ?? 'The image backend did not produce an image.',
-          toolName: imageTool,
-          filePath: outputPath,
+          type: completed ? 'success' : mediaResult.denied ? 'warning' : 'error',
+          status: completed ? 'success' : mediaResult.denied ? 'blocked' : 'failed',
+          title: completed ? `AI ${kind} ${imageEditRun ? 'edited' : 'generated'}` : `AI ${kind} generation failed`,
+          message: completed
+            ? `${kind === 'image' ? 'Image' : 'Video'} saved to ${artifact.path} with SHA-256 ${artifact.sha256}.`
+            : evidenceError ?? mediaResult.error ?? `The ${kind} backend did not produce a verified artifact.`,
+          toolName: mediaTool,
+          filePath: completed ? artifact.path : outputPath,
         });
         result = {
           taskId: runId,
-          answer: imageResult.success
-            ? `TASK_COMPLETE: Generated image saved to ${outputPath}.`
-            : `TASK_BLOCKED: ${imageResult.output || imageResult.error || 'Image generation failed.'}`,
+          answer: completed
+            ? `TASK_COMPLETE: Generated ${kind} saved to ${artifact.path} (SHA-256: ${artifact.sha256}).`
+            : `TASK_BLOCKED: ${evidenceError ?? (mediaResult.output || mediaResult.error || `${kind} generation failed.`)}`,
           stopReason: 'final-answer' as const,
-          completionState: imageResult.success ? 'GOAL_COMPLETE' as const : imageResult.denied ? 'BLOCKED' as const : 'FAILED' as const,
+          completionState: completed ? 'GOAL_COMPLETE' as const : mediaResult.denied ? 'BLOCKED' as const : 'FAILED' as const,
           turns: 1,
           toolCalls: 1,
           rejectedCalls: 0,
-          deniedCalls: imageResult.denied ? 1 : 0,
+          deniedCalls: mediaResult.denied ? 1 : 0,
           retries: 0,
-          durationMs: 0,
+          durationMs: Date.now() - startedAt,
           usage: { inputTokens: 0, outputTokens: 0 },
           workingState: {
             reasoningMode: 'standard' as const,
-            knownPaths: [outputPath],
-            changedFiles: imageResult.success ? [outputPath] : [],
-            validationResults: imageResult.success ? ['image.generate verified PNG output'] : [],
+            knownPaths: completed ? [artifact.path] : [],
+            changedFiles: completed ? [artifact.path] : [],
+            validationResults: completed ? [`${mediaTool} verified ${format.toUpperCase()} output ${artifact.sha256}`] : [],
             rollingSummary: undefined,
             contextCompactions: 0,
-            mutationGeneration: imageResult.success ? 1 : 0,
-            validatedMutationGeneration: imageResult.success ? 1 : 0,
+            mutationGeneration: completed ? 1 : 0,
+            validatedMutationGeneration: completed ? 1 : 0,
           },
         };
       } else if (isParallel) {
@@ -1499,7 +1738,8 @@ export function registerAgentRoutes(
             model: participantResolved.model,
             capabilities: participantResolved.capabilities,
             executor: readOnlyExecutor,
-            prompt: effectivePrompt,
+            prompt: promptWithAttachments,
+            promptImages,
             history: conversationHistory,
             systemPrompt: [
               parallelSpecialistPrompt(participantRole, participantTools),
@@ -1776,7 +2016,8 @@ export function registerAgentRoutes(
           model: resolved.model,
           capabilities: resolved.capabilities,
           executor,
-          prompt: effectivePrompt,
+          prompt: promptWithAttachments,
+          promptImages,
           history: conversationHistory,
           systemPrompt: [
             systemPromptForRole(role, selected.map((tool) => tool.name)),
