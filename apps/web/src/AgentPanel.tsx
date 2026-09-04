@@ -30,6 +30,10 @@ const AGENT_WORKSPACE_KEY = 'dacai.agent.workspace.v1';
 const AGENT_MODEL_KEY = 'dacai.agent.model.v1';
 const IMAGE_GENERATION_INTENT =
   /(?:\b|you)(?:generate|create|make|produce|render|draw|paint|illustrate|design|edit|modify|update|transform)\b[\s\S]{0,160}\b(?:ai\s+)?(?:image|photo|picture|portrait|artwork)\b|\b(?:ai\s+)?(?:image|photo|picture|portrait|artwork)\b[\s\S]{0,160}\b(?:generate|create|make|produce|render|draw|paint|illustrate|design|edit|modify|update|transform)\b|\b(?:image|photo|picture|portrait|artwork)\s+of\b/;
+const DESCRIPTIVE_IMAGE_INTENT =
+  /\b(?:woman|women|man|men|female|male|person|people|model|character|characters|fashion|outfit|portrait|face|body|figure|landscape|mountain|beach|ocean|cityscape|architecture|interior|still[- ]life|product|animal|dog|cat|bird|flower|sunset|night[- ]sky)\b/i;
+const NON_IMAGE_REQUEST_INTENT =
+  /\b(?:code|coding|repository|repo|file|function|class|bug|error|test|typescript|javascript|python|api|endpoint|database|sql|regex|command|terminal|shell|explain|describe|analy[sz]e|inspect|identify|what|who|where|when|why|how)\b/i;
 
 const EDITABLE_IMAGE_MIME_TYPES = ['image/png', 'image/jpeg', 'image/webp'];
 
@@ -43,7 +47,11 @@ function hasEditableImage(uploads: readonly Upload[]): boolean {
  */
 function isImageGenerationPrompt(value: string, uploads: readonly Upload[] = []): boolean {
   if (hasEditableImage(uploads) && value.trim().length > 0) return true;
-  return IMAGE_GENERATION_INTENT.test(value.toLowerCase());
+  const normalized = value.toLowerCase().trim();
+  return IMAGE_GENERATION_INTENT.test(normalized)
+    || (normalized.length > 2
+      && DESCRIPTIVE_IMAGE_INTENT.test(normalized)
+      && !NON_IMAGE_REQUEST_INTENT.test(normalized));
 }
 
 function savedPreference(key: string, fallback: string): string {

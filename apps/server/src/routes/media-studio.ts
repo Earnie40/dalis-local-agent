@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { basename, extname, isAbsolute, relative } from 'node:path';
 import type { FastifyInstance } from 'fastify';
+import { startMediaRecovery } from '../media-dispatch';
 import { z } from 'zod';
 import { PermissionAuditStore } from '@dacai-local-agent/shared';
 import {
@@ -272,8 +273,10 @@ export function registerMediaStudioRoutes(server: FastifyInstance, deps: MediaSt
     if (!workspace) return reply.code(404).send({ error: 'Workspace not found.' });
     try {
       if (parsed.data.sourcePath) workspaceRelativePath(workspace, parsed.data.sourcePath, 'sourcePath');
-      const ready = await deps.media.ensureImageReady();
-      if (!ready.ready) throw new Error(ready.error ?? 'The GPU image service is not ready.');
+      // Keep infrastructure recovery concurrent with the actual request. An
+      // active RunPod must receive generation immediately instead of waiting
+      // behind the supervisor's cold-start polling window.
+      startMediaRecovery('image', deps.media);
       const taskId = `media-image-${randomUUID()}`;
       const executor = makeExecutor(workspace, auditStore, createImageGenerationTools(), taskId);
       const outputPath = `generated/images/${cleanOutputName(parsed.data.outputName, '.png', `image-${Date.now()}`)}`;
@@ -313,10 +316,8 @@ export function registerMediaStudioRoutes(server: FastifyInstance, deps: MediaSt
     void (async () => {
       try {
         update({ status: 'planning' });
-        const imageReady = await deps.media.ensureImageReady();
-        if (!imageReady.ready) throw new Error(imageReady.error ?? 'The GPU image service is not ready.');
-        const ready = await deps.media.ensureVideoReady();
-        if (!ready.ready) throw new Error(ready.error ?? 'The GPU video service is not ready.');
+        startMediaRecovery('image', deps.media);
+        startMediaRecovery('video', deps.media);
         const plan = await storyboard({
           prompt: parsed.data.prompt, durationSeconds: parsed.data.durationSeconds,
           characters: parsed.data.characters.map(({ id: characterId, name }) => ({ id: characterId, name })),

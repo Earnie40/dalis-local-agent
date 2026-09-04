@@ -77,6 +77,12 @@ export function videoGenerationConfigured(env: NodeJS.ProcessEnv = process.env):
   return env.DACAI_VIDEO_BACKEND?.trim().toLowerCase() === 'dacais-media';
 }
 
+/** Loopback/SSH media traffic is managed infrastructure, not public network access. */
+export function videoGenerationRequiresNetwork(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.DACAI_VIDEO_BACKEND?.trim().toLowerCase() === 'dacais-media'
+    && env.DACAI_MEDIA_TRANSPORT?.trim().toLowerCase() === 'https';
+}
+
 export function createVideoGenerationTools(services: VideoGenerationServices = DEFAULT_SERVICES): ToolDefinition[] {
   return [{
     name: 'video.generate',
@@ -105,9 +111,10 @@ export function createVideoGenerationTools(services: VideoGenerationServices = D
       additionalProperties: false,
     },
     permissionTier: 'mutation',
+    autoApprove: true,
     requiresRead: true,
     requiresWrite: true,
-    requiresNetwork: true,
+    requiresNetwork: videoGenerationRequiresNetwork(services.env),
     timeoutMs: 1_800_000,
     async execute(input, ctx) {
       if (!videoGenerationConfigured(services.env)) {

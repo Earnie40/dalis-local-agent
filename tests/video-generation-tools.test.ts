@@ -2,7 +2,11 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createVideoGenerationTools, videoGenerationConfigured } from '../packages/tools/src/video-generation-tools';
+import {
+  createVideoGenerationTools,
+  videoGenerationConfigured,
+  videoGenerationRequiresNetwork,
+} from '../packages/tools/src/video-generation-tools';
 
 const MP4 = Buffer.concat([Buffer.from([0, 0, 0, 12]), Buffer.from('ftypisom')]);
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
@@ -19,6 +23,16 @@ async function workspace(): Promise<string> {
 }
 
 describe('video generation tool', () => {
+  it('auto-approves bounded loopback generation without public-network permission', () => {
+    const tool = createVideoGenerationTools({
+      env: { DACAI_VIDEO_BACKEND: 'dacais-media', DACAI_MEDIA_TRANSPORT: 'ssh-tunnel' }, fetch,
+    })[0];
+    expect(tool).toMatchObject({ permissionTier: 'mutation', autoApprove: true, requiresNetwork: false });
+    expect(videoGenerationRequiresNetwork({
+      DACAI_VIDEO_BACKEND: 'dacais-media', DACAI_MEDIA_TRANSPORT: 'https',
+    })).toBe(true);
+  });
+
   it('generates a text-to-video MP4 through the Wan media service', async () => {
     const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       expect(String(url)).toBe('http://127.0.0.1:18090/v1/anatomy-video');

@@ -140,6 +140,70 @@ describe('Runpod media supervisor', () => {
     });
   });
 
+  it('auto-provisions missing image weights on an explicitly auto-started managed pod', async () => {
+    let provisioned = false;
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(
+      provisioned ? { backdropModel: 'image-model' } : {},
+    ), { status: 200 }));
+    const runCommand = vi.fn(async (_command: string, args: string[]) => {
+      const remote = args.at(-1) ?? '';
+      if (remote === 'printf DACAIS_MEDIA_SSH_READY') {
+        return { code: 0, stdout: 'DACAIS_MEDIA_SSH_READY', stderr: '' };
+      }
+      if (remote.includes('download_sdxl_model.py')) provisioned = true;
+      return { code: 0, stdout: '', stderr: '' };
+    });
+    const manager = new RunpodMediaManager({
+      env: {
+        DACAI_IMAGE_BACKEND: 'dacais-media', DACAI_VIDEO_BACKEND: 'dacais-media',
+        DACAI_MEDIA_TRANSPORT: 'ssh-tunnel', DACAI_MEDIA_BASE_URL: 'http://127.0.0.1:18090',
+        DACAI_MEDIA_AUTOSTART: 'true', RUNPOD_ID: ENDPOINT.podId,
+      },
+      fetchImpl: fetchMock as typeof fetch,
+      runCommand,
+      resolveEndpoint: async () => ENDPOINT,
+      sleep: async () => undefined,
+      startupAttempts: 1,
+    });
+
+    expect(await manager.ensureImageReady()).toMatchObject({
+      ready: true,
+      autoProvisionModels: true,
+      service: { imageModel: true, videoModel: false },
+    });
+    const remoteCommands = runCommand.mock.calls.map((call) => String(call[1].at(-1)));
+    expect(remoteCommands.some((command) => command.includes('download_sdxl_model.py'))).toBe(true);
+    expect(remoteCommands.some((command) => command.includes('download_svd_model.py'))).toBe(false);
+    manager.stop();
+  });
+
+  it('keeps model provisioning independently disableable without claiming a permission denial', async () => {
+    const runCommand = vi.fn(async (_command: string, args: string[]) => ({
+      code: 0,
+      stdout: args.at(-1) === 'printf DACAIS_MEDIA_SSH_READY' ? 'DACAIS_MEDIA_SSH_READY' : '',
+      stderr: '',
+    }));
+    const manager = new RunpodMediaManager({
+      env: {
+        DACAI_IMAGE_BACKEND: 'dacais-media',
+        DACAI_MEDIA_TRANSPORT: 'ssh-tunnel', DACAI_MEDIA_BASE_URL: 'http://127.0.0.1:18090',
+        DACAI_MEDIA_AUTOSTART: 'true', DACAI_MEDIA_AUTOPROVISION_MODELS: 'false',
+        RUNPOD_ID: ENDPOINT.podId,
+      },
+      fetchImpl: (async () => new Response(JSON.stringify({}), { status: 200 })) as typeof fetch,
+      runCommand,
+      resolveEndpoint: async () => ENDPOINT,
+      sleep: async () => undefined,
+      startupAttempts: 1,
+    });
+
+    const status = await manager.ensureImageReady();
+    expect(status).toMatchObject({ ready: false, phase: 'error', autoProvisionModels: false });
+    expect(status.error).toContain('DACAI_MEDIA_AUTOPROVISION_MODELS=true');
+    expect(runCommand.mock.calls.some((call) => String(call[1].at(-1)).includes('download_sdxl_model.py'))).toBe(false);
+    manager.stop();
+  });
+
   it('waits for a video model before admitting a long-form video job', async () => {
     const manager = new RunpodMediaManager({
       env: {

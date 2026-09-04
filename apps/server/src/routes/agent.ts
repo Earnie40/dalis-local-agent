@@ -89,6 +89,7 @@ import { ResourceAwareExecutionExecutor } from '../resource-aware-execution-exec
 import { ExternalApiDiscoveryExecutor } from '../external-api-discovery-executor';
 import { selectAgentTools } from '../agent-tool-selection';
 import { AgentActivityEmitter, listAgentActivity } from '../agent-activity';
+import { dispatchWithMediaRecovery } from '../media-dispatch';
 import { beginSessionActivity, touchSessionActivity } from '../session-preflight';
 import { AgentArtifactError, readAgentArtifact } from '../agent-artifacts';
 import { phaseForAuditTool, repositoryAuditInstructions, resolveAgentRunMode, type RepositoryAuditPhase } from '../agent-run-mode';
@@ -136,6 +137,14 @@ interface AgentBody {
 const IMAGE_GENERATION_INTENT =
   /(?:\b|you)(?:generate|create|make|produce|render|draw|paint|illustrate|design|edit|modify|update|transform)\b[\s\S]{0,160}\b(?:ai\s+)?(?:image|photo|picture|portrait|artwork)\b|\b(?:ai\s+)?(?:image|photo|picture|portrait|artwork)\b[\s\S]{0,160}\b(?:generate|create|make|produce|render|draw|paint|illustrate|design|edit|modify|update|transform)\b|\b(?:image|photo|picture|portrait|artwork)\s+of\b/;
 
+// Short descriptive prompts often omit the word "image" entirely. Require a
+// visual/person/scene subject and exclude obvious repository or question
+// language so coding and inspection requests stay on the normal agent path.
+const DESCRIPTIVE_IMAGE_INTENT =
+  /\b(?:woman|women|man|men|female|male|person|people|model|character|characters|fashion|outfit|portrait|face|body|figure|landscape|mountain|beach|ocean|cityscape|architecture|interior|still[- ]life|product|animal|dog|cat|bird|flower|sunset|night[- ]sky)\b/i;
+const NON_IMAGE_REQUEST_INTENT =
+  /\b(?:code|coding|repository|repo|file|function|class|bug|error|test|typescript|javascript|python|api|endpoint|database|sql|regex|command|terminal|shell|explain|describe|analy[sz]e|inspect|identify|what|who|where|when|why|how)\b/i;
+
 const IMAGE_EDIT_INTENT =
   /\b(?:edit|modify|update|transform|retouch|restyle|change|remove|replace|add)\b[\s\S]{0,160}\b(?:image|photo|picture|portrait|artwork)\b|\b(?:make|turn)\b[\s\S]{0,80}\b(?:this|the\s+attached|the\s+uploaded)\b[\s\S]{0,40}\b(?:image|photo|picture|portrait)\b|\b(?:attached|uploaded)\b[\s\S]{0,40}\b(?:image|photo|picture|portrait)\b[\s\S]{0,160}\b(?:edit|modify|update|transform|retouch|restyle|change|remove|replace|add|make|turn)\b/;
 
@@ -165,7 +174,13 @@ export function isImageGenerationRequest(
     normalized.trim().length > 0 &&
     !ATTACHED_IMAGE_INSPECTION_INTENT.test(normalized)
   ) return true;
-  return IMAGE_GENERATION_INTENT.test(normalized) || [...requestedTools].includes('image.generate');
+  const descriptivePrompt = normalized.trim();
+  const isDescriptiveVisualRequest = descriptivePrompt.length > 2
+    && DESCRIPTIVE_IMAGE_INTENT.test(descriptivePrompt)
+    && !NON_IMAGE_REQUEST_INTENT.test(descriptivePrompt);
+  return IMAGE_GENERATION_INTENT.test(normalized)
+    || isDescriptiveVisualRequest
+    || [...requestedTools].includes('image.generate');
 }
 
 export function isImageEditRequest(prompt: string, options: MediaIntentOptions = {}): boolean {
@@ -189,6 +204,11 @@ export function classifyDirectMediaRequest(
   if (isVideoGenerationRequest(prompt, requestedTools)) return 'video';
   if (isImageGenerationRequest(prompt, requestedTools, options)) return 'image';
   return undefined;
+}
+
+/** Permission denial is a blocker; backend/runtime failure is a failed attempt. */
+export function mediaRunFailureMarker(denied: boolean | undefined): 'TASK_BLOCKED' | 'TASK_FAILED' {
+  return denied ? 'TASK_BLOCKED' : 'TASK_FAILED';
 }
 
 export function verifiedGeneratedArtifact(
@@ -1692,31 +1712,28 @@ export function registerAgentRoutes(
             sourceDescription,
           },
         });
-        if (
+        const managedMedia = (
           (imageGenerationRun && process.env.DACAI_IMAGE_BACKEND?.trim().toLowerCase() === 'dacais-media') ||
           (videoGenerationRun && process.env.DACAI_VIDEO_BACKEND?.trim().toLowerCase() === 'dacais-media')
-        ) {
-          // Await the supervisor already started at server boot. This closes the
-          // race where the first media request arrives while the pod, service,
-          // or private SSH tunnel is still being restored.
-          const mediaStatus = imageGenerationRun
-            ? await deps.media?.ensureImageReady()
-            : await deps.media?.ensureVideoReady();
-          if (mediaStatus && !mediaStatus.ready) {
-            void activity.emit({
-              type: 'warning',
-              status: 'running',
-              title: 'Media recovery is still converging',
-              message: mediaStatus.error ?? `The ${kind} tool will retry the private media endpoint.`,
-              toolName: mediaTool,
-            });
-          }
-        }
+        ) ? deps.media : undefined;
         // Generated media is an output artifact, not a repository source edit.
         // Execute through the permission boundary directly so source-code
         // transaction, impact-analysis, shell, and validation gates cannot
         // misclassify this bounded media write and stop it before the backend.
-        const mediaResult = await permissionedExecutor.execute(call, controller.signal);
+        const mediaResult = await dispatchWithMediaRecovery({
+          kind,
+          media: managedMedia,
+          execute: () => permissionedExecutor.execute(call, controller.signal),
+          onUnavailable: async (mediaStatus) => {
+            await activity.emit({
+              type: 'warning',
+              status: 'running',
+              title: 'Media recovery is running in the background',
+              message: mediaStatus.error ?? `The ${kind} backend is still recovering.`,
+              toolName: mediaTool,
+            });
+          },
+        });
         const artifact = verifiedGeneratedArtifact(mediaResult, outputPath, format);
         const completed = artifact !== undefined;
         const evidenceError = mediaResult.success && !artifact
@@ -1745,7 +1762,7 @@ export function registerAgentRoutes(
           taskId: runId,
           answer: completed
             ? `TASK_COMPLETE: Generated ${kind} saved to ${artifact.path} (SHA-256: ${artifact.sha256}).`
-            : `TASK_BLOCKED: ${evidenceError ?? (mediaResult.output || mediaResult.error || `${kind} generation failed.`)}`,
+            : `${mediaRunFailureMarker(mediaResult.denied)}: ${evidenceError ?? (mediaResult.output || mediaResult.error || `${kind} generation failed.`)}`,
           stopReason: 'final-answer' as const,
           completionState: completed ? 'GOAL_COMPLETE' as const : mediaResult.denied ? 'BLOCKED' as const : 'FAILED' as const,
           turns: 1,

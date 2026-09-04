@@ -47,9 +47,10 @@ export interface AliasCapabilities {
 export interface MediaInfrastructureStatus {
   configured: boolean;
   ready: boolean;
-  phase: 'disabled' | 'initializing' | 'starting-pod' | 'waiting-for-ssh' | 'starting-service' | 'connecting-tunnel' | 'ready' | 'error';
+  phase: 'disabled' | 'initializing' | 'starting-pod' | 'waiting-for-ssh' | 'starting-service' | 'provisioning-models' | 'connecting-tunnel' | 'ready' | 'error';
   transport?: 'ssh-tunnel' | 'loopback' | 'https';
   autoStart: boolean;
+  autoProvisionModels: boolean;
   pod?: { id: string; name?: string; connected: boolean };
   service: { healthy: boolean; imageModel: boolean; videoModel: boolean };
   error?: string;

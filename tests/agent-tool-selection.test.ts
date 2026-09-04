@@ -4,6 +4,7 @@ import {
   classifyDirectMediaRequest,
   isImageEditRequest,
   isImageGenerationRequest,
+  mediaRunFailureMarker,
   verifiedGeneratedArtifact,
 } from '../apps/server/src/routes/agent';
 
@@ -18,7 +19,10 @@ const tools = [
 describe('agent tool selection', () => {
   it('recognizes direct image requests without depending on a model tool call', () => {
     expect(isImageGenerationRequest('Draw a cinematic portrait of an astronaut')).toBe(true);
+    expect(isImageGenerationRequest('sexy nude female model')).toBe(true);
+    expect(isImageGenerationRequest('cinematic mountain landscape at sunset')).toBe(true);
     expect(isImageGenerationRequest('Improve this repository documentation')).toBe(false);
+    expect(isImageGenerationRequest('Explain the model class in this repository')).toBe(false);
     expect(isImageGenerationRequest('Use the selected tool', ['image.generate'])).toBe(true);
   });
 
@@ -47,6 +51,12 @@ describe('agent tool selection', () => {
     });
     expect(verifiedGeneratedArtifact(result, 'output/preexisting.png', 'png')).toBeUndefined();
     expect(verifiedGeneratedArtifact({ success: true, output: '{}' }, 'generated/new.png', 'png')).toBeUndefined();
+  });
+
+  it('does not misreport an infrastructure failure as a guardrail block', () => {
+    expect(mediaRunFailureMarker(false)).toBe('TASK_FAILED');
+    expect(mediaRunFailureMarker(undefined)).toBe('TASK_FAILED');
+    expect(mediaRunFailureMarker(true)).toBe('TASK_BLOCKED');
   });
 
   it('keeps authorized shell.run available to transactional filesystem mutations', () => {

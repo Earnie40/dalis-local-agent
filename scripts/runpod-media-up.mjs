@@ -38,9 +38,12 @@ const mediaSourceDirectory = resolve(
 );
 const mediaSources = [
   ['media_service.py', process.env.DACAI_MEDIA_SERVICE_SOURCE?.trim()],
+  ['sdxl_backdrop_runner.py', resolve('deploy/runpod-media/sdxl_backdrop_runner.py')],
   ['instruct_edit_runner.py'],
   ['anatomy_edit_runner.py'],
   ['anatomy_video_runner.py'],
+  ['download_sdxl_model.py'],
+  ['download_svd_model.py'],
   ['download_anatomy_models.py'],
   ['provision-anatomy-edit.sh'],
 ].map(([name, override]) => ({ name, source: resolve(override || mediaSourceDirectory, override ? '' : name) }));
@@ -101,16 +104,23 @@ ROOT=/workspace/dacais-media
 export DACAIS_MEDIA_ROOT="$ROOT"
 export DACAIS_MEDIA_HOST=127.0.0.1
 export DACAIS_MEDIA_PORT=8090
-export DACAIS_SDXL_PYTHON="$(command -v python3)"
+MODEL_PYTHON="$(command -v python3)"
+for CANDIDATE in "$ROOT/venvs/anatomy-edit/bin/python" "$ROOT/venvs/sadtalker/bin/python" "$MODEL_PYTHON"; do
+  if test -x "$CANDIDATE" && "$CANDIDATE" -c 'import torch, diffusers, transformers, huggingface_hub; raise SystemExit(0 if torch.cuda.is_available() else 1)' >/dev/null 2>&1; then
+    MODEL_PYTHON="$CANDIDATE"
+    break
+  fi
+done
+export DACAIS_SDXL_PYTHON="$MODEL_PYTHON"
 export DACAIS_SDXL_MODEL_ROOT="$ROOT/models/sdxl-base"
-export DACAIS_INSTRUCT_EDIT_PYTHON="$(command -v python3)"
+export DACAIS_INSTRUCT_EDIT_PYTHON="$MODEL_PYTHON"
 export DACAIS_INSTRUCT_PIX2PIX_MODEL_ROOT="$ROOT/models/sdxl-instructpix2pix-768"
 export DACAIS_ANATOMY_EDIT_PYTHON="\${DACAIS_ANATOMY_EDIT_PYTHON:-$ROOT/venvs/anatomy-edit/bin/python}"
 export DACAIS_ANATOMY_VIDEO_PYTHON="\${DACAIS_ANATOMY_VIDEO_PYTHON:-$ROOT/venvs/anatomy-edit/bin/python}"
 export DACAIS_ANATOMY_GENERATION_MODEL_ROOT="$ROOT/models/qwen-image-2512"
 export DACAIS_ANATOMY_EDIT_MODEL_ROOT="$ROOT/models/qwen-image-edit-2511"
 export DACAIS_ANATOMY_VIDEO_MODEL_ROOT="$ROOT/models/wan2.2-ti2v-5b"
-export DACAIS_SVD_PYTHON="$(command -v python3)"
+export DACAIS_SVD_PYTHON="$MODEL_PYTHON"
 export DACAIS_SVD_MODEL_ROOT="$ROOT/models/svd-xt"
 export HF_HOME="$ROOT/cache/huggingface"
 exec python3 "$ROOT/service/media_service.py"

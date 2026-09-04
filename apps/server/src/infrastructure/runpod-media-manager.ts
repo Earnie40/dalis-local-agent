@@ -6,7 +6,9 @@ import { defaultRunCommand, type RunCommand } from './runpod-service';
 
 export type MediaPhase =
   | 'disabled' | 'initializing' | 'starting-pod' | 'waiting-for-ssh'
-  | 'starting-service' | 'connecting-tunnel' | 'ready' | 'error';
+  | 'starting-service' | 'provisioning-models' | 'connecting-tunnel' | 'ready' | 'error';
+
+type MediaRequirement = 'configured' | 'image' | 'video';
 
 export interface RunpodMediaStatus {
   configured: boolean;
@@ -14,6 +16,7 @@ export interface RunpodMediaStatus {
   phase: MediaPhase;
   transport?: MediaTransport;
   autoStart: boolean;
+  autoProvisionModels: boolean;
   pod?: { id: string; name?: string; connected: boolean };
   service: { healthy: boolean; imageModel: boolean; videoModel: boolean };
   error?: string;
@@ -31,6 +34,7 @@ export interface RunpodMediaManagerOptions {
   startupAttempts?: number;
   sshAttempts?: number;
   monitorIntervalMs?: number;
+  modelProvisionTimeoutMs?: number;
 }
 
 const RUNPOD_V2 = 'https://api.runpod.io/v2';
@@ -38,6 +42,30 @@ const RUNPOD_V2 = 'https://api.runpod.io/v2';
 function now(): string { return new Date().toISOString(); }
 function enabled(value: string | undefined): boolean { return /^(1|true|yes|on)$/i.test(value?.trim() ?? ''); }
 function wait(milliseconds: number): Promise<void> { return new Promise((resolve) => setTimeout(resolve, milliseconds)); }
+
+export function mediaRuntimeRecoveryCommand(): string {
+  return [
+    'set -eu',
+    'ROOT=/workspace/dacais-media',
+    'PYTHON=',
+    'for CANDIDATE in "$ROOT/venvs/anatomy-edit/bin/python" "$ROOT/venvs/sadtalker/bin/python" "$(command -v python3 || true)"; do ' +
+      'if test -x "$CANDIDATE" && "$CANDIDATE" -c \'import torch, diffusers, transformers, huggingface_hub; raise SystemExit(0 if torch.cuda.is_available() else 1)\' >/dev/null 2>&1; then PYTHON="$CANDIDATE"; break; fi; done',
+    'test -n "$PYTHON" || exit 3',
+    'PID=$(pgrep -f \'[m]edia_service.py\' | head -n 1 || true)',
+    'ACTIVE=',
+    'if test -n "$PID" && test -r "/proc/$PID/environ"; then ' +
+      'ACTIVE=$(tr \'\\0\' \'\\n\' < "/proc/$PID/environ" | sed -n \'s/^DACAIS_MODEL_RUNTIME=//p\' | head -n 1); fi',
+    'if test "$ACTIVE" = "$PYTHON"; then exit 0; fi',
+    'SHIM="$ROOT/runtime/model-python/bin"',
+    'mkdir -p "$SHIM" "$ROOT/logs"',
+    'printf \'#!/bin/sh\\nexec "%s" "$@"\\n\' "$PYTHON" > "$SHIM/python3"',
+    'chmod 755 "$SHIM/python3"',
+    'pkill -f \'[m]edia_service.py\' >/dev/null 2>&1 || true',
+    'setsid env DACAIS_MODEL_RUNTIME="$PYTHON" PATH="$SHIM:$PATH" "$ROOT/run-media.sh" > "$ROOT/logs/media-service.log" 2>&1 < /dev/null &',
+    'for ATTEMPT in $(seq 1 60); do curl -fsS --max-time 2 http://127.0.0.1:8090/v1/health >/dev/null 2>&1 && exit 0; sleep 1; done',
+    'exit 4',
+  ].join('\n');
+}
 
 export async function startRunpodPod(options: {
   apiKey?: string; podId?: string; fetchImpl?: typeof fetch; timeoutMs?: number;
@@ -71,6 +99,8 @@ export class RunpodMediaManager {
   private readonly startupAttempts: number;
   private readonly sshAttempts: number;
   private readonly monitorIntervalMs: number;
+  private readonly modelProvisionTimeoutMs: number;
+  private readonly autoProvisionModels: boolean;
   private state: RunpodMediaStatus;
   private connection?: RunpodConnection;
   private tunnel?: ChildProcess;
@@ -94,12 +124,21 @@ export class RunpodMediaManager {
     this.startupAttempts = options.startupAttempts ?? 120;
     this.sshAttempts = options.sshAttempts ?? 60;
     this.monitorIntervalMs = options.monitorIntervalMs ?? 15_000;
+    this.modelProvisionTimeoutMs = options.modelProvisionTimeoutMs ?? 30 * 60_000;
     const configured = this.mediaEnabled();
+    const autoStart = enabled(this.env.DACAI_MEDIA_AUTOSTART);
+    // Auto-start is already the operator's explicit opt-in to billable GPU
+    // recovery. By default it also restores required model assets on that
+    // managed pod; deployments can disable this independently.
+    this.autoProvisionModels = this.env.DACAI_MEDIA_AUTOPROVISION_MODELS === undefined
+      ? autoStart
+      : enabled(this.env.DACAI_MEDIA_AUTOPROVISION_MODELS);
     this.state = {
       configured,
       ready: false,
       phase: configured ? 'initializing' : 'disabled',
-      autoStart: enabled(this.env.DACAI_MEDIA_AUTOSTART),
+      autoStart,
+      autoProvisionModels: this.autoProvisionModels,
       service: { healthy: false, imageModel: false, videoModel: false },
       checkedAt: now(),
     };
@@ -126,7 +165,12 @@ export class RunpodMediaManager {
       return { ...this.status(), ready: true, service: health, error: undefined, checkedAt: now() };
     }
 
-    void this.initialize();
+    const initialized = await this.initialize('image');
+    health = await this.health(media.baseUrl, media.headers);
+    if (health.healthy && health.imageModel) {
+      return { ...this.status(), ready: true, service: health, error: undefined, checkedAt: now() };
+    }
+    if (initialized.phase === 'error') return { ...initialized, service: health, checkedAt: now() };
     const attempts = Math.min(this.startupAttempts, 24);
     for (let attempt = 0; attempt < attempts && !this.stopped; attempt += 1) {
       await this.sleep(this.startupPollMs);
@@ -161,7 +205,12 @@ export class RunpodMediaManager {
       return { ...this.status(), ready: true, service: health, error: undefined, checkedAt: now() };
     }
 
-    void this.initialize();
+    const initialized = await this.initialize('video');
+    health = await this.health(media.baseUrl, media.headers);
+    if (health.healthy && health.videoModel) {
+      return { ...this.status(), ready: true, service: health, error: undefined, checkedAt: now() };
+    }
+    if (initialized.phase === 'error') return { ...initialized, service: health, checkedAt: now() };
     const attempts = Math.min(this.startupAttempts, 24);
     for (let attempt = 0; attempt < attempts && !this.stopped; attempt += 1) {
       await this.sleep(this.startupPollMs);
@@ -184,15 +233,19 @@ export class RunpodMediaManager {
   start(): void {
     if (!this.state.configured || this.monitor) return;
     this.stopped = false;
-    void this.initialize();
+    const firstRequirement: MediaRequirement =
+      this.env.DACAI_IMAGE_BACKEND?.trim().toLowerCase() === 'dacais-media' ? 'image' : 'video';
+    void this.initialize(firstRequirement).then(() => {
+      if (!this.stopped && !this.configuredModelsReady(this.state.service)) void this.initialize();
+    });
     this.monitor = setInterval(() => void this.monitorOnce(), this.monitorIntervalMs);
     this.monitor.unref?.();
   }
 
-  async initialize(): Promise<RunpodMediaStatus> {
+  async initialize(requirement: MediaRequirement = 'configured'): Promise<RunpodMediaStatus> {
     if (!this.state.configured || this.stopped) return this.status();
     if (this.initializing) return this.initializing;
-    this.initializing = this.initializeOnce()
+    this.initializing = this.initializeOnce(requirement)
       .catch((error) => {
         this.state = {
           ...this.state, ready: false, phase: 'error',
@@ -209,7 +262,7 @@ export class RunpodMediaManager {
     this.state = { ...this.state, ...patch, checkedAt: now() };
   }
 
-  private async initializeOnce(): Promise<RunpodMediaStatus> {
+  private async initializeOnce(requirement: MediaRequirement): Promise<RunpodMediaStatus> {
     const media = resolveMediaConnection(this.env);
     this.update({ phase: 'initializing', transport: media.transport, error: undefined });
     if (media.transport === 'https' || media.transport === 'loopback') {
@@ -221,9 +274,9 @@ export class RunpodMediaManager {
             : 'The production media HTTPS endpoint is not healthy.',
         );
       }
-      health = await this.waitForConfiguredModels(media.baseUrl, media.headers, health);
-      this.requireConfiguredModels(health);
-      this.markReady(health);
+      health = await this.waitForModels(media.baseUrl, media.headers, health, requirement);
+      this.requireModels(health, requirement);
+      this.markAvailable(health);
       return this.status();
     }
 
@@ -256,10 +309,13 @@ export class RunpodMediaManager {
     this.update({ phase: 'connecting-tunnel' });
     let localHealth = await this.ensureTunnel(media.baseUrl, media.headers);
     if (!localHealth.healthy) throw new Error('The managed media SSH tunnel did not become healthy.');
-    localHealth = await this.waitForConfiguredModels(media.baseUrl, media.headers, localHealth);
-    this.requireConfiguredModels(localHealth);
+    await this.provisionRequiredModels(localHealth, requirement);
+    await this.ensureModelRuntime(requirement);
+    localHealth = await this.health(media.baseUrl, media.headers);
+    localHealth = await this.waitForModels(media.baseUrl, media.headers, localHealth, requirement);
+    this.requireModels(localHealth, requirement);
     this.startRequested = false;
-    this.markReady(localHealth);
+    this.markAvailable(localHealth);
     return this.status();
   }
 
@@ -322,8 +378,14 @@ export class RunpodMediaManager {
     } catch { return { healthy: false, imageModel: false, videoModel: false }; }
   }
 
-  private markReady(health: HealthResult): void {
-    this.update({ ready: true, phase: 'ready', service: health, error: undefined });
+  private markAvailable(health: HealthResult): void {
+    const ready = this.configuredModelsReady(health);
+    this.update({
+      ready,
+      phase: ready ? 'ready' : 'starting-service',
+      service: health,
+      error: undefined,
+    });
   }
 
   private configuredModelsReady(health: HealthResult): boolean {
@@ -332,16 +394,23 @@ export class RunpodMediaManager {
     return (!imageRequired || health.imageModel) && (!videoRequired || health.videoModel);
   }
 
-  /** A healthy process may still be loading diffusion weights; wait for the advertised model. */
-  private async waitForConfiguredModels(
+  private modelsReady(health: HealthResult, requirement: MediaRequirement): boolean {
+    if (requirement === 'image') return health.imageModel;
+    if (requirement === 'video') return health.videoModel;
+    return this.configuredModelsReady(health);
+  }
+
+  /** A healthy process may still be loading or provisioning diffusion weights. */
+  private async waitForModels(
     baseUrl: string,
     headers: Record<string, string>,
     initial: HealthResult,
+    requirement: MediaRequirement,
   ): Promise<HealthResult> {
     let health = initial;
     const attempts = Math.min(this.startupAttempts, 24);
     for (let attempt = 0; attempt < attempts && !this.stopped; attempt += 1) {
-      if (this.configuredModelsReady(health)) return health;
+      if (this.modelsReady(health, requirement)) return health;
       this.update({ phase: 'starting-service', service: health });
       await this.sleep(this.startupPollMs);
       health = await this.health(baseUrl, headers);
@@ -349,12 +418,86 @@ export class RunpodMediaManager {
     return health;
   }
 
-  private requireConfiguredModels(health: HealthResult): void {
-    if (!this.configuredModelsReady(health)) {
-      const imageRequired = this.env.DACAI_IMAGE_BACKEND?.trim().toLowerCase() === 'dacais-media';
-      if (imageRequired && !health.imageModel) throw new Error('The media endpoint is healthy, but its image model is unavailable.');
-      throw new Error('The media endpoint is healthy, but its video model is unavailable.');
+  private async provisionRequiredModels(health: HealthResult, requirement: MediaRequirement): Promise<void> {
+    const needsImage = requirement !== 'video'
+      && this.env.DACAI_IMAGE_BACKEND?.trim().toLowerCase() === 'dacais-media'
+      && !health.imageModel;
+    const needsVideo = requirement !== 'image'
+      && this.env.DACAI_VIDEO_BACKEND?.trim().toLowerCase() === 'dacais-media'
+      && !health.videoModel;
+    if (!needsImage && !needsVideo) return;
+    if (!this.autoProvisionModels) return;
+
+    this.update({ phase: 'provisioning-models', service: health, error: undefined });
+    if (needsImage) await this.provisionModel('image');
+    if (needsVideo) await this.provisionModel('video');
+  }
+
+  private async provisionModel(kind: 'image' | 'video'): Promise<void> {
+    const spec = kind === 'image'
+      ? { script: 'download_sdxl_model.py', directory: 'sdxl-base', rootVariable: 'DACAIS_SDXL_MODEL_ROOT' }
+      : { script: 'download_svd_model.py', directory: 'svd-xt', rootVariable: 'DACAIS_SVD_MODEL_ROOT' };
+    const command = [
+      'set -eu',
+      'ROOT=/workspace/dacais-media',
+      `SCRIPT="$ROOT/service/${spec.script}"`,
+      `TARGET="$ROOT/models/${spec.directory}"`,
+      'test -f "$SCRIPT" || exit 2',
+      'PYTHON=',
+      'for CANDIDATE in "$ROOT/venvs/anatomy-edit/bin/python" "$ROOT/venvs/sadtalker/bin/python" "$(command -v python3 || true)"; do ' +
+        'if test -x "$CANDIDATE" && "$CANDIDATE" -c \'import huggingface_hub\' >/dev/null 2>&1; then PYTHON="$CANDIDATE"; break; fi; done',
+      'test -n "$PYTHON" || exit 3',
+      `export ${spec.rootVariable}="$TARGET"`,
+      'export HF_HOME="$ROOT/cache/huggingface"',
+      '"$PYTHON" "$SCRIPT"',
+      'test -s "$TARGET/model_index.json"',
+    ].join('; ');
+    const result = await this.remote(command, this.modelProvisionTimeoutMs);
+    if (result.code === 0) return;
+    if (result.code === 2) {
+      throw new Error(`The media pod is missing its ${kind} model provisioner; sync the media service before retrying.`);
     }
+    if (result.code === 3) {
+      throw new Error('The media pod has no Python environment capable of downloading model assets.');
+    }
+    const detail = result.stderr.replace(/\s+/g, ' ').trim().slice(-500);
+    throw new Error(`Automatic ${kind} model provisioning failed${detail ? `: ${detail}` : '.'}`);
+  }
+
+  /**
+   * The persistent launcher may outlive the container image that created it.
+   * Select an installed interpreter by capabilities, then restart the service
+   * through a private PATH shim only when its current interpreter is stale.
+   */
+  private async ensureModelRuntime(requirement: MediaRequirement): Promise<void> {
+    const imageRequired = requirement !== 'video'
+      && this.env.DACAI_IMAGE_BACKEND?.trim().toLowerCase() === 'dacais-media';
+    const videoRequired = requirement !== 'image'
+      && this.env.DACAI_VIDEO_BACKEND?.trim().toLowerCase() === 'dacais-media';
+    if (!imageRequired && !videoRequired) return;
+
+    const result = await this.remote(mediaRuntimeRecoveryCommand(), 90_000);
+    if (result.code === 0) return;
+    if (result.code === 3) {
+      throw new Error('The media pod has no CUDA-capable Python environment with the required diffusion runtime.');
+    }
+    const detail = result.stderr.replace(/\s+/g, ' ').trim().slice(-500);
+    throw new Error(`The media service could not restart with a compatible diffusion runtime (exit ${result.code})${detail ? `: ${detail}` : '.'}`);
+  }
+
+  private requireModels(health: HealthResult, requirement: MediaRequirement): void {
+    if (this.modelsReady(health, requirement)) return;
+    if (requirement !== 'video' && !health.imageModel) {
+      const recovery = this.autoProvisionModels
+        ? 'Automatic provisioning did not produce a loadable image model.'
+        : 'Set DACAI_MEDIA_AUTOPROVISION_MODELS=true to restore it on the managed pod.';
+      throw new Error(`The media endpoint is healthy, but its image model is unavailable. ${recovery}`);
+    }
+    throw new Error('The media endpoint is healthy, but its video model is unavailable.');
+  }
+
+  private requireConfiguredModels(health: HealthResult): void {
+    this.requireModels(health, 'configured');
   }
 
   private async monitorOnce(): Promise<void> {
@@ -364,7 +507,7 @@ export class RunpodMediaManager {
     catch { await this.initialize(); return; }
     const health = await this.health(media.baseUrl, media.headers);
     if (health.healthy) {
-      try { this.requireConfiguredModels(health); this.markReady(health); return; }
+      try { this.requireConfiguredModels(health); this.markAvailable(health); return; }
       catch { /* Reinitialize below so the UI reports the missing model. */ }
     }
     this.update({ ready: false, phase: 'initializing', service: health });

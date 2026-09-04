@@ -16,6 +16,7 @@ DACAI_MEDIA_TRANSPORT=ssh-tunnel
 DACAI_MEDIA_BASE_URL=http://127.0.0.1:18090
 DACAI_MEDIA_REMOTE_PORT=8090
 DACAI_MEDIA_AUTOSTART=true
+DACAI_MEDIA_AUTOPROVISION_MODELS=true
 ```
 
 `pnpm dev` is the only startup command. The server supervises the full media
@@ -27,6 +28,10 @@ loopback-only tunnel, and reconnects if the tunnel drops. The sidebar reports
 `DACAI_MEDIA_AUTOSTART=true` is an explicit cost opt-in. Set it to `false` when a
 developer should start the pod manually. The legacy `pnpm run runpod:media`
 command remains available for diagnostics but is not needed during normal dev.
+When `DACAI_MEDIA_AUTOPROVISION_MODELS` is omitted it follows that same opt-in:
+the authenticated SSH supervisor restores missing image/video weights with the
+pod's checked provisioners and selects an installed diffusion-capable Python
+runtime. Set it explicitly to `false` to require manual model acquisition.
 
 After changing the media service or one of its model runners, explicitly
 refresh the persistent GPU-volume service before testing a feature that depends
@@ -88,6 +93,7 @@ DACAI_MEDIA_TRANSPORT=https
 DACAI_MEDIA_BASE_URL=https://media.example.com
 DACAI_MEDIA_TOKEN=<runtime secret>
 DACAI_MEDIA_AUTOSTART=false
+DACAI_MEDIA_AUTOPROVISION_MODELS=false
 ```
 
 The tools reject plain HTTP, URL-embedded credentials, and an HTTPS production

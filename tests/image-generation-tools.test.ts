@@ -194,6 +194,27 @@ describe('photoreal image generation tool', () => {
     expect(imageGenerationConfigured({ DACAI_IMAGE_BACKEND: 'dacais-media' })).toBe(true);
   });
 
+  it('falls back to img2img when the optional instruct-edit model is unavailable', async () => {
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).endsWith('/v1/instruct-edit')) {
+        return new Response(JSON.stringify({ error: 'instruct model is unavailable' }), { status: 501 });
+      }
+      expect(String(url)).toBe('http://127.0.0.1:18090/v1/edit-image');
+      expect(JSON.parse(String(init?.body))).toMatchObject({ prompt: 'make the sky dramatic' });
+      return new Response(JSON.stringify({ imageBase64: PNG.toString('base64'), model: 'sdxl-base', seed: 9 }), { status: 200 });
+    });
+    const tool = createImageGenerationTools({
+      env: { DACAI_IMAGE_BACKEND: 'dacais-media', DACAI_MEDIA_TOKEN: 'local-media-token' },
+      fetch: fetchMock as typeof fetch,
+    })[0];
+    const root = await workspace();
+    await writeFile(join(root, 'source.png'), PNG);
+
+    await expect(tool.execute({ prompt: 'make the sky dramatic', sourcePath: 'source.png', outputPath: 'fallback.png' }, { workspaceRoot: root }))
+      .resolves.toMatchObject({ path: 'fallback.png', model: 'sdxl-base' });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it('auto-approves bounded image writes and treats loopback media as internal infrastructure', () => {
     const loopback = createImageGenerationTools({
       env: { DACAI_IMAGE_BACKEND: 'dacais-media', DACAI_MEDIA_TRANSPORT: 'ssh-tunnel' },
