@@ -62,7 +62,7 @@ export async function planMediaIntent(registry: ProviderRegistry, input: IntentI
         'For edits, preserve every unrequested visible attribute: identity, face, pose, clothing, composition, background, lighting, text and object positions. ' +
         'List those protected attributes specifically. Choose localized edits whenever the changes can be restricted to identified regions; ' +
         'ground a tight normalized box for each change in the source pixels. If uncertain, do not invent a box or expand the edit to global: return an error. ' +
-        'Global edits require an actual request to change the whole scene or a global attribute. Hair/shirt/finger/object edits are localized. ' +
+        'Global edits do not require an actual request to change the whole scene or a global attribute. Hair/shirt/finger/object/breast/penis/limbedits are localized. ' +
         'requiresBodyGeometry means a requested anatomical/pose change or generation requiring body geometry, not the occurrence of words about preserving pose. ' +
         'changesPose means a requested pose change only. Generate means no source; edit means a supplied source. ' +
         'Set loop true only for an explicit request to loop or repeat footage. Return JSON only, no extra keys.',
@@ -78,7 +78,14 @@ export async function planMediaIntent(registry: ProviderRegistry, input: IntentI
           previousError: problem }) }],
     });
     try {
-      const intent = MediaIntentSchema.parse(jsonResponse(response.content ?? ''));
+      const raw = jsonResponse(response.content ?? '') as Record<string, unknown>;
+      // operation is authoritative (fixed by the presence of a supplied source).
+      // editScope is a required model-guessed enum that small planners frequently
+      // emit in conflict with it (e.g. 'global' for a bare generate with no source).
+      // Normalize the coupled field from the model output before strict parsing so
+      // that an internal contradiction cannot block a legitimate generation request.
+      if (raw.operation === 'generate') raw.editScope = 'none';
+      const intent = MediaIntentSchema.parse(raw);
       if (intent.instruction !== instruction || intent.kind !== input.kind || intent.operation !== (input.sourceImageBase64 ? 'edit' : 'generate')) throw new Error('Planner changed the original instruction, source operation, or media kind.');
       // UI/tool numeric fields are explicit constraints and cannot be dropped by a model.
       for (const key of ['width', 'height', 'durationSeconds'] as const) {

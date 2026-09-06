@@ -91,6 +91,42 @@ describe('precision intent planning', () => {
     const result = await planMediaIntent(registry, { kind: 'video', instruction, width: 512, durationSeconds: 30, loop: true });
     expect(result.constraints).toMatchObject({ width: 512, durationSeconds: 30, loop: true });
   });
+  it('normalizes a planner guess of a conflicting editScope for a bare generate', async () => {
+    // Reproduces the reported video.generate block: operation is fixed to
+    // 'generate' because no source was supplied, but a small planner guesses the
+    // required editScope enum as 'global'. That internal contradiction used to
+    // fail strict parsing as "Generation has no source edit scope." and surface
+    // as TASK_BLOCKED/TASK_FAILED. A generate has no source, so editScope must be
+    // derived as 'none'.
+    const instruction = 'fix the TASK_BLOCKED problem';
+    const response = { ...intentFixture(instruction, { generate: true }), kind: 'video', editScope: 'global' };
+    const { registry } = registryWith(response);
+    const intent = await planMediaIntent(registry, { kind: 'video', instruction });
+    expect(intent).toMatchObject({ operation: 'generate', kind: 'video', editScope: 'none', instruction });
+  });
+  it('accepts a pure generate with an empty changes array; only an edit must describe a change', async () => {
+    // A generate has no source, so it has no source edits to enumerate. The
+    // schema used to require changes.min(1) on every intent, which forced the
+    // planner to either invent a change list or return [] and fail with
+    // "Array must contain at least 1 element(s)" on changes — every attempt.
+    const instruction = 'render an abstract landscape';
+    const { registry } = registryWith({ ...intentFixture(instruction, { generate: true }), kind: 'video', changes: [] });
+    const intent = await planMediaIntent(registry, { kind: 'video', instruction });
+    expect(intent).toMatchObject({ operation: 'generate', editScope: 'none', changes: [] });
+    // An edit is still required to name at least one change.
+    const edit = intentFixture('change shirt');
+    expect(MediaIntentSchema.safeParse({ ...edit, changes: [] }).success).toBe(false);
+    expect(MediaIntentSchema.safeParse(edit).success).toBe(true);
+  });
+  it('verifies a generation with no requested changes', async () => {
+    const intent = MediaIntentSchema.parse({ ...intentFixture('Generate a scene', { generate: true }), kind: 'video', changes: [] });
+    const { registry, chat } = registryWith({ ...report(intent), requestedChanges: [] });
+    chat.mockResolvedValueOnce({ content: JSON.stringify({ ...report(intent), requestedChanges: [] }) })
+      .mockResolvedValueOnce({ content: JSON.stringify({ observation: 'A coherent, artifact-free scene.', defects: [], visuallyCoherent: true }) });
+    const verification = await verifyMediaIntent(registry, { intent, sourceImages: [], resultImages: ['result'], metadata: {} });
+    expect(verification.requestedChanges).toEqual([]);
+    expect(MediaIntentSchema.safeParse(intent).success).toBe(true);
+  });
 });
 
 describe('verified artifact publication', () => {

@@ -16,7 +16,7 @@ export const MediaIntentSchema = z.object({
     action: z.string().trim().min(1).max(1000),
     target: z.string().trim().min(1).max(500),
     region: MediaRegionSchema.optional(),
-  }).strict()).min(1).max(24),
+  }).strict()).max(24),
   protectedAttributes: z.array(z.string().trim().min(1).max(500)).max(40),
   requiresBodyGeometry: z.boolean(),
   changesPose: z.boolean(),
@@ -48,6 +48,12 @@ export const MediaIntentSchema = z.object({
   if (intent.operation === 'edit' && intent.editScope === 'none') {
     context.addIssue({ code: z.ZodIssueCode.custom, message: 'An edit must declare its scope.', path: ['editScope'] });
   }
+  // A generate has no source, so it has no edits to describe; only an edit
+  // must name at least one change. This keeps the contract satisfiable for a
+  // pure generation instead of forcing a model to invent a change list.
+  if (intent.operation === 'edit' && intent.changes.length < 1) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: 'An edit must describe at least one change.', path: ['changes'] });
+  }
   if (intent.editScope === 'localized' && intent.changes.some((change) => !change.region)) {
     context.addIssue({ code: z.ZodIssueCode.custom, message: 'Every localized change requires a visually grounded target region.', path: ['changes'] });
   }
@@ -65,7 +71,7 @@ const TargetedCheckSchema = CheckSchema.extend({ subject: z.string().trim().min(
 
 /** All booleans are required and strictly typed; unknown/malformed is never a pass. */
 export const MediaVerificationSchema = z.object({
-  requestedChanges: z.array(TargetedCheckSchema).min(1).max(24),
+  requestedChanges: z.array(TargetedCheckSchema).max(24),
   protectedAttributes: z.array(TargetedCheckSchema).max(40),
   explicitConstraints: z.array(TargetedCheckSchema).max(40),
   subjects: CheckSchema,
