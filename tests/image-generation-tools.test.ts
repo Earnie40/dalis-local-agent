@@ -9,7 +9,8 @@ import {
   imageGenerationRequiresNetwork,
 } from '../packages/tools/src/image-generation-tools';
 
-const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+import { pngFixture, intentFixture } from './media-fixtures';
+const PNG = pngFixture();
 const cleanup: string[] = [];
 
 afterEach(async () => {
@@ -24,6 +25,7 @@ async function workspace(): Promise<string> {
 
 describe('photoreal image generation tool', () => {
   it('generates and hashes a workspace PNG through a local Automatic1111-compatible API', async () => {
+    const PNG = pngFixture(768, 1024);
     const fetchMock = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       const request = JSON.parse(String(init?.body)) as Record<string, unknown>;
       expect(request).toMatchObject({ prompt: 'photoreal portrait', width: 768, height: 1024, batch_size: 1 });
@@ -117,6 +119,7 @@ describe('photoreal image generation tool', () => {
     const result = await tool.execute({
       prompt: 'make both people walk naturally with correct hands and legs',
       sourcePath: 'source.png',
+      intent: intentFixture('make both people walk naturally with correct hands and legs', { geometry: true }),
       outputPath: 'walking.png',
       seed: 17,
     }, { workspaceRoot: root }) as Record<string, unknown>;
@@ -137,6 +140,7 @@ describe('photoreal image generation tool', () => {
     })[0];
 
     const result = await tool.execute({
+      intent: intentFixture('adult full-body medical anatomy reference, side view', { geometry: true, generate: true }),
       prompt: 'adult full-body medical anatomy reference, side view', outputPath: 'anatomy.png', seed: 31,
     }, { workspaceRoot: await workspace() }) as Record<string, unknown>;
 
@@ -154,6 +158,7 @@ describe('photoreal image generation tool', () => {
     await writeFile(join(root, 'source.png'), PNG);
 
     await expect(tool.execute({
+      intent: intentFixture('correct the full-body pose', { geometry: true }),
       prompt: 'correct the full-body pose', sourcePath: 'source.png', outputPath: 'corrected.png',
     }, { workspaceRoot: root })).rejects.toThrow('Anatomy-capable image backend failed');
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -168,7 +173,7 @@ describe('photoreal image generation tool', () => {
     expect(imageEditRequiresAnatomyPipeline('replace the cloudy sky')).toBe(false);
   });
 
-  it('generates and edits through the fallback img2img /v1/edit-image API', async () => {
+  it('uses explicitly configured img2img /v1/edit-image API', async () => {
     const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const request = JSON.parse(String(init?.body)) as Record<string, unknown>;
       expect(String(url)).toBe('http://127.0.0.1:18090/v1/edit-image');
@@ -194,25 +199,14 @@ describe('photoreal image generation tool', () => {
     expect(imageGenerationConfigured({ DACAI_IMAGE_BACKEND: 'dacais-media' })).toBe(true);
   });
 
-  it('falls back to img2img when the optional instruct-edit model is unavailable', async () => {
-    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
-      if (String(url).endsWith('/v1/instruct-edit')) {
-        return new Response(JSON.stringify({ error: 'instruct model is unavailable' }), { status: 501 });
-      }
-      expect(String(url)).toBe('http://127.0.0.1:18090/v1/edit-image');
-      expect(JSON.parse(String(init?.body))).toMatchObject({ prompt: 'make the sky dramatic' });
-      return new Response(JSON.stringify({ imageBase64: PNG.toString('base64'), model: 'sdxl-base', seed: 9 }), { status: 200 });
-    });
-    const tool = createImageGenerationTools({
-      env: { DACAI_IMAGE_BACKEND: 'dacais-media', DACAI_MEDIA_TOKEN: 'local-media-token' },
-      fetch: fetchMock as typeof fetch,
-    })[0];
+  it.each([400, 404, 501])('does not switch instruction editing methods after HTTP %s', async (status) => {
+    const fetchMock = vi.fn(async (_url: string | URL | Request) => new Response('editor unavailable', { status }));
+    const tool = createImageGenerationTools({ env: { DACAI_IMAGE_BACKEND: 'dacais-media' }, fetch: fetchMock as typeof fetch })[0];
     const root = await workspace();
     await writeFile(join(root, 'source.png'), PNG);
-
-    await expect(tool.execute({ prompt: 'make the sky dramatic', sourcePath: 'source.png', outputPath: 'fallback.png' }, { workspaceRoot: root }))
-      .resolves.toMatchObject({ path: 'fallback.png', model: 'sdxl-base' });
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await expect(tool.execute({ prompt: 'change only the shirt color', sourcePath: 'source.png', outputPath: 'edit.png' }, { workspaceRoot: root })).rejects.toThrow(`HTTP ${status}`);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/v1/instruct-edit');
   });
 
   it('auto-approves bounded image writes and treats loopback media as internal infrastructure', () => {

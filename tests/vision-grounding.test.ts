@@ -156,7 +156,7 @@ describe('interpretMediaInstruction', () => {
 });
 
 describe('evaluateSourceConditionedMedia', () => {
-  it('evaluates still image edits across the 4 key criteria', async () => {
+  it('evaluates still image edits across the 5 key criteria', async () => {
     const mockAudit = {
       requestedChangeOccurred: true,
       unintendedChangesDetected: false,
@@ -199,6 +199,7 @@ describe('evaluateSourceConditionedMedia', () => {
       unintendedChangesDetected: false,
       subjectPreserved: true,
       compositionPreserved: true,
+      anatomyPreserved: true,
       temporalConsistencyPreserved: true,
       summary: 'Consistent motion with structural continuity.',
       details: {
@@ -206,6 +207,7 @@ describe('evaluateSourceConditionedMedia', () => {
         unintendedChangeDetails: 'None.',
         subjectDetails: 'Subject consistent across frames.',
         compositionDetails: 'Perspective stable.',
+        anatomyDetails: 'Body proportions and limbs remain consistent.',
         temporalDetails: 'No flickering or warping.',
       },
     };
@@ -221,8 +223,81 @@ describe('evaluateSourceConditionedMedia', () => {
 
     expect(report.temporalConsistencyPreserved).toBe(true);
     expect(report.subjectPreserved).toBe(true);
+    expect(report.anatomyPreserved).toBe(true);
 
     const request = chat.mock.calls[0][0] as { messages: Array<{ images?: string[] }> };
     expect(request.messages[0].images).toEqual(['c291cmNl', 'cmVzdWx0', 'ZnJhbWUx', 'ZnJhbWUy']);
+  });
+
+  const completeEvidence = {
+    requestedChangeOccurred: true,
+    unintendedChangesDetected: false,
+    subjectPreserved: true,
+    compositionPreserved: true,
+    anatomyPreserved: true,
+    summary: 'Requested change verified and source preserved.',
+    details: {
+      requestedChangeDetails: 'Hair changed to blonde.',
+      unintendedChangeDetails: 'None detected.',
+      subjectDetails: 'Identity preserved.',
+      compositionDetails: 'Framing preserved.',
+      anatomyDetails: 'Body proportions preserved.',
+    },
+  };
+  const evaluationInput = {
+    sourceImageBase64: 'c291cmNl', resultImageBase64: 'cmVzdWx0', instruction: 'make her hair blonde',
+  };
+
+  it.each(['requestedChangeOccurred', 'unintendedChangesDetected', 'subjectPreserved', 'compositionPreserved', 'anatomyPreserved'])
+    ('rejects absent or string-valued %s instead of reporting verified preservation', async (field) => {
+      for (const invalidValue of [undefined, 'true', 'false', null, 1]) {
+        const content = JSON.stringify({ ...completeEvidence, [field]: invalidValue });
+        const registry = registryWith(vi.fn(async () => ({ content })));
+        await expect(evaluateSourceConditionedMedia(registry, evaluationInput)).rejects.toThrow(VisionUnavailableError);
+      }
+    });
+
+  it.each(['requestedChangeDetails', 'unintendedChangeDetails', 'subjectDetails', 'compositionDetails', 'anatomyDetails'])
+    ('rejects missing or blank %s', async (field) => {
+      for (const invalidValue of [undefined, '', ' \n ']) {
+        const content = JSON.stringify({ ...completeEvidence, details: { ...completeEvidence.details, [field]: invalidValue } });
+        const registry = registryWith(vi.fn(async () => ({ content })));
+        await expect(evaluateSourceConditionedMedia(registry, evaluationInput)).rejects.toThrow(/preservation was not verified/);
+      }
+    });
+
+  it.each(['', 'not JSON', '{', 'null', '[]', '{}', JSON.stringify({ ...completeEvidence, summary: ' ' })])
+    ('rejects malformed or incomplete evaluator evidence (%s)', async (content) => {
+      const registry = registryWith(vi.fn(async () => ({ content })));
+      await expect(evaluateSourceConditionedMedia(registry, evaluationInput)).rejects.toThrow(VisionUnavailableError);
+    });
+
+  it('requires explicit temporal evidence for video frames', async () => {
+    for (const invalidTemporal of [undefined, 'true', 'false']) {
+      const content = JSON.stringify({
+        ...completeEvidence, temporalConsistencyPreserved: invalidTemporal,
+        details: { ...completeEvidence.details, temporalDetails: 'No flicker detected.' },
+      });
+      const registry = registryWith(vi.fn(async () => ({ content })));
+      await expect(evaluateSourceConditionedMedia(registry, {
+        ...evaluationInput, additionalVideoFramesBase64: ['ZnJhbWUx'],
+      })).rejects.toThrow(VisionUnavailableError);
+    }
+    const registry = registryWith(vi.fn(async () => ({ content: JSON.stringify({
+      ...completeEvidence, temporalConsistencyPreserved: true,
+    }) })));
+    await expect(evaluateSourceConditionedMedia(registry, {
+      ...evaluationInput, additionalVideoFramesBase64: ['ZnJhbWUx'],
+    })).rejects.toThrow(VisionUnavailableError);
+  });
+
+  it('retains an explicit negative preservation verdict', async () => {
+    const registry = registryWith(vi.fn(async () => ({ content: JSON.stringify({
+      ...completeEvidence, anatomyPreserved: false, unintendedChangesDetected: true,
+      details: { ...completeEvidence.details, anatomyDetails: 'Shoulder proportions drifted.', unintendedChangeDetails: 'Body shape changed.' },
+    }) })));
+    expect(await evaluateSourceConditionedMedia(registry, evaluationInput)).toMatchObject({
+      anatomyPreserved: false, unintendedChangesDetected: true,
+    });
   });
 });

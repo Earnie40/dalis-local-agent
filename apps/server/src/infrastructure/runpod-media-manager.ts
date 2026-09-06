@@ -10,6 +10,17 @@ export type MediaPhase =
 
 type MediaRequirement = 'configured' | 'image' | 'video';
 
+export type MediaWorkflow = 'imageGeneration' | 'imageEditing' | 'anatomyGeneration' | 'anatomyEditing' | 'videoGeneration' | 'imageAnimation' | 'narratedVideo';
+export function mediaWorkflowAvailability(body: Record<string, unknown>): Record<MediaWorkflow, boolean> {
+  const available = (key: string) => typeof body[key] === 'string' && Boolean((body[key] as string).trim());
+  return {
+    imageGeneration: available('backdropModel'), imageEditing: available('instructEditModel'),
+    anatomyGeneration: available('anatomyGenerationModel'), anatomyEditing: available('anatomyEditModel'),
+    videoGeneration: available('anatomyVideoModel'), imageAnimation: available('backdropVideoModel'),
+    narratedVideo: available('ttsModel') && available('avatarModel') && available('backdropModel'),
+  };
+}
+
 export interface RunpodMediaStatus {
   configured: boolean;
   ready: boolean;
@@ -18,7 +29,7 @@ export interface RunpodMediaStatus {
   autoStart: boolean;
   autoProvisionModels: boolean;
   pod?: { id: string; name?: string; connected: boolean };
-  service: { healthy: boolean; imageModel: boolean; videoModel: boolean };
+  service: { healthy: boolean; imageModel: boolean; videoModel: boolean; workflows?: Record<MediaWorkflow, boolean>; readinessBasis?: string };
   error?: string;
   checkedAt: string;
 }
@@ -150,6 +161,13 @@ export class RunpodMediaManager {
   }
 
   status(): RunpodMediaStatus { return structuredClone(this.state); }
+
+  /** Selected workflow availability, distinct from a successful model inference. */
+  async workflowStatus(workflow: MediaWorkflow): Promise<{ ready: boolean; basis: string }> {
+    const media = resolveMediaConnection(this.env);
+    const health = await this.health(media.baseUrl, media.headers);
+    return { ready: health.healthy && health.workflows?.[workflow] === true, basis: health.readinessBasis ?? 'unavailable' };
+  }
 
   /**
    * Image requests must not wait for an unrelated video model to warm up.
@@ -373,8 +391,10 @@ export class RunpodMediaManager {
         method: 'GET', redirect: 'error', headers, signal: AbortSignal.timeout(3_000),
       });
       if (!response.ok) return { healthy: false, imageModel: false, videoModel: false };
-      const body = await response.json() as { backdropModel?: unknown; backdropVideoModel?: unknown };
-      return { healthy: true, imageModel: typeof body.backdropModel === 'string', videoModel: typeof body.backdropVideoModel === 'string' };
+      const body = await response.json() as Record<string, unknown>;
+      const workflows = mediaWorkflowAvailability(body);
+      return { healthy: true, imageModel: workflows.imageGeneration, videoModel: workflows.videoGeneration,
+        workflows, readinessBasis: typeof body.readinessBasis === 'string' ? body.readinessBasis : 'advertised assets; inference not verified' };
     } catch { return { healthy: false, imageModel: false, videoModel: false }; }
   }
 
@@ -436,7 +456,7 @@ export class RunpodMediaManager {
   private async provisionModel(kind: 'image' | 'video'): Promise<void> {
     const spec = kind === 'image'
       ? { script: 'download_sdxl_model.py', directory: 'sdxl-base', rootVariable: 'DACAIS_SDXL_MODEL_ROOT' }
-      : { script: 'download_svd_model.py', directory: 'svd-xt', rootVariable: 'DACAIS_SVD_MODEL_ROOT' };
+      : { script: 'download_anatomy_models.py', directory: 'wan2.2-ti2v-5b', rootVariable: 'DACAIS_ANATOMY_VIDEO_MODEL_ROOT' };
     const command = [
       'set -eu',
       'ROOT=/workspace/dacais-media',
@@ -449,6 +469,7 @@ export class RunpodMediaManager {
       'test -n "$PYTHON" || exit 3',
       `export ${spec.rootVariable}="$TARGET"`,
       'export HF_HOME="$ROOT/cache/huggingface"',
+      ...(kind === 'video' ? ['export DACAIS_ANATOMY_COMPONENTS=video'] : []),
       '"$PYTHON" "$SCRIPT"',
       'test -s "$TARGET/model_index.json"',
     ].join('; ');
@@ -525,4 +546,4 @@ export class RunpodMediaManager {
   }
 }
 
-interface HealthResult { healthy: boolean; imageModel: boolean; videoModel: boolean }
+interface HealthResult { healthy: boolean; imageModel: boolean; videoModel: boolean; workflows?: Record<MediaWorkflow, boolean>; readinessBasis?: string }

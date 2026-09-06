@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import type { ProviderRegistry } from '@dacai-local-agent/providers';
 import type { VisionAttachment } from './workspace-uploads';
 
@@ -164,7 +165,8 @@ export async function interpretMediaInstruction(
   const match = raw.match(/\{[\s\S]*\}/);
   try {
     const parsed = JSON.parse(match ? match[0] : raw) as Record<string, unknown>;
-    const interpreted = regionText(parsed.instruction);
+    const interpreted = typeof parsed.instruction === 'string' ? parsed.instruction.trim() : '';
+    if (interpreted.length > 4000) throw new Error('instruction exceeds 4000 characters');
     if (!interpreted) throw new Error('empty instruction');
     return {
       instruction: interpreted,
@@ -179,7 +181,7 @@ export async function interpretMediaInstruction(
     };
   } catch {
     return {
-      instruction: instruction.trim().slice(0, MAX_REGION_TEXT_CHARS),
+      instruction: instruction.trim(),
       targetRegions: [],
       preserve: [],
       alias: resolved.alias ?? 'agent',
@@ -420,47 +422,21 @@ export async function evaluateSourceConditionedMedia(
     signal,
   });
 
-  const raw = (response.content ?? '').trim();
+  const checkText = z.string().trim().min(1);
+  const schema = z.object({
+    requestedChangeOccurred: z.boolean(), unintendedChangesDetected: z.boolean(),
+    subjectPreserved: z.boolean(), compositionPreserved: z.boolean(), anatomyPreserved: z.boolean(),
+    temporalConsistencyPreserved: isVideo ? z.boolean() : z.boolean().optional(),
+    summary: checkText,
+    details: z.object({ requestedChangeDetails: checkText, unintendedChangeDetails: checkText,
+      subjectDetails: checkText, compositionDetails: checkText, anatomyDetails: checkText,
+      temporalDetails: isVideo ? checkText : checkText.optional() }).strict(),
+  }).strict();
   try {
-    const jsonMatch = raw.match(/\{[\s\S]*\}/);
-    const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : raw) as Partial<EditEvaluationReport>;
-    return {
-      requestedChangeOccurred: Boolean(parsed.requestedChangeOccurred),
-      unintendedChangesDetected: Boolean(parsed.unintendedChangesDetected),
-      subjectPreserved: Boolean(parsed.subjectPreserved),
-      compositionPreserved: Boolean(parsed.compositionPreserved),
-      anatomyPreserved: parsed.anatomyPreserved !== undefined ? Boolean(parsed.anatomyPreserved) : true,
-      temporalConsistencyPreserved: isVideo ? Boolean(parsed.temporalConsistencyPreserved) : undefined,
-      summary: parsed.summary || collapse(raw),
-      details: {
-        requestedChangeDetails: parsed.details?.requestedChangeDetails || '',
-        unintendedChangeDetails: parsed.details?.unintendedChangeDetails || '',
-        subjectDetails: parsed.details?.subjectDetails || '',
-        compositionDetails: parsed.details?.compositionDetails || '',
-        anatomyDetails: parsed.details?.anatomyDetails || '',
-        temporalDetails: isVideo ? parsed.details?.temporalDetails : undefined,
-      },
-      alias: resolved.alias ?? VISION_ALIAS,
-      model: resolved.model,
-    };
+    const raw = (response.content ?? '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+    const parsed = schema.parse(JSON.parse(raw));
+    return { ...parsed, alias: resolved.alias ?? VISION_ALIAS, model: resolved.model };
   } catch {
-    return {
-      requestedChangeOccurred: true,
-      unintendedChangesDetected: false,
-      subjectPreserved: true,
-      compositionPreserved: true,
-      anatomyPreserved: true,
-      temporalConsistencyPreserved: isVideo ? true : undefined,
-      summary: collapse(raw),
-      details: {
-        requestedChangeDetails: collapse(raw),
-        unintendedChangeDetails: 'No unintended changes detected.',
-        subjectDetails: 'Preserved.',
-        compositionDetails: 'Preserved.',
-        anatomyDetails: 'Anatomy and body proportions preserved.',
-      },
-      alias: resolved.alias ?? VISION_ALIAS,
-      model: resolved.model,
-    };
+    throw new VisionUnavailableError('The visual evaluator returned malformed or incomplete evidence; preservation was not verified.');
   }
 }

@@ -1,13 +1,16 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, unlink } from 'node:fs/promises';
 import { dirname, extname, isAbsolute, relative } from 'node:path';
 import { resolveWithinWorkspace } from '@dacai-local-agent/security';
 import type { ToolDefinition, ToolExecutionContext } from './types';
 import { resolveMediaConnection } from './media-connection';
+import { parseMediaIntent } from '@dacai-local-agent/shared';
+import { probeVideo, validateVideoConstraints, type VideoProbe } from './media-artifacts';
 
 interface VideoGenerationServices {
   env: NodeJS.ProcessEnv;
   fetch: typeof fetch;
+  probeVideo?: VideoProbe;
 }
 
 const DEFAULT_SERVICES: VideoGenerationServices = { env: process.env, fetch: globalThis.fetch };
@@ -92,7 +95,10 @@ export function createVideoGenerationTools(services: VideoGenerationServices = D
     inputSchema: {
       type: 'object',
       properties: {
-        prompt: { type: 'string', minLength: 1, maxLength: 2000 },
+        prompt: { type: 'string', minLength: 1, maxLength: 4000 },
+        intent: { type: 'object', description: 'Validated structured video intent and constraints.' },
+        correction: { type: 'string', maxLength: 2000 },
+        loop: { type: 'boolean', default: false },
         sourcePath: { type: 'string', minLength: 1, maxLength: 600, description: 'Optional workspace-relative PNG, JPEG, or WebP to animate.' },
         outputPath: { type: 'string', minLength: 1, maxLength: 600, pattern: '\\.mp4$' },
         negativePrompt: { type: 'string', maxLength: 2000 },
@@ -101,8 +107,8 @@ export function createVideoGenerationTools(services: VideoGenerationServices = D
         steps: { type: 'integer', minimum: 1, maximum: 100, default: 28 },
         guidance: { type: 'number', minimum: 1, maximum: 30, default: 6.5 },
         seed: { type: 'integer', minimum: -1, maximum: 2147483647, default: -1 },
-        frames: { type: 'integer', minimum: 5, maximum: 121, default: 121, description: 'Frames per Wan segment; long videos are assembled from bounded segments.' },
-        durationSeconds: { type: 'integer', minimum: 30, maximum: 120, default: 30, description: 'Minimum output duration. Long outputs are assembled from GPU-safe segments.' },
+        frames: { type: 'integer', minimum: 5, maximum: 121, default: 121, description: 'Frames per Wan segment; long videos use newly generated continuation segments.' },
+        durationSeconds: { type: 'number', minimum: 1, maximum: 120, default: 30, description: 'Requested output duration. Segments must progress temporally unless looping is explicitly requested.' },
         motionBucket: { type: 'integer', minimum: 1, maximum: 255, default: 60 },
         noiseAug: { type: 'number', minimum: 0, maximum: 1, default: 0.02 },
         sourceFps: { type: 'integer', minimum: 8, maximum: 24, default: 16 },
@@ -125,7 +131,16 @@ export function createVideoGenerationTools(services: VideoGenerationServices = D
       const source = input.sourcePath === undefined ? undefined : containedPath(ctx, input.sourcePath);
       const prompt = typeof input.prompt === 'string' ? input.prompt.trim() : '';
       if (!source && !prompt) throw new Error('prompt is required when sourcePath is not provided.');
-      if (prompt.length > 2000) throw new Error('prompt must be 2000 characters or fewer.');
+      if (prompt.length > 4000) throw new Error('prompt must be 4000 characters or fewer.');
+      const intent = input.intent === undefined ? undefined : parseMediaIntent(input.intent);
+      if (intent && intent.kind !== 'video') throw new Error('Video intent must describe a video.');
+      const width = integer(input.width ?? intent?.constraints.width, 1024, 512, 1536, 'width');
+      const height = integer(input.height ?? intent?.constraints.height, 576, 512, 1536, 'height');
+      const durationSeconds = decimal(input.durationSeconds ?? intent?.constraints.durationSeconds, 30, 1, 120, 'durationSeconds');
+      if (intent && ((intent.constraints.width !== undefined && width !== intent.constraints.width) || (intent.constraints.height !== undefined && height !== intent.constraints.height) || (intent.constraints.durationSeconds !== undefined && durationSeconds !== intent.constraints.durationSeconds))) throw new Error('Video constraints conflict with the structured intent.');
+      if (input.loop !== undefined && typeof input.loop !== 'boolean') throw new Error('loop must be a boolean.');
+      if (intent && input.loop !== undefined && input.loop !== intent.constraints.loop) throw new Error('loop conflicts with the structured intent.');
+      if (input.correction !== undefined && (typeof input.correction !== 'string' || input.correction.length > 2000)) throw new Error('correction must be at most 2000 characters.');
 
       let sourceData: Buffer | undefined;
       let mimeType: string | undefined;
@@ -137,6 +152,7 @@ export function createVideoGenerationTools(services: VideoGenerationServices = D
         }
       }
 
+      if (input.negativePrompt !== undefined && (typeof input.negativePrompt !== 'string' || input.negativePrompt.length > 2000)) throw new Error('negativePrompt must be at most 2000 characters.');
       const connection = resolveMediaConnection(services.env);
       const base = connection.baseUrl;
       const wanRequest = Boolean(prompt);
@@ -148,14 +164,15 @@ export function createVideoGenerationTools(services: VideoGenerationServices = D
         body: JSON.stringify({
           jobId: `agent-${randomUUID()}`,
           prompt,
-          negativePrompt: typeof input.negativePrompt === 'string' ? input.negativePrompt.trim().slice(0, 2000) : '',
-          width: integer(input.width, 1024, 512, 1536, 'width'),
-          height: integer(input.height, 576, 512, 1536, 'height'),
+          negativePrompt: typeof input.negativePrompt === 'string' ? input.negativePrompt.trim() : '',
+          width, height, intent,
+          correction: input.correction,
+          loop: intent?.constraints.loop ?? input.loop ?? false,
           steps: integer(input.steps, 28, 1, 100, 'steps'),
           guidanceScale: decimal(input.guidance, 6.5, 1, 30, 'guidance'),
           seed: integer(input.seed, -1, -1, 2147483647, 'seed') === -1 ? undefined : Number(input.seed),
           frames: integer(input.frames, 121, 5, 121, 'frames'),
-          durationSeconds: integer(input.durationSeconds, 30, 30, 120, 'durationSeconds'),
+          durationSeconds,
           motionBucket: integer(input.motionBucket, 60, 1, 255, 'motionBucket'),
           noiseAug: decimal(input.noiseAug, 0.02, 0, 1, 'noiseAug'),
           sourceFps: integer(input.sourceFps, 16, 8, 24, 'sourceFps'),
@@ -176,14 +193,23 @@ export function createVideoGenerationTools(services: VideoGenerationServices = D
         if (error.code === 'EEXIST') throw new Error('Video output already exists; choose a new outputPath.');
         throw error;
       });
+      let metadata;
+      try {
+        metadata = await (services.probeVideo ?? probeVideo)(output.absolute, ctx.signal);
+        validateVideoConstraints(metadata, { width, height, durationSeconds });
+      } catch (error) {
+        await unlink(output.absolute).catch(() => undefined);
+        throw error;
+      }
       return {
+        ...metadata,
         path: output.relative,
         format: 'mp4',
         bytes: video.byteLength,
         sha256: createHash('sha256').update(video).digest('hex'),
         backend: 'dacais-media',
         model: typeof body.videoModel === 'string' ? body.videoModel : body.model,
-        frames: typeof body.videoFrames === 'number' ? body.videoFrames : undefined,
+        method: wanRequest ? 'wan' : 'svd',
         peakVramMb: typeof body.peakVramMb === 'number' ? body.peakVramMb : undefined,
         anatomyValidation: wanRequest && body.anatomyValidation && typeof body.anatomyValidation === 'object'
           ? body.anatomyValidation

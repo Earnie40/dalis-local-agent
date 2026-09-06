@@ -8,8 +8,8 @@ import {
   storyVideoGenerationRequiresNetwork,
 } from '../packages/tools/src/story-video-generation-tools';
 
-const MP4 = Buffer.concat([Buffer.from([0, 0, 0, 12]), Buffer.from('ftypisom')]);
-const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+import { VIDEO_FIXTURE as MP4, mockVideoProbe, pngFixture } from './media-fixtures';
+const PNG = pngFixture(1280, 720);
 const cleanup: string[] = [];
 
 afterEach(async () => {
@@ -47,7 +47,7 @@ describe('story video generation tool', () => {
       if (path.startsWith('/v1/artifacts/')) return new Response(MP4, { status: 200, headers: { 'Content-Length': String(MP4.byteLength) } });
       throw new Error(`Unexpected media request: ${path}`);
     });
-    const tool = createStoryVideoGenerationTools({
+    const tool = createStoryVideoGenerationTools({ probeVideo: mockVideoProbe,
       env: { DACAI_IMAGE_BACKEND: 'dacais-media', DACAI_VIDEO_BACKEND: 'dacais-media' },
       fetch: fetchMock as typeof fetch,
       onProgress: (event) => progress.push(event.phase),
@@ -70,7 +70,7 @@ describe('story video generation tool', () => {
     const root = await workspace();
     await writeFile(join(root, 'character.png'), PNG);
     await writeFile(join(root, 'voice.wav'), Buffer.from('voice'));
-    const tool = createStoryVideoGenerationTools({ env: { DACAI_IMAGE_BACKEND: 'dacais-media', DACAI_VIDEO_BACKEND: 'dacais-media' }, fetch: vi.fn() as typeof fetch })[0];
+    const tool = createStoryVideoGenerationTools({ probeVideo: mockVideoProbe, env: { DACAI_IMAGE_BACKEND: 'dacais-media', DACAI_VIDEO_BACKEND: 'dacais-media' }, fetch: vi.fn() as typeof fetch })[0];
     await expect(tool.execute({
       durationSeconds: 30,
       characters: [{ id: 'ava', name: 'Ava', imagePath: 'character.png', voice: { kind: 'cloned', voiceId: 'ava-voice', referencePath: 'voice.wav', consent: false } }],

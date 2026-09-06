@@ -1,15 +1,42 @@
 import { describe, expect, it, vi } from 'vitest';
-import { RunpodMediaManager, startRunpodPod } from '../apps/server/src/infrastructure/runpod-media-manager';
+import { mediaWorkflowAvailability, RunpodMediaManager, startRunpodPod } from '../apps/server/src/infrastructure/runpod-media-manager';
 
 const ENDPOINT = { podId: 'pod-test-123', name: 'media-pod', host: '203.0.113.10', port: 22022 };
 
 function healthResponse(): Response {
-  return new Response(JSON.stringify({ backdropModel: 'sdxl', backdropVideoModel: 'svd-xt' }), {
+  return new Response(JSON.stringify({ backdropModel: 'sdxl', backdropVideoModel: 'svd-xt', anatomyVideoModel: 'wan2.2-ti2v-5b' }), {
     status: 200, headers: { 'Content-Type': 'application/json' },
   });
 }
 
 describe('Runpod media supervisor', () => {
+  it('distinguishes SVD animation from Wan generation and Qwen precision workflows', () => {
+    expect(mediaWorkflowAvailability({ backdropModel: 'sdxl', backdropVideoModel: 'svd-xt' })).toEqual({
+      imageGeneration: true, imageEditing: false, anatomyGeneration: false, anatomyEditing: false,
+      videoGeneration: false, imageAnimation: true, narratedVideo: false,
+    });
+    expect(mediaWorkflowAvailability({
+      anatomyGenerationModel: 'qwen-image', anatomyEditModel: 'qwen-image-edit', anatomyVideoModel: 'wan2.2-ti2v-5b',
+    })).toEqual({
+      imageGeneration: false, imageEditing: false, anatomyGeneration: true, anatomyEditing: true,
+      videoGeneration: true, imageAnimation: false, narratedVideo: false,
+    });
+  });
+
+  it.each([undefined, null, '', ' \t\n ', true, false, 1, {}])('does not advertise workflows for invalid model values (%j)', (value) => {
+    const body = Object.fromEntries([
+      'backdropModel', 'instructEditModel', 'anatomyGenerationModel', 'anatomyEditModel',
+      'anatomyVideoModel', 'backdropVideoModel', 'ttsModel', 'avatarModel',
+    ].map((key) => [key, value]));
+    expect(Object.values(mediaWorkflowAvailability(body))).toEqual(Array(7).fill(false));
+  });
+
+  it.each(['ttsModel', 'avatarModel', 'backdropModel'])('requires %s for narrated video', (missingModel) => {
+    const body = { ttsModel: 'tts', avatarModel: 'avatar', backdropModel: 'sdxl' };
+    expect(mediaWorkflowAvailability(body).narratedVideo).toBe(true);
+    expect(mediaWorkflowAvailability({ ...body, [missingModel]: '' }).narratedVideo).toBe(false);
+  });
+
   it('uses REST v2 to start an explicitly configured pod', async () => {
     const fetchMock = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       expect(init?.method).toBe('POST');
@@ -204,20 +231,20 @@ describe('Runpod media supervisor', () => {
     manager.stop();
   });
 
-  it('waits for a video model before admitting a long-form video job', async () => {
+  it('does not admit a video generation job when only SVD animation is available', async () => {
     const manager = new RunpodMediaManager({
       env: {
         DACAI_IMAGE_BACKEND: 'dacais-media', DACAI_VIDEO_BACKEND: 'dacais-media',
         DACAI_MEDIA_TRANSPORT: 'loopback', DACAI_MEDIA_BASE_URL: 'http://127.0.0.1:8090',
       },
-      fetchImpl: (async () => new Response(JSON.stringify({ backdropModel: 'sdxl' }), { status: 200 })) as typeof fetch,
+      fetchImpl: (async () => new Response(JSON.stringify({ backdropModel: 'sdxl', backdropVideoModel: 'svd-xt' }), { status: 200 })) as typeof fetch,
       startupAttempts: 1,
       sleep: async () => undefined,
     });
 
     expect(await manager.ensureVideoReady()).toMatchObject({
       ready: false,
-      service: { healthy: true, imageModel: true, videoModel: false },
+      service: { healthy: true, imageModel: true, videoModel: false, workflows: { imageAnimation: true, videoGeneration: false } },
     });
   });
 

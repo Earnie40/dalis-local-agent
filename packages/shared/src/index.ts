@@ -3,6 +3,7 @@ export * from './model-aliases';
 export * from './types';
 export * from './utils';
 export * from './studio';
+export * from './media-intent';
 export * from './db/pool';
 export * from './db/migrate';
 export * from './db/conversation-store';

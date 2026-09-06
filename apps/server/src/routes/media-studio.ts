@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { PrecisionMediaExecutor } from '../precision-media';
+import type { ToolExecutor } from '@dacai-local-agent/agent-core';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { basename, extname, isAbsolute, relative } from 'node:path';
 import type { FastifyInstance } from 'fastify';
@@ -33,8 +35,8 @@ const ImageRequestSchema = z.object({
   negativePrompt: z.string().trim().max(2_000).optional(),
   sourcePath: z.string().trim().min(1).max(600).optional(),
   outputName: z.string().trim().min(1).max(100).optional(),
-  width: z.number().int().min(256).max(1536).default(1024),
-  height: z.number().int().min(256).max(1536).default(1024),
+  width: z.number().int().min(256).max(1536).optional(),
+  height: z.number().int().min(256).max(1536).optional(),
   strength: z.number().min(.05).max(1).default(.65),
 }).strict();
 
@@ -205,10 +207,10 @@ function makeStoryboardGenerator(deps: MediaStudioDependencies): GenerateStorybo
   };
 }
 
-function makeExecutor(workspace: WorkspaceDescriptor, auditStore: PermissionAuditStore, tools: ToolDefinition[], taskId: string): PermissionedToolExecutor {
+function makeExecutor(workspace: WorkspaceDescriptor, auditStore: PermissionAuditStore, tools: ToolDefinition[], taskId: string, providers?: ProviderRegistry): ToolExecutor {
   const registry = new ToolRegistry();
   for (const tool of tools) registry.register(tool);
-  return new PermissionedToolExecutor({
+  const permissioned = new PermissionedToolExecutor({
     registry,
     engine: new PermissionEngine({ autoApprove: ['safe', 'mutation'], requireApproval: ['high-impact'], deny: [] }),
     capabilities: workspace.capabilities,
@@ -220,6 +222,7 @@ function makeExecutor(workspace: WorkspaceDescriptor, auditStore: PermissionAudi
       }),
     },
   });
+  return new PrecisionMediaExecutor(permissioned, { workspace, registry: providers });
 }
 
 function toolResult<T extends Record<string, unknown>>(result: { success: boolean; output: string }): T {
@@ -244,7 +247,7 @@ export function registerMediaStudioRoutes(server: FastifyInstance, deps: MediaSt
   const jobs = new Map<string, MediaStudioJob>();
   const controllers = new Map<string, AbortController>();
 
-  server.post('/api/media/uploads', async (request, reply) => {
+  server.post('/api/media/uploads', { bodyLimit: Math.ceil(MAX_UPLOAD_BYTES * 4 / 3) + 4096 }, async (request, reply) => {
     const parsed = UploadSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: 'Invalid media upload.' });
     const workspace = await workspaces.get(parsed.data.workspaceId);
@@ -278,7 +281,7 @@ export function registerMediaStudioRoutes(server: FastifyInstance, deps: MediaSt
       // behind the supervisor's cold-start polling window.
       startMediaRecovery('image', deps.media);
       const taskId = `media-image-${randomUUID()}`;
-      const executor = makeExecutor(workspace, auditStore, createImageGenerationTools(), taskId);
+      const executor = makeExecutor(workspace, auditStore, createImageGenerationTools(), taskId, deps.registry);
       const outputPath = `generated/images/${cleanOutputName(parsed.data.outputName, '.png', `image-${Date.now()}`)}`;
       const artifact = toolResult<{ path: string; bytes: number; sha256: string; model?: string }>(await executor.execute({
         id: randomUUID(), name: 'image.generate', arguments: {
@@ -331,9 +334,10 @@ export function registerMediaStudioRoutes(server: FastifyInstance, deps: MediaSt
         const executor = makeExecutor(workspace, auditStore, createStoryVideoGenerationTools({
           env: process.env, fetch: globalThis.fetch,
           onProgress: (progress) => update({ progress }),
-        }), id);
+        }), id, deps.registry);
         const artifact = toolResult<{ path: string; bytes: number; sha256: string; durationRequestedSeconds: number; segments: number }>(await executor.execute({
           id: randomUUID(), name: 'video.story.generate', arguments: {
+            prompt: parsed.data.prompt,
             durationSeconds: parsed.data.durationSeconds,
             characters: parsed.data.characters,
             segments,

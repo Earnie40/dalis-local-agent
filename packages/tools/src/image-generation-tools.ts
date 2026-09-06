@@ -4,6 +4,8 @@ import { dirname, extname, isAbsolute, relative } from 'node:path';
 import { resolveWithinWorkspace } from '@dacai-local-agent/security';
 import type { ToolDefinition, ToolExecutionContext } from './types';
 import { resolveMediaConnection } from './media-connection';
+import { parseMediaIntent, type MediaIntent } from '@dacai-local-agent/shared';
+import { inspectPng } from './media-artifacts';
 
 type ImageBackend = 'automatic1111' | 'dacais-media' | 'openai';
 
@@ -112,9 +114,7 @@ function decodePng(value: unknown): Buffer {
   if (image.byteLength < 8 || image.byteLength > MAX_IMAGE_BYTES) {
     throw new Error('The generated image is empty or exceeds the 25 MB limit.');
   }
-  if (!image.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
-    throw new Error('The image backend did not return a valid PNG file.');
-  }
+  inspectPng(image);
   return image;
 }
 
@@ -179,7 +179,7 @@ async function dacaisMediaImage(
   input: {
     prompt: string; negativePrompt: string; width: number; height: number; steps: number;
     guidance: number; seed: number; strength: number; source?: { data: Buffer; mimeType: string };
-    mode?: string; editConcepts?: string[]; reverseConcepts?: string[];
+    mode?: string; editConcepts?: string[]; reverseConcepts?: string[]; intent?: MediaIntent; correction?: string;
   },
   signal?: AbortSignal,
 ): Promise<{ image: Buffer; model?: string; seed?: number; mode?: string; regionLocked?: boolean; regions?: string[] }> {
@@ -187,16 +187,22 @@ async function dacaisMediaImage(
   const base = connection.baseUrl;
   const edit = Boolean(input.source);
   const editMode = (input.mode || services.env.DACAI_IMAGE_EDIT_MODE || 'auto').trim().toLowerCase();
+  if (!['auto', 'anatomy', 'instructpix2pix', 'ledits', 'img2img'].includes(editMode)) throw new Error('Unsupported image editing mode.');
   const anatomyRequest = (
     editMode === 'anatomy' ||
-    (editMode === 'auto' && mediaRequiresAnatomyPipeline(input.prompt))
+    (editMode === 'auto' && input.intent?.requiresBodyGeometry === true)
   );
+  if (editMode === 'img2img' && input.intent && (input.intent.editScope === 'localized' || input.intent.protectedAttributes.length)) {
+    throw new Error('img2img cannot guarantee the protected content in this precision edit; select a compatible instruction editor.');
+  }
   const preferInstruct = edit && editMode !== 'img2img' && !anatomyRequest;
 
   if (anatomyRequest) {
     const anatomyPayload = JSON.stringify({
       jobId: `agent-${randomUUID()}`,
       prompt: input.prompt,
+      intent: input.intent,
+    correction: input.correction,
       negativePrompt: input.negativePrompt,
       mode: 'anatomy',
       width: input.width,
@@ -211,6 +217,7 @@ async function dacaisMediaImage(
     let anatomyResponse: Response | undefined;
     let anatomyFailure: Error | undefined;
     for (let attempt = 0; attempt < 3; attempt += 1) {
+      anatomyResponse = undefined;
       try {
         anatomyResponse = await services.fetch(`${base}${edit ? '/v1/anatomy-edit' : '/v1/anatomy-generate'}`, {
           method: 'POST',
@@ -251,6 +258,10 @@ async function dacaisMediaImage(
     ? JSON.stringify({
         jobId: `agent-${randomUUID()}`,
         prompt: input.prompt,
+        intent: input.intent,
+        correction: input.correction,
+        negativePrompt: input.negativePrompt,
+        strength: input.strength,
         mode: ['instructpix2pix', 'ledits'].includes(editMode) ? editMode : 'auto',
         editConcepts: input.editConcepts,
         reverseConcepts: input.reverseConcepts,
@@ -267,6 +278,8 @@ async function dacaisMediaImage(
   const standardPayload = JSON.stringify({
     jobId: `agent-${randomUUID()}`,
     prompt: input.prompt,
+    intent: input.intent,
+    correction: input.correction,
     negativePrompt: input.negativePrompt,
     width: input.width,
     height: input.height,
@@ -281,60 +294,32 @@ async function dacaisMediaImage(
   let response: Response | undefined;
   let lastFailure: Error | undefined;
 
-  // Try /v1/instruct-edit first when editing in instruction mode; fall back to /v1/edit-image if unavailable.
-  if (preferInstruct && instructPayload) {
-    try {
-      const instructRequest = {
-        method: 'POST',
-        redirect: 'error',
-        headers: connection.headers,
-        signal,
-        body: instructPayload,
-      } satisfies RequestInit;
-      response = await services.fetch(`${base}/v1/instruct-edit`, instructRequest);
-      if (!response.ok && response.status !== 404 && response.status !== 501) {
-        const failure = new Error(`DACAIS media image backend failed: ${await responseError(response)}`);
-        if (!TRANSIENT_MEDIA_STATUSES.has(response.status)) throw failure;
-        lastFailure = failure;
-      }
-    } catch (error) {
+  // Keep retries on the selected method. A transport failure is not permission to regenerate.
+  const request = {
+    method: 'POST', redirect: 'error', headers: connection.headers, signal,
+    body: preferInstruct ? instructPayload : standardPayload,
+  } satisfies RequestInit;
+  const route = preferInstruct ? '/v1/instruct-edit' : edit ? '/v1/edit-image' : '/v1/generate-backdrop';
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    response = undefined;
+    try { response = await services.fetch(`${base}${route}`, request); }
+    catch (error) {
       if (signal?.aborted) throw error;
       lastFailure = error instanceof Error ? error : new Error(String(error));
     }
-  }
-
-  // Fallback to /v1/edit-image or /v1/generate-backdrop
-  if (!response?.ok) {
-    const request = {
-      method: 'POST',
-      redirect: 'error',
-      headers: connection.headers,
-      signal,
-      body: standardPayload,
-    } satisfies RequestInit;
-
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      response = undefined;
-      try {
-        response = await services.fetch(`${base}${edit ? '/v1/edit-image' : '/v1/generate-backdrop'}`, request);
-      } catch (error) {
-        if (signal?.aborted) throw error;
-        lastFailure = error instanceof Error ? error : new Error(String(error));
-      }
-      if (response?.ok) break;
-      if (response) {
-        const failure = new Error(`DACAIS media image backend failed: ${await responseError(response)}`);
-        if (!TRANSIENT_MEDIA_STATUSES.has(response.status)) throw failure;
-        lastFailure = failure;
-      }
-      if (attempt < 2) await (services.sleep ?? wait)(500 * (attempt + 1));
+    if (response?.ok) break;
+    if (response) {
+      lastFailure = new Error(`DACAIS media image backend ${route} failed: ${await responseError(response)}`);
+      if (!TRANSIENT_MEDIA_STATUSES.has(response.status)) throw lastFailure;
     }
+    if (attempt < 2) await (services.sleep ?? wait)(500 * (attempt + 1));
   }
 
   if (!response?.ok) throw lastFailure ?? new Error('DACAIS media image backend did not respond.');
   const body = await response.json() as { imageBase64?: unknown; model?: unknown; seed?: unknown };
   return {
     image: decodePng(body.imageBase64),
+    mode: preferInstruct ? editMode === 'auto' ? 'instruction' : editMode : edit ? 'img2img' : 'txt2img',
     model: typeof body.model === 'string' ? body.model : undefined,
     seed: typeof body.seed === 'number' ? body.seed : undefined,
   };
@@ -394,6 +379,8 @@ export function createImageGenerationTools(services: ImageGenerationServices = D
       type: 'object',
       properties: {
         prompt: { type: 'string', minLength: 1, maxLength: 4000 },
+        correction: { type: 'string', maxLength: 2000 },
+        intent: { type: 'object', description: 'Validated structured media intent, including grounded regions and protected attributes.' },
         negativePrompt: { type: 'string', maxLength: 2000 },
         sourcePath: { type: 'string', minLength: 1, maxLength: 600, description: 'Optional workspace-relative PNG, JPEG, or WebP to modify.' },
         outputPath: { type: 'string', minLength: 1, maxLength: 600, pattern: '\\.png$' },
@@ -404,7 +391,7 @@ export function createImageGenerationTools(services: ImageGenerationServices = D
         seed: { type: 'integer', minimum: -1, maximum: 2147483647, default: -1 },
         quality: { type: 'string', enum: ['low', 'medium', 'high'], default: 'high' },
         strength: { type: 'number', minimum: 0.05, maximum: 1, default: 0.65, description: 'How strongly an edit may depart from sourcePath.' },
-        mode: { type: 'string', enum: ['auto', 'anatomy', 'instructpix2pix', 'ledits', 'img2img'], description: 'Editing model mode. Auto selects the anatomy pipeline for body/pose/limb requests.' },
+        mode: { type: 'string', enum: ['auto', 'anatomy', 'instructpix2pix', 'ledits', 'img2img'], description: 'Editing model mode. Auto selects the anatomy pipeline only when structured intent requires body geometry.' },
         editConcepts: { type: 'array', items: { type: 'string' }, description: 'Optional semantic concepts for LEdits++.' },
         reverseConcepts: { type: 'array', items: { type: 'string' }, description: 'Optional semantic concepts to remove for LEdits++.' },
       },
@@ -420,11 +407,17 @@ export function createImageGenerationTools(services: ImageGenerationServices = D
     async execute(input, ctx) {
       const backend = configuredBackend(services.env);
       const output = workspaceOutput(ctx, input.outputPath);
+      const intent = input.intent === undefined ? undefined : parseMediaIntent(input.intent);
+      if (intent && (intent.kind !== 'image' || intent.operation !== (input.sourcePath ? 'edit' : 'generate'))) throw new Error('Image intent does not match the requested operation.');
+      if (input.correction !== undefined && (typeof input.correction !== 'string' || input.correction.length > 2000)) throw new Error('correction must be at most 2000 characters.');
+      if (input.negativePrompt !== undefined && (typeof input.negativePrompt !== 'string' || input.negativePrompt.length > 2000)) throw new Error('negativePrompt must be at most 2000 characters.');
       const request = {
+        intent,
+        correction: input.correction as string | undefined,
         prompt: requiredText(input.prompt, 'prompt', 4000),
-        negativePrompt: typeof input.negativePrompt === 'string' ? input.negativePrompt.trim().slice(0, 2000) : '',
-        width: integer(input.width, 1024, 256, 1536, 'width'),
-        height: integer(input.height, 1024, 256, 1536, 'height'),
+        negativePrompt: typeof input.negativePrompt === 'string' ? input.negativePrompt.trim() : '',
+        width: integer(input.width ?? intent?.constraints.width, 1024, 256, 1536, 'width'),
+        height: integer(input.height ?? intent?.constraints.height, 1024, 256, 1536, 'height'),
         steps: integer(input.steps, 28, 1, 100, 'steps'),
         guidance: decimal(input.guidance, 7, 1, 30, 'guidance'),
         seed: integer(input.seed, -1, -1, 2147483647, 'seed'),
@@ -435,15 +428,21 @@ export function createImageGenerationTools(services: ImageGenerationServices = D
         editConcepts: Array.isArray(input.editConcepts) ? input.editConcepts.map(String) : undefined,
         reverseConcepts: Array.isArray(input.reverseConcepts) ? input.reverseConcepts.map(String) : undefined,
       };
+      if (intent?.constraints.width !== undefined && request.width !== intent.constraints.width || intent?.constraints.height !== undefined && request.height !== intent.constraints.height) throw new Error('Image dimensions conflict with the structured intent.');
       if (request.source && backend !== 'dacais-media') {
         throw new Error('sourcePath image editing currently requires DACAI_IMAGE_BACKEND=dacais-media.');
       }
+      if (backend === 'openai' && (request.negativePrompt || input.strength !== undefined)) throw new Error('The configured OpenAI generation method does not support negativePrompt or strength controls.');
+      if (backend === 'openai' && openAiSize(request.width, request.height) !== `${request.width}x${request.height}`) throw new Error('The configured OpenAI image model does not support the requested dimensions.');
+      const providerRequest = { ...request, prompt: request.correction ? `${request.prompt}\nCorrection: ${request.correction}` : request.prompt };
       const generated = backend === 'automatic1111'
-        ? await automatic1111Image(services, request, ctx.signal)
+        ? await automatic1111Image(services, providerRequest, ctx.signal)
         : backend === 'dacais-media'
           ? await dacaisMediaImage(services, request, ctx.signal)
-          : await openAiImage(services, request, ctx.signal);
+          : await openAiImage(services, providerRequest, ctx.signal);
 
+      const dimensions = inspectPng(generated.image);
+      if (dimensions.width !== request.width || dimensions.height !== request.height) throw new Error(`Generated image dimensions ${dimensions.width}x${dimensions.height} do not match requested ${request.width}x${request.height}.`);
       await mkdir(dirname(output.absolute), { recursive: true });
       await writeFile(output.absolute, generated.image, { flag: 'wx' }).catch((error: NodeJS.ErrnoException) => {
         if (error.code === 'EEXIST') throw new Error('Image output already exists; choose a new outputPath.');
@@ -455,12 +454,13 @@ export function createImageGenerationTools(services: ImageGenerationServices = D
         bytes: generated.image.byteLength,
         sha256: createHash('sha256').update(generated.image).digest('hex'),
         backend,
+        method: ('mode' in generated ? generated.mode : undefined) ?? backend,
         model: generated.model,
         mode: 'mode' in generated ? generated.mode : undefined,
         regionLocked: 'regionLocked' in generated ? generated.regionLocked : undefined,
         regions: 'regions' in generated ? generated.regions : undefined,
-        width: request.width,
-        height: request.height,
+        width: dimensions.width,
+        height: dimensions.height,
         seed: 'seed' in generated ? generated.seed : undefined,
       };
     },

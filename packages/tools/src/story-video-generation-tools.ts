@@ -7,7 +7,8 @@ import { pipeline } from 'node:stream/promises';
 import { resolveWithinWorkspace } from '@dacai-local-agent/security';
 import type { ToolDefinition, ToolExecutionContext } from './types';
 import { resolveMediaConnection } from './media-connection';
-import { mediaRequiresAnatomyPipeline } from './image-generation-tools';
+import { parseMediaIntent, type MediaIntent } from '@dacai-local-agent/shared';
+import { probeVideo, validateVideoConstraints, inspectPng, type VideoProbe, type VideoMetadata } from './media-artifacts';
 
 export const STORY_VIDEO_DURATIONS = [30, 60, 120, 300, 600, 900, 1800] as const;
 export type StoryVideoDuration = typeof STORY_VIDEO_DURATIONS[number];
@@ -22,6 +23,7 @@ export interface StoryVideoProgress {
 interface StoryVideoServices {
   env: NodeJS.ProcessEnv;
   fetch: typeof fetch;
+  probeVideo?: VideoProbe;
   onProgress?: (progress: StoryVideoProgress) => void;
 }
 
@@ -43,6 +45,7 @@ interface Segment {
   narration: string;
   visualPrompt: string;
   scenePath?: string;
+  intent?: MediaIntent;
 }
 
 const DEFAULT_SERVICES: StoryVideoServices = { env: process.env, fetch: globalThis.fetch };
@@ -149,7 +152,8 @@ function parseSegments(value: unknown, characters: Character[], durationSeconds:
     return {
       characterId,
       narration,
-      visualPrompt: requiredText(record.visualPrompt, `segments[${index}].visualPrompt`, 2_000),
+      visualPrompt: requiredText(record.visualPrompt, `segments[${index}].visualPrompt`, 4_000),
+      intent: record.intent === undefined ? undefined : parseMediaIntent(record.intent),
       scenePath: typeof record.scenePath === 'string' && record.scenePath.trim() ? record.scenePath.trim() : undefined,
     };
   });
@@ -193,7 +197,8 @@ async function downloadFinalVideo(
   jobId: string,
   output: { absolute: string; relative: string },
   signal: AbortSignal | undefined,
-): Promise<{ bytes: number; sha256: string }> {
+  durationSeconds: number,
+): Promise<{ bytes: number; sha256: string; metadata: VideoMetadata }> {
   const connection = resolveMediaConnection(services.env);
   const response = await services.fetch(`${connection.baseUrl}/v1/artifacts/${encodeURIComponent(jobId)}/video`, {
     method: 'GET', redirect: 'error', headers: connection.headers, signal,
@@ -215,10 +220,13 @@ async function downloadFinalVideo(
       callback(null, chunk);
     },
   });
+  const destination = createWriteStream(output.absolute, { flags: 'wx' });
+  let created = false;
+  destination.once('open', () => { created = true; });
   try {
-    await pipeline(Readable.fromWeb(response.body as never), guard, createWriteStream(output.absolute, { flags: 'wx' }));
+    await pipeline(Readable.fromWeb(response.body as never), guard, destination);
   } catch (error) {
-    await unlink(output.absolute).catch(() => undefined);
+    if (created) await unlink(output.absolute).catch(() => undefined);
     const nodeError = error as NodeJS.ErrnoException;
     if (nodeError.code === 'EEXIST') throw new Error('Video output already exists; choose a new outputPath.');
     throw error;
@@ -227,7 +235,14 @@ async function downloadFinalVideo(
     await unlink(output.absolute).catch(() => undefined);
     throw new Error('The media service final artifact was not a valid MP4 file.');
   }
-  return { bytes, sha256: hash.digest('hex') };
+  try {
+    const metadata = await (services.probeVideo ?? probeVideo)(output.absolute, signal);
+    validateVideoConstraints(metadata, { durationSeconds });
+    return { bytes, sha256: hash.digest('hex'), metadata };
+  } catch (error) {
+    await unlink(output.absolute).catch(() => undefined);
+    throw error;
+  }
 }
 
 export function storyVideoGenerationConfigured(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -252,6 +267,9 @@ export function createStoryVideoGenerationTools(services: StoryVideoServices = D
     inputSchema: {
       type: 'object',
       properties: {
+        prompt: { type: 'string', maxLength: 4000 },
+        intent: { type: 'object' },
+        correction: { type: 'string', maxLength: 2000 },
         durationSeconds: { type: 'integer', enum: [...STORY_VIDEO_DURATIONS] },
         characters: { type: 'array', minItems: 1, maxItems: 6 },
         segments: { type: 'array', minItems: 1, maxItems: 60 },
@@ -274,9 +292,14 @@ export function createStoryVideoGenerationTools(services: StoryVideoServices = D
       if (!STORY_VIDEO_DURATIONS.includes(durationSeconds as StoryVideoDuration)) {
         throw new Error(`durationSeconds must be one of ${STORY_VIDEO_DURATIONS.join(', ')}.`);
       }
+      const intent = input.intent === undefined ? undefined : parseMediaIntent(input.intent);
+      if (intent && (intent.kind !== 'video' || intent.operation !== 'generate')) throw new Error('Story intent must describe video generation.');
+      if (intent?.constraints.durationSeconds !== undefined && intent.constraints.durationSeconds !== durationSeconds) throw new Error('Story duration conflicts with the structured intent.');
+      if (input.correction !== undefined && (typeof input.correction !== 'string' || input.correction.length > 2000)) throw new Error('correction must be at most 2000 characters.');
       const output = workspacePath(ctx, input.outputPath, 'outputPath', ['.mp4']);
       const characters = parseCharacters(input.characters);
       const segments = parseSegments(input.segments, characters, durationSeconds);
+      for (const segment of segments) if (segment.intent && (segment.intent.kind !== 'image' || segment.intent.operation !== 'generate')) throw new Error('Scene intent must describe image generation.');
       const characterMedia = new Map<string, { image: Buffer; mimeType: string; voiceReference?: Buffer; voiceMimeType?: string }>();
       services.onProgress?.({ phase: 'preparing', completed: 0, total: segments.length, message: 'Validating character and voice assets.' });
       for (const character of characters) {
@@ -338,14 +361,16 @@ export function createStoryVideoGenerationTools(services: StoryVideoServices = D
         } else {
           const backdrop = await mediaJson(
             services,
-            mediaRequiresAnatomyPipeline(segment.visualPrompt) ? '/v1/anatomy-generate' : '/v1/generate-backdrop',
+            segment.intent?.requiresBodyGeometry ? '/v1/anatomy-generate' : '/v1/generate-backdrop',
             {
-            jobId: `${segmentJobId}-bg`, prompt: segment.visualPrompt,
+            jobId: `${segmentJobId}-bg`, prompt: segment.visualPrompt, intent: segment.intent, correction: input.correction,
             width: 1280, height: 720, steps: 28, guidanceScale: 6.5,
             },
             ctx.signal,
           );
           backdropBase64 = requiredBase64(backdrop.imageBase64, 'scene image');
+          const dimensions = inspectPng(Buffer.from(backdropBase64, 'base64'));
+          if (dimensions.width !== 1280 || dimensions.height !== 720) throw new Error('Generated scene image does not match requested 1280x720 dimensions.');
         }
         await mediaJson(services, '/v1/compose', {
           jobId: segmentJobId,
@@ -357,10 +382,11 @@ export function createStoryVideoGenerationTools(services: StoryVideoServices = D
       }
 
       services.onProgress?.({ phase: 'assembling', completed: segments.length, total: segments.length, message: 'Joining rendered scenes on the media volume.' });
-      await mediaJson(services, '/v1/concat-video', { jobId: storyId, segmentJobIds }, ctx.signal);
+      await mediaJson(services, '/v1/concat-video', { jobId: storyId, segmentJobIds, durationSeconds, intent }, ctx.signal);
       services.onProgress?.({ phase: 'downloading', completed: segments.length, total: segments.length, message: 'Copying the verified final MP4 into the workspace.' });
-      const written = await downloadFinalVideo(services, storyId, output, ctx.signal);
+      const written = await downloadFinalVideo(services, storyId, output, ctx.signal, durationSeconds);
       return {
+        ...written.metadata,
         path: output.relative,
         format: 'mp4',
         bytes: written.bytes,

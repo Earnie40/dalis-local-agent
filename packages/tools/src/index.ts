@@ -17,6 +17,7 @@ export * from './git-mutation-tools';
 export * from './quality-tools';
 export * from './vision-tools';
 export * from './image-generation-tools';
+export * from './media-artifacts';
 export * from './media-connection';
 export * from './video-generation-tools';
 export * from './story-video-generation-tools';

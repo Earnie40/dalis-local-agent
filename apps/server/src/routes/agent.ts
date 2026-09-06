@@ -1,4 +1,3 @@
-import { readFile } from 'node:fs/promises';
 import type { OutgoingHttpHeaders } from 'node:http';
 import type { FastifyInstance } from 'fastify';
 import type { AppConfig } from '@dacai-local-agent/shared';
@@ -36,20 +35,13 @@ import { DEFAULT_PERMISSION_POLICY, PermissionEngine, resolveWithinWorkspace } f
 import type { PermissionPolicy } from '@dacai-local-agent/security';
 import { PostgresWorkspaceRegistry } from '@dacai-local-agent/workspace';
 import {
-  fitGenerationSize,
   loadUploadsForPrompt,
-  readImageDimensions,
   renderUploadsForPrompt,
   loadVisionAttachments,
   selectEditableImage,
   workspaceImageDescriptor,
 } from '../workspace-uploads';
-import {
-  buildGroundedEditPrompt,
-  analyzeImageForEdit,
-  interpretMediaInstruction,
-  VisionUnavailableError,
-} from '../vision';
+import { PrecisionMediaExecutor } from '../precision-media';
 import { LoopTraceRecorder } from '@dacai-local-agent/training-traces';
 import { PermissionAuditStore, UsageStore } from '@dacai-local-agent/shared';
 import { createId } from '@dacai-local-agent/shared';
@@ -1277,7 +1269,7 @@ export function registerAgentRoutes(
     // outstanding request for this run is denied the moment it disconnects.
     reply.raw.on('close', () => approvals.cancelRun(runId));
 
-        const permissionedExecutor =
+        const rawPermissionedExecutor =
       new PermissionedToolExecutor({
       registry: tools,
       engine: new PermissionEngine(policyFor(workspace.capabilities)),
@@ -1364,6 +1356,8 @@ export function registerAgentRoutes(
         },
       },
     });
+
+    const permissionedExecutor = new PrecisionMediaExecutor(rawPermissionedExecutor, { workspace, registry: deps.registry, context: historyText });
 
     const impactAwareExecutor =
       new ImpactAwareExecutor(
@@ -1633,161 +1627,14 @@ export function registerAgentRoutes(
 
         const outputPath = `generated/${kind}-${runId}.${format}`;
         const cleanedPrompt = effectivePrompt.replace(/^yougenerate\b/i, 'generate');
-        const interpretedMedia = await interpretMediaInstruction(
-          deps.registry,
-          cleanedPrompt,
-          historyText,
-          controller.signal,
-        );
-        const interpretedPrompt = interpretedMedia.instruction;
-        void activity.emit({
-          type: 'decision',
-          status: 'running',
-          title: 'Interpreted the media request',
-          message: interpretedPrompt,
-          toolName: mediaTool,
-          metadata: {
-            intentAlias: interpretedMedia.alias,
-            intentModel: interpretedMedia.model,
-            targetRegions: interpretedMedia.targetRegions,
-            preserve: interpretedMedia.preserve,
-          },
-        });
-        let editSize: { width: number; height: number } | undefined;
-        if (imageGenerationRun && sourceImage) {
-          try {
-            const bytes = await readFile(resolveWithinWorkspace(workspace.rootPath, sourceImage.path));
-            const intrinsic = readImageDimensions(bytes);
-            if (intrinsic) editSize = fitGenerationSize(intrinsic);
-          } catch {
-            // An unreadable header only costs the aspect ratio; image.generate
-            // still reports the real failure if the file is genuinely gone.
-          }
-        }
-        // SDXL img2img re-renders the entire frame from the prompt it is given.
-        // "make her hair blonde" describes almost nothing, so every unstated
-        // part of the scene is free to drift and the subject comes back as a
-        // different person. With instruction-following edit models (InstructPix2Pix,
-        // LEdits++), the raw user instruction is sent directly. For the legacy
-        // img2img fallback path, ask the vision model what is actually in the
-        // photo and build a full caption of the intended result instead.
-        const editMode = (process.env.DACAI_IMAGE_EDIT_MODE || 'auto').trim().toLowerCase();
-        const isImg2Img = editMode === 'img2img';
-
-        let groundedPrompt: string | undefined;
-        let sourceDescription: string | undefined;
-        let spatialInstruction: string | undefined;
-        if (imageEditRun && sourceImage) {
-          // A continued source was never uploaded, so it is not among the
-          // prompt's vision attachments; read its pixels here instead.
-          const attachment = visionAttachments.find((entry) => entry.upload.id === sourceImage.id)
-            ?? (await loadVisionAttachments(workspace.rootPath, [sourceImage]))[0];
-          if (attachment) {
-            try {
-              if (isImg2Img) {
-                const grounded = await buildGroundedEditPrompt(
-                  deps.registry,
-                  attachment,
-                  interpretedPrompt,
-                  controller.signal,
-                );
-                groundedPrompt = grounded.editPrompt;
-                sourceDescription = grounded.description;
-                void activity.emit({
-                  type: 'inspection',
-                  status: 'running',
-                  title: 'Read the attached image',
-                  message: grounded.description,
-                  toolName: mediaTool,
-                  metadata: { visionAlias: grounded.alias, visionModel: grounded.model },
-                });
-              } else {
-                const analyzed = await analyzeImageForEdit(
-                  deps.registry,
-                  attachment,
-                  interpretedPrompt,
-                  controller.signal,
-                );
-                sourceDescription = analyzed.description;
-                const regions = analyzed.regions.map((region) =>
-                  `${region.label} at ${region.location}${region.box ? ` (${region.box.left},${region.box.top})-(${region.box.right},${region.box.bottom})` : ''}: ${region.visibleDetails}`,
-                ).join('; ');
-                spatialInstruction = [
-                  interpretedPrompt,
-                  analyzed.targetRegions.length ? `Target regions: ${analyzed.targetRegions.join(', ')}.` : '',
-                  regions ? `Use these visible region anchors: ${regions}.` : '',
-                  'Preserve every other subject, pose, composition, and background detail unless explicitly changed.',
-                ].filter(Boolean).join(' ');
-                void activity.emit({
-                  type: 'inspection',
-                  status: 'running',
-                  title: 'Located edit regions in the attached image',
-                  message: analyzed.description,
-                  toolName: mediaTool,
-                  metadata: {
-                    visionAlias: analyzed.alias,
-                    visionModel: analyzed.model,
-                    targetRegions: analyzed.targetRegions,
-                    regions: analyzed.regions,
-                  },
-                });
-              }
-            } catch (error) {
-              // A source edit without visual grounding can alter the wrong
-              // person or region. Fail explicitly instead of producing a
-              // plausible but ungrounded result.
-              void activity.emit({
-                type: 'warning',
-                status: 'failed',
-                title: 'Image edit requires visual grounding',
-                message: error instanceof VisionUnavailableError
-                  ? `${error.message} The edit was not submitted because its target region could not be verified.`
-                  : 'The vision model could not locate the requested region, so the edit was not submitted.',
-                toolName: mediaTool,
-              });
-              throw new Error(
-                error instanceof VisionUnavailableError
-                  ? `${error.message} Attach a readable image or restore the configured vision model before retrying the edit.`
-                  : 'Image edit cancelled: visual region analysis failed before submission.',
-              );
-            }
-          }
-        }
-
-        const effectiveImagePrompt = imageEditRun && !isImg2Img
-          ? (spatialInstruction ?? interpretedPrompt)
-          : (groundedPrompt ?? interpretedPrompt);
-        const realismRequested = /\b(realistic|photorealistic|photoreal|lifelike|true[- ]to[- ]life)\b/i.test(interpretedPrompt);
-        const argumentsForTool: Record<string, unknown> = imageGenerationRun
-          ? {
-              prompt: (!imageEditRun && realismRequested)
-                ? `${effectiveImagePrompt}. Photorealistic editorial photography, natural skin texture, realistic pores and fine facial details, physically accurate lighting, authentic anatomy, subtle imperfections, professional lens depth of field, high dynamic range.`
-                : effectiveImagePrompt,
-              negativePrompt: (!imageEditRun && realismRequested)
-                ? 'cartoon, illustration, CGI, 3D render, plastic skin, airbrushed skin, waxy face, oversmoothed texture, distorted anatomy, extra fingers, asymmetrical eyes, duplicate features, text, watermark, logo, blur, low detail'
-                : undefined,
-              width: editSize?.width ?? 1024,
-              height: editSize?.height ?? 1024,
-              steps: realismRequested ? 40 : 28,
-              guidance: realismRequested ? 7.5 : 7,
-              quality: 'high',
-              ...(sourceImage
-                ? {
-                    sourcePath: sourceImage.path,
-                    strength: 0.55,
-                    mode: ['anatomy', 'instructpix2pix', 'ledits', 'img2img'].includes(editMode) ? editMode : 'auto',
-                  }
-                : {}),
-              outputPath,
-            }
-          : {
-              prompt: interpretedPrompt,
-              ...(sourceImage ? { sourcePath: sourceImage.path } : {}),
-              width: 1024,
-              height: 576,
-              frames: 25,
-              outputPath,
-            };
+        // Preserve the complete request. The shared precision executor grounds the
+        // intent, chooses a workflow and verifies pixels before reporting success.
+        const argumentsForTool: Record<string, unknown> = {
+          prompt: cleanedPrompt,
+          ...(sourceImage ? { sourcePath: sourceImage.path } : {}),
+          ...(imageGenerationRun ? { quality: 'high' } : {}),
+          outputPath,
+        };
         const call = {
           id: `${kind}-${runId}`,
           name: mediaTool,
@@ -1807,8 +1654,7 @@ export function registerAgentRoutes(
             backend: imageGenerationRun ? process.env.DACAI_IMAGE_BACKEND ?? 'unconfigured' : process.env.DACAI_VIDEO_BACKEND ?? 'unconfigured',
             provider: resolved.instance.id,
             sourcePath: sourceImage?.path,
-            grounded: Boolean(groundedPrompt),
-            sourceDescription,
+            precisionVerificationRequired: true,
           },
         });
         const managedMedia = (
