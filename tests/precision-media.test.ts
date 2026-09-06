@@ -18,8 +18,10 @@ async function workspace(): Promise<WorkspaceDescriptor> {
 }
 function report(intent: MediaIntent, passed = true): MediaVerification {
   const check = { passed, evidence: passed ? 'Requested feature is visible and matches.' : 'Wrong requested feature is visible.' };
-  return { requestedChanges: intent.changes.map(() => check), protectedAttributes: intent.protectedAttributes.map(() => check),
-    explicitConstraints: intent.constraints.explicit.map(() => check), subjects: check, composition: check, temporalProgression: check,
+  const targeted = (subject: string) => ({ subject, passed,
+    evidence: passed ? `${subject}: visible in the result and matching the source.` : `${subject}: visibly wrong in the result.` });
+  return { requestedChanges: intent.changes.map((change) => targeted(change.target)), protectedAttributes: intent.protectedAttributes.map((attribute) => targeted(attribute)),
+    explicitConstraints: intent.constraints.explicit.map((constraint) => targeted(constraint)), subjects: check, composition: check, temporalProgression: check,
     summary: passed ? 'Verified all requested features.' : 'Requested color is wrong.', correction: passed ? '' : 'Change the shirt to the requested blue; keep every protected attribute unchanged.' };
 }
 function registryWith(content: unknown) {
@@ -110,11 +112,13 @@ describe('verified artifact publication', () => {
     expect(await readFile(join(ws.rootPath, 'result.png'))).toEqual(resultBytes);
     expect(await readdir(ws.rootPath)).toEqual(['result.png', 'source.png']);
   });
-  it.each(['malformed', 'failed', 'missing-check', 'unchanged', 'wrong-size'])('does not publish %s evidence', async reason => {
+  it.each(['malformed', 'failed', 'missing-check', 'repeated-check', 'unchanged', 'wrong-size'])('does not publish %s evidence', async reason => {
     const ws = await workspace(); const intent = MediaIntentSchema.parse(intentFixture('change shirt'));
     await writeFile(join(ws.rootPath, 'source.png'), pngFixture(512, 512));
     const execute = writer(ws.rootPath, reason === 'unchanged' ? pngFixture(512, 512) : reason === 'wrong-size' ? pngFixture(768, 512) : pngFixture(512, 512, 123));
-    const evidence = reason === 'malformed' ? { preserved: 'true' } : reason === 'missing-check' ? { ...report(intent), protectedAttributes: [] } : report(intent, reason !== 'failed');
+    const evidence = reason === 'malformed' ? { preserved: 'true' } : reason === 'missing-check' ? { ...report(intent), protectedAttributes: [] }
+      : reason === 'repeated-check' ? { ...report(intent), protectedAttributes: intent.protectedAttributes.map(() => ({ subject: 'preservation', passed: true, evidence: 'Everything else is preserved.' })) }
+      : report(intent, reason !== 'failed');
     const executor = new PrecisionMediaExecutor(inner(execute), { workspace: ws, plan: async () => intent, verify: vi.fn().mockResolvedValue(evidence) });
     const result = await executor.execute(call({ prompt: intent.instruction, sourcePath: 'source.png' }));
     expect(result.success).toBe(false); expect(result.output).toContain('after 3 compatible attempts');

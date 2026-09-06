@@ -60,12 +60,14 @@ export function parseMediaIntent(value: unknown): MediaIntent { return MediaInte
 const CheckSchema = z.object({
   passed: z.boolean(), evidence: z.string().trim().min(1).max(1600),
 }).strict();
+/** Indexed checks name the entry they examined, so a matching count cannot be met by repetition. */
+const TargetedCheckSchema = CheckSchema.extend({ subject: z.string().trim().min(1).max(120) }).strict();
 
 /** All booleans are required and strictly typed; unknown/malformed is never a pass. */
 export const MediaVerificationSchema = z.object({
-  requestedChanges: z.array(CheckSchema).min(1).max(24),
-  protectedAttributes: z.array(CheckSchema).max(40),
-  explicitConstraints: z.array(CheckSchema).max(40),
+  requestedChanges: z.array(TargetedCheckSchema).min(1).max(24),
+  protectedAttributes: z.array(TargetedCheckSchema).max(40),
+  explicitConstraints: z.array(TargetedCheckSchema).max(40),
   subjects: CheckSchema,
   composition: CheckSchema,
   temporalProgression: CheckSchema,
@@ -74,10 +76,30 @@ export const MediaVerificationSchema = z.object({
 }).strict();
 export type MediaVerification = z.infer<typeof MediaVerificationSchema>;
 
+const normalized = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+/** A check counts only for the entry it names; one sentence repeated N times verifies nothing. */
+function examines(subject: string, term: string): boolean {
+  const named = normalized(subject); const expected = normalized(term);
+  return Boolean(named) && Boolean(expected) && (named.includes(expected) || expected.includes(named));
+}
+function individuallyEvidenced(checks: { subject: string; evidence: string }[]): boolean {
+  return new Set(checks.map((check) => normalized(check.subject))).size === checks.length
+    && new Set(checks.map((check) => normalized(check.evidence))).size === checks.length;
+}
+
 export function mediaVerificationPassed(report: MediaVerification, intent: MediaIntent): boolean {
   if (report.requestedChanges.length !== intent.changes.length ||
       report.protectedAttributes.length !== intent.protectedAttributes.length ||
       report.explicitConstraints.length !== intent.constraints.explicit.length) return false;
+  const indexed = [
+    { checks: report.requestedChanges, terms: intent.changes.map((change) => change.target) },
+    { checks: report.protectedAttributes, terms: intent.protectedAttributes },
+    { checks: report.explicitConstraints, terms: intent.constraints.explicit },
+  ];
+  for (const { checks, terms } of indexed) {
+    if (!individuallyEvidenced(checks)) return false;
+    if (checks.some((check, index) => !examines(check.subject, terms[index]))) return false;
+  }
   return [...report.requestedChanges, ...report.protectedAttributes, ...report.explicitConstraints,
     report.subjects, report.composition, report.temporalProgression].every((check) => check.passed);
 }

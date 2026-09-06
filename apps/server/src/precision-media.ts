@@ -115,7 +115,8 @@ export async function verifyMediaIntent(registry: ProviderRegistry, input: Verif
       'For video, inspect the ordered frames for progression, repeated sequences and identity drift. Explicit loops are allowed. ' +
       'Unclear, unobservable or missing evidence is passed:false. An unchanged source fails a requested edit. ' +
       'Return JSON only. Include one check per changes/protectedAttributes/constraints.explicit entry in exactly the same order. ' +
-      'Each check is {"passed":boolean,"evidence":"specific visible evidence"}. Never combine multiple checks into one. ' +
+      'Each indexed check is {"subject":"the exact intent entry examined","passed":boolean,"evidence":"visible evidence for that entry alone"}. ' +
+      'Never combine multiple checks into one, and never repeat a subject or an evidence string across checks. ' +
       'Required fields: requestedChanges (check array), protectedAttributes (check array), explicitConstraints (check array), ' +
       'subjects (check), composition (check), temporalProgression (check; true with not-applicable evidence for images), summary (string), correction (string of compatible corrective instructions, empty on success).',
     messages: [{ role: 'user', images: [...input.sourceImages, ...input.resultImages], content: JSON.stringify({
