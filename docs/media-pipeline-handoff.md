@@ -61,6 +61,12 @@ published carrying eight checks that never looked at the named attributes.
    above came from it. It needs a decision: merge onto the branch, or discard.
    Being detached, its work is easy to lose.
 
+   **Follow-up:** [the worktree review](media-tools-worktree-review.md) found all
+   11 files already integrated or superseded at `6dac781`. A byte-verified local
+   recovery snapshot is preserved at `eb16fd3` on
+   `archive/media-tools-20260906T182701Z`. No code merge is needed. The original
+   worktree remains untouched pending its owner's completion.
+
 2. **Model fidelity is the real ceiling, and it is not a code bug.** The
    continuation report's GPU findings stand: SDXL renders the wrong cup
    count/placement, Wan produces two balls plus background artifacts. The gates
