@@ -21,3 +21,8 @@ runpodssh.txt.pub
 # Files uploaded through the chat/agent/studio composers. These are user data
 # dropped into the workspace at runtime, not source.
 .dacai/uploads/
+
+# Media the agent and studio write at runtime: generated/<kind>-<runId>.<ext>,
+# generated/images, generated/videos, generated/media-inputs. Every write path
+# mkdirs recursively, so the tree rebuilds itself on a fresh clone. Output, not source.
+generated/
