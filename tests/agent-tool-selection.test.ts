@@ -5,6 +5,7 @@ import {
   isImageEditRequest,
   isImageGenerationRequest,
   mediaRunFailureMarker,
+  mediaRunFailureMessage,
   verifiedGeneratedArtifact,
 } from '../apps/server/src/routes/agent';
 
@@ -58,6 +59,14 @@ describe('agent tool selection', () => {
     expect(mediaRunFailureMarker(false)).toBe('TASK_FAILED');
     expect(mediaRunFailureMarker(undefined)).toBe('TASK_FAILED');
     expect(mediaRunFailureMarker(true)).toBe('TASK_BLOCKED');
+  });
+
+  it('keeps media failure details visible, with evidence errors taking precedence', () => {
+    const result = { success: false, output: 'The shirt remained red instead of the requested blue.', error: 'media-verification-failed' };
+    expect(mediaRunFailureMessage(result, 'image')).toBe(result.output);
+    expect(mediaRunFailureMessage(result, 'image', 'Missing artifact hash.')).toBe('Missing artifact hash.');
+    expect(mediaRunFailureMessage({ ...result, output: '  ' }, 'image')).toBe(result.error);
+    expect(mediaRunFailureMessage({ success: false, output: '' }, 'video')).toBe('The video backend did not produce a verified artifact.');
   });
 
   it('keeps authorized shell.run available to transactional filesystem mutations', () => {

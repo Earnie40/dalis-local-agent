@@ -31,7 +31,7 @@ import {
   SMART_CONTRACT_TOOLS,
   ENGINEERING_TOOLS,
 } from '@dacai-local-agent/tools';
-import { DEFAULT_PERMISSION_POLICY, PermissionEngine, resolveWithinWorkspace } from '@dacai-local-agent/security';
+import { DEFAULT_PERMISSION_POLICY, PermissionEngine } from '@dacai-local-agent/security';
 import type { PermissionPolicy } from '@dacai-local-agent/security';
 import { PostgresWorkspaceRegistry } from '@dacai-local-agent/workspace';
 import {
@@ -232,6 +232,11 @@ export function classifyDirectMediaRequest(
 /** Permission denial is a blocker; backend/runtime failure is a failed attempt. */
 export function mediaRunFailureMarker(denied: boolean | undefined): 'TASK_BLOCKED' | 'TASK_FAILED' {
   return denied ? 'TASK_BLOCKED' : 'TASK_FAILED';
+}
+
+/** Keep the executor's explanation visible instead of replacing it with an error code. */
+export function mediaRunFailureMessage(result: LoopToolResult, kind: 'image' | 'video', evidenceError?: string): string {
+  return evidenceError || result.output.trim() || result.error || `The ${kind} backend did not produce a verified artifact.`;
 }
 
 export function verifiedGeneratedArtifact(
@@ -1684,6 +1689,7 @@ export function registerAgentRoutes(
         const evidenceError = mediaResult.success && !artifact
           ? `${mediaTool} returned success without matching path and SHA-256 evidence for ${outputPath}.`
           : undefined;
+        const failureMessage = completed ? undefined : mediaRunFailureMessage(mediaResult, kind, evidenceError);
         write('tool_result', {
           turn,
           tool: call.name,
@@ -1691,15 +1697,15 @@ export function registerAgentRoutes(
           success: completed,
           denied: mediaResult.denied,
           output: mediaResult.output.slice(0, 4000),
-          message: evidenceError ?? mediaResult.error,
+          message: failureMessage,
         });
         await activity.emit({
           type: completed ? 'success' : mediaResult.denied ? 'warning' : 'error',
           status: completed ? 'success' : mediaResult.denied ? 'blocked' : 'failed',
-          title: completed ? `AI ${kind} ${imageEditRun ? 'edited' : 'generated'}` : `AI ${kind} generation failed`,
+          title: completed ? `AI ${kind} ${imageEditRun ? 'edited' : 'generated'}` : `AI ${kind} ${imageEditRun ? 'editing' : 'generation'} failed`,
           message: completed
             ? `${kind === 'image' ? 'Image' : 'Video'} saved to ${artifact.path} with SHA-256 ${artifact.sha256}.`
-            : evidenceError ?? mediaResult.error ?? `The ${kind} backend did not produce a verified artifact.`,
+            : failureMessage,
           toolName: mediaTool,
           filePath: completed ? artifact.path : outputPath,
         });
@@ -1707,7 +1713,7 @@ export function registerAgentRoutes(
           taskId: runId,
           answer: completed
             ? `TASK_COMPLETE: Generated ${kind} saved to ${artifact.path} (SHA-256: ${artifact.sha256}).`
-            : `${mediaRunFailureMarker(mediaResult.denied)}: ${evidenceError ?? (mediaResult.output || mediaResult.error || `${kind} generation failed.`)}`,
+            : `${mediaRunFailureMarker(mediaResult.denied)}: ${failureMessage}`,
           stopReason: 'final-answer' as const,
           completionState: completed ? 'GOAL_COMPLETE' as const : mediaResult.denied ? 'BLOCKED' as const : 'FAILED' as const,
           turns: 1,

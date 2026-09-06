@@ -7,7 +7,7 @@ import type { ProviderRegistry } from '@dacai-local-agent/providers';
 import type { WorkspaceDescriptor } from '@dacai-local-agent/workspace';
 import { MediaIntentSchema, type MediaIntent, type MediaVerification } from '@dacai-local-agent/shared';
 import { PrecisionMediaExecutor, planMediaIntent, verifyMediaIntent } from '../apps/server/src/precision-media';
-import { verifiedGeneratedArtifact } from '../apps/server/src/routes/agent';
+import { mediaRunFailureMessage, verifiedGeneratedArtifact } from '../apps/server/src/routes/agent';
 import { intentFixture, pngFixture, VIDEO_FIXTURE as MP4 } from './media-fixtures';
 
 const roots: string[] = [];
@@ -122,6 +122,11 @@ describe('verified artifact publication', () => {
     const executor = new PrecisionMediaExecutor(inner(execute), { workspace: ws, plan: async () => intent, verify: vi.fn().mockResolvedValue(evidence) });
     const result = await executor.execute(call({ prompt: intent.instruction, sourcePath: 'source.png' }));
     expect(result.success).toBe(false); expect(result.output).toContain('after 3 compatible attempts');
+    if (reason === 'failed') {
+      const message = mediaRunFailureMessage(result, 'image');
+      expect(message).toContain('Requested color is wrong.');
+      expect(message).toContain('Change the shirt to the requested blue');
+    }
     expect(await readdir(ws.rootPath)).toEqual(['source.png']);
   });
   it('preserves preexisting outputs and collision races', async () => {
