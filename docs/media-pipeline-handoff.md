@@ -96,7 +96,7 @@ published carrying eight checks that never looked at the named attributes.
   timeouts, none real. The clean rerun was 1085/1085 in 6.57s versus 39.58s
   contended. Check for live inference before believing a timeout failure.
 - **The Python lives in the other repo by design.** `scripts/runpod-media-up.mjs`
-  deploys 12 files, 11 sourced from `deepbrain-avatar-poc/runpod`. The single
+  deploys 13 files, 12 sourced from `deepbrain-avatar-poc/runpod`. The single
   exception is `sdxl_backdrop_runner.py`, deliberately overridden from
   `deploy/runpod-media/` to keep its GPU optimizations (`gpu_runtime`,
   `UNSLICED_DECODE_GIB`). This is intentional, not a stray fork.

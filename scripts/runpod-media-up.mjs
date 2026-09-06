@@ -48,6 +48,7 @@ const mediaSources = [
   ['anatomy_edit_runner.py'],
   ['anatomy_video_runner.py'],
   ['download_sdxl_model.py'],
+  ['download_instruct_edit_model.py'],
   ['download_svd_model.py'],
   ['download_anatomy_models.py'],
   ['provision-anatomy-edit.sh'],
