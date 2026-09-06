@@ -62,27 +62,49 @@ describe('precision intent planning', () => {
     const { registry } = registryWith(parsed);
     expect(await planMediaIntent(registry, { kind: 'image', instruction })).toEqual(parsed);
   });
-  it('rejects rewritten instructions, missing regions, and conflicting numeric constraints', async () => {
-    for (const response of [intentFixture('wrong instruction'), { ...intentFixture('change shirt'), changes: [{ action: 'change shirt', target: 'shirt' }] },
-      { ...intentFixture('change shirt'), constraints: { width: 768, loop: false } }]) {
-      const { registry, chat } = registryWith(response);
-      await expect(planMediaIntent(registry, { kind: 'image', instruction: 'change shirt', sourceImageBase64: 'source', width: 512 })).rejects.toThrow('could not be grounded');
-      expect(chat).toHaveBeenCalledTimes(2);
-    }
+  it('imposes caller-owned envelope fields and explicit controls before strict parsing', async () => {
+    const response = { ...intentFixture('model rewrite'), version: 2, kind: 'video', operation: 'generate',
+      editScope: 'none', constraints: { width: 768, height: 768, loop: true } };
+    const { registry, chat } = registryWith(response);
+    const intent = await planMediaIntent(registry, {
+      kind: 'image', instruction: 'change shirt', sourceImageBase64: 'source', width: 512, height: 512, loop: false,
+    });
+    expect(intent).toMatchObject({ version: 1, kind: 'image', operation: 'edit', instruction: 'change shirt',
+      constraints: { width: 512, height: 512, loop: false } });
+    expect(chat).toHaveBeenCalledOnce();
+  });
+  it('uses global scope when an edit change has no grounded region', async () => {
+    const response = { ...intentFixture('change shirt'), changes: [{ action: 'change shirt', target: 'shirt' }] };
+    const intent = await planMediaIntent(registryWith(response).registry, {
+      kind: 'image', instruction: 'change shirt', sourceImageBase64: 'source',
+    });
+    expect(intent.editScope).toBe('global');
   });
   it('rejects oversized prompts without truncation or provider calls', async () => {
     const { registry, chat } = registryWith({});
     await expect(planMediaIntent(registry, { kind: 'image', instruction: 'x'.repeat(4001) })).rejects.toThrow('never truncated');
     expect(chat).not.toHaveBeenCalled();
   });
-  it('rejects invented dimensions and requires quoted support for inferred numeric constraints', async () => {
+  it('drops invented dimensions and retains inferred constraints only with quoted support', async () => {
     const instruction = 'Generate three cubes.';
     const response = { ...intentFixture(instruction, { generate: true }), constraints: { width: 1024 } };
-    await expect(planMediaIntent(registryWith(response).registry, { kind: 'image', instruction })).rejects.toThrow('supporting quote');
+    expect((await planMediaIntent(registryWith(response).registry, { kind: 'image', instruction })).constraints.width).toBeUndefined();
     const videoInstruction = 'Create a video lasting one minute.';
     const video = { ...intentFixture(videoInstruction, { generate: true }), kind: 'video', constraints: { durationSeconds: 60, evidence: { durationSeconds: 'one minute' } } };
     expect((await planMediaIntent(registryWith(video).registry, { kind: 'video', instruction: videoInstruction })).constraints.durationSeconds).toBe(60);
     expect(MediaIntentSchema.safeParse({ ...response, constraints: { durationSeconds: 10 } }).success).toBe(false);
+  });
+  it('removes the live planner durationSeconds:0 default from image intents', async () => {
+    const instruction = 'Create an image of a red cube on a white table.';
+    const response = { ...intentFixture(instruction, { generate: true }), constraints: { durationSeconds: 0, loop: false } };
+    const { registry, chat } = registryWith(response);
+    const intent = await planMediaIntent(registry, { kind: 'image', instruction });
+    expect(intent.constraints.durationSeconds).toBeUndefined();
+    expect(chat).toHaveBeenCalledOnce();
+    const schema = chat.mock.calls[0][0].responseFormat as Record<string, any>;
+    expect(schema.properties.kind.enum).toEqual(['image']);
+    expect(schema.properties.operation.enum).toEqual(['generate']);
+    expect(schema.properties.constraints.properties.durationSeconds).toBeUndefined();
   });
   it('keeps explicitly supplied loop and dimensions', async () => {
     const instruction = 'Generate a looping animation.';
@@ -117,6 +139,15 @@ describe('precision intent planning', () => {
     const edit = intentFixture('change shirt');
     expect(MediaIntentSchema.safeParse({ ...edit, changes: [] }).success).toBe(false);
     expect(MediaIntentSchema.safeParse(edit).success).toBe(true);
+  });
+  it('falls back to the verbatim request after two empty edit plans', async () => {
+    const instruction = 'Change only the turquoise earring to red.';
+    const response = { ...intentFixture(instruction), editScope: 'none', changes: [] };
+    const { registry, chat } = registryWith(response);
+    const intent = await planMediaIntent(registry, { kind: 'image', instruction, sourceImageBase64: 'source' });
+    expect(intent).toMatchObject({ operation: 'edit', editScope: 'global',
+      changes: [{ action: instruction, target: 'source image' }] });
+    expect(chat).toHaveBeenCalledTimes(2);
   });
   it('verifies a generation with no requested changes', async () => {
     const intent = MediaIntentSchema.parse({ ...intentFixture('Generate a scene', { generate: true }), kind: 'video', changes: [] });
@@ -224,6 +255,18 @@ describe('strict evaluator protocol', () => {
     expect(verification.composition.passed).toBe(false);
     expect(verification.correction).toContain('Neck and arm');
     expect(chat.mock.calls[1][0]).toMatchObject({ messages: [{ images: ['result'] }] });
+  });
+  it('does not let a defect-free but false boolean override the paired verdict', async () => {
+    const intent = MediaIntentSchema.parse(intentFixture('change shirt'));
+    const { registry, chat } = registryWith(report(intent));
+    const inconsistent = { observation: 'No structural or compositing defects are visible.', defects: [], visuallyCoherent: false };
+    chat.mockResolvedValueOnce({ content: JSON.stringify(report(intent)) })
+      .mockResolvedValueOnce({ content: JSON.stringify(inconsistent) })
+      .mockResolvedValueOnce({ content: JSON.stringify(inconsistent) });
+    const verification = await verifyMediaIntent(registry, { intent, sourceImages: ['source'], resultImages: ['result'], metadata: {} });
+    expect(verification.composition.passed).toBe(true);
+    expect(verification.composition.evidence).toContain('inconclusive');
+    expect(chat).toHaveBeenCalledTimes(3);
   });
   it('does not accept malformed independent inspection as preservation', async () => {
     const intent = MediaIntentSchema.parse(intentFixture('change shirt'));

@@ -199,14 +199,33 @@ describe('photoreal image generation tool', () => {
     expect(imageGenerationConfigured({ DACAI_IMAGE_BACKEND: 'dacais-media' })).toBe(true);
   });
 
-  it.each([400, 404, 501])('does not switch instruction editing methods after HTTP %s', async (status) => {
-    const fetchMock = vi.fn(async (_url: string | URL | Request) => new Response('editor unavailable', { status }));
+  it.each([404, 501])('falls back from an unavailable automatic instruction editor after HTTP %s', async (status) => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response('editor unavailable', { status }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ imageBase64: PNG.toString('base64'), model: 'sdxl-base' }), { status: 200 }));
     const tool = createImageGenerationTools({ env: { DACAI_IMAGE_BACKEND: 'dacais-media' }, fetch: fetchMock as typeof fetch })[0];
     const root = await workspace();
     await writeFile(join(root, 'source.png'), PNG);
-    await expect(tool.execute({ prompt: 'change only the shirt color', sourcePath: 'source.png', outputPath: 'edit.png' }, { workspaceRoot: root })).rejects.toThrow(`HTTP ${status}`);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await expect(tool.execute({ prompt: 'change only the shirt color', sourcePath: 'source.png', outputPath: 'edit.png' }, { workspaceRoot: root }))
+      .resolves.toMatchObject({ path: 'edit.png', mode: 'img2img', model: 'sdxl-base' });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(String(fetchMock.mock.calls[0][0])).toContain('/v1/instruct-edit');
+    expect(String(fetchMock.mock.calls[1][0])).toContain('/v1/edit-image');
+  });
+
+  it('does not switch methods for a bad request or an explicitly selected editor', async () => {
+    for (const input of [
+      { status: 400, mode: undefined },
+      { status: 501, mode: 'instructpix2pix' },
+    ]) {
+      const fetchMock = vi.fn(async () => new Response('editor unavailable', { status: input.status }));
+      const tool = createImageGenerationTools({ env: { DACAI_IMAGE_BACKEND: 'dacais-media' }, fetch: fetchMock as typeof fetch })[0];
+      const root = await workspace();
+      await writeFile(join(root, 'source.png'), PNG);
+      await expect(tool.execute({ prompt: 'change only the shirt color', sourcePath: 'source.png', outputPath: 'edit.png', mode: input.mode }, { workspaceRoot: root }))
+        .rejects.toThrow(`HTTP ${input.status}`);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    }
   });
 
   it('auto-approves bounded image writes and treats loopback media as internal infrastructure', () => {

@@ -26,6 +26,10 @@ describe('agent tool selection', () => {
     expect(isImageGenerationRequest('Explain the model class in this repository')).toBe(false);
     expect(isImageGenerationRequest('Audit the repository to locate every file that must be modified to improve conversational image/video editing.')).toBe(false);
     expect(isImageGenerationRequest('Use the selected tool', ['image.generate'])).toBe(true);
+    expect(isImageGenerationRequest('Create a logo for my company')).toBe(true);
+    expect(isImageGenerationRequest('Make a poster for the event')).toBe(true);
+    expect(isImageGenerationRequest('Draw a dragon flying over a castle')).toBe(true);
+    expect(isImageGenerationRequest('Draw the dependency graph in this repository')).toBe(false);
   });
 
   it('routes animation and video prompts to video before overlapping image intent', () => {
@@ -39,6 +43,15 @@ describe('agent tool selection', () => {
     expect(isImageEditRequest('Retouch the uploaded portrait')).toBe(true);
     expect(isImageEditRequest('Make her hair blonde', { hasImageAttachment: true })).toBe(true);
     expect(isImageEditRequest('Generate an image of a dramatic sky')).toBe(false);
+  });
+
+  it('recognizes shorthand edits only when a prior generated image is proven', () => {
+    const prior = { hasPriorGeneratedImage: true };
+    expect(classifyDirectMediaRequest('make her hair blonde', [], prior)).toBe('image');
+    expect(classifyDirectMediaRequest('make the sky darker', [], prior)).toBe('image');
+    expect(isImageEditRequest('make the sky darker', prior)).toBe(true);
+    expect(classifyDirectMediaRequest('make the tests faster', [], prior)).toBeUndefined();
+    expect(classifyDirectMediaRequest('make her hair blonde')).toBeUndefined();
   });
 
   it('accepts completion only for matching tool-layer path and hash evidence', () => {

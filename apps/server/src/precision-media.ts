@@ -10,7 +10,7 @@ import type { ToolExecutor, NormalizedToolCall, LoopToolResult } from '@dacai-lo
 import type { ProviderRegistry } from '@dacai-local-agent/providers';
 import { resolveWithinWorkspace } from '@dacai-local-agent/security';
 import type { WorkspaceDescriptor } from '@dacai-local-agent/workspace';
-import { MediaIntentSchema, MediaVerificationSchema, mediaVerificationPassed, type MediaIntent, type MediaVerification } from '@dacai-local-agent/shared';
+import { MediaIntentSchema, MediaRegionSchema, MediaVerificationSchema, mediaVerificationPassed, type MediaIntent, type MediaVerification } from '@dacai-local-agent/shared';
 import { inspectPng, probeVideo, validateVideoConstraints } from '@dacai-local-agent/tools';
 import { readImageDimensions } from './workspace-uploads';
 
@@ -33,6 +33,102 @@ const VisualIntegritySchema = z.object({
 }).strict();
 const INTEGRITY_JSON_SCHEMA = compactOutputSchema(zodToJsonSchema(VisualIntegritySchema, { $refStrategy: 'none' }));
 
+function record(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+/** Constrained decoding should expose only combinations the caller can actually request. */
+function intentResponseSchema(input: IntentInput): Record<string, unknown> {
+  const schema = structuredClone(INTENT_JSON_SCHEMA);
+  const properties = record(schema.properties);
+  const operation = input.sourceImageBase64 ? 'edit' : 'generate';
+  if (!properties) return schema;
+
+  Object.assign(record(properties.kind) ?? {}, { enum: [input.kind] });
+  Object.assign(record(properties.operation) ?? {}, { enum: [operation] });
+  Object.assign(record(properties.editScope) ?? {}, { enum: operation === 'generate' ? ['none'] : ['localized', 'global'] });
+  Object.assign(record(properties.changes) ?? {}, { minItems: operation === 'edit' ? 1 : 0 });
+
+  if (input.kind === 'image') {
+    const constraintProperties = record(record(properties.constraints)?.properties);
+    if (constraintProperties) {
+      delete constraintProperties.durationSeconds;
+      const evidenceProperties = record(record(constraintProperties.evidence)?.properties);
+      if (evidenceProperties) delete evidenceProperties.durationSeconds;
+    }
+  }
+  return schema;
+}
+
+/**
+ * Keep semantic planning model-owned while imposing facts already known from the
+ * request envelope. Unsupported model defaults are omitted, never substituted.
+ */
+function normalizePlannedIntent(
+  value: unknown,
+  input: IntentInput,
+  instruction: string,
+  allowVerbatimEditFallback: boolean,
+): unknown {
+  const source = record(value);
+  if (!source) return value;
+  const raw = { ...source };
+  const operation = input.sourceImageBase64 ? 'edit' : 'generate';
+  raw.version = 1;
+  raw.kind = input.kind;
+  raw.operation = operation;
+  raw.instruction = instruction;
+
+  const constraints = { ...(record(raw.constraints) ?? {}) };
+  const evidence = { ...(record(constraints.evidence) ?? {}) };
+  if (input.kind === 'image') {
+    delete constraints.durationSeconds;
+    delete evidence.durationSeconds;
+  }
+
+  for (const key of ['width', 'height', 'durationSeconds'] as const) {
+    if (key === 'durationSeconds' && input.kind === 'image') continue;
+    if (input[key] !== undefined) {
+      constraints[key] = input[key];
+      continue;
+    }
+    if (constraints[key] === undefined) continue;
+    const quote = evidence[key];
+    if (typeof quote !== 'string' || !quote.trim() || !instruction.includes(quote)) {
+      delete constraints[key];
+      delete evidence[key];
+    }
+  }
+  if (input.loop !== undefined) constraints.loop = input.loop;
+  else if (constraints.loop === true) {
+    const quote = evidence.loop;
+    if (typeof quote !== 'string' || !quote.trim() || !instruction.includes(quote)) {
+      constraints.loop = false;
+      delete evidence.loop;
+    }
+  }
+  if (Object.keys(evidence).length) constraints.evidence = evidence;
+  else delete constraints.evidence;
+  raw.constraints = constraints;
+
+  if (operation === 'generate') {
+    raw.editScope = 'none';
+  } else {
+    let changes = Array.isArray(raw.changes) ? raw.changes : [];
+    if (!changes.length && allowVerbatimEditFallback) {
+      changes = [{ action: instruction, target: 'source image' }];
+      raw.changes = changes;
+    }
+    const allRegionsGrounded = changes.length > 0 && changes.every((change) =>
+      MediaRegionSchema.safeParse(record(change)?.region).success,
+    );
+    if (!['localized', 'global'].includes(String(raw.editScope)) || (raw.editScope === 'localized' && !allRegionsGrounded)) {
+      raw.editScope = allRegionsGrounded ? 'localized' : 'global';
+    }
+  }
+  return raw;
+}
+
 export interface IntentInput {
   kind: 'image' | 'video'; instruction: string; sourceImageBase64?: string;
   width?: number; height?: number; durationSeconds?: number; loop?: boolean; context?: string;
@@ -49,10 +145,11 @@ export async function planMediaIntent(registry: ProviderRegistry, input: IntentI
   if (!instruction || instruction.length > 4000) throw new Error('Media instructions must contain 1–4000 characters; they are never truncated.');
   const images = [...(input.sourceImageBase64 ? [input.sourceImageBase64] : []), ...(input.referenceImagesBase64 ?? [])];
   const resolved = await registry.resolveAlias(images.length ? 'vision' : 'agent', { requireToolCalling: false, skipCapabilityProbe: true, signal });
+  const responseSchema = intentResponseSchema(input);
   let problem = '';
   for (let attempt = 0; attempt < 2; attempt++) {
     const response = await resolved.provider.chat({
-      model: resolved.model, temperature: 0, signal, responseFormat: INTENT_JSON_SCHEMA, think: false,
+      model: resolved.model, temperature: 0, signal, responseFormat: responseSchema, think: false,
       systemPrompt: 'Compile an exact media intent. Every region coordinate is normalized to 0..1, never pixels or percentages. ' +
         'Include version:1 and kind. Omit unspecified optional numeric fields; never use zero as not-applicable duration. ' +
         'For width/height/duration or looping inferred from the request, put the exact supporting request quote in constraints.evidence under the corresponding key. ' +
@@ -71,34 +168,15 @@ export async function planMediaIntent(registry: ProviderRegistry, input: IntentI
           suppliedConstraints: { width: input.width, height: input.height, durationSeconds: input.durationSeconds, loop: input.loop }, context: input.context,
           referenceImageCount: input.referenceImagesBase64?.length ?? 0,
           imageOrdering: 'Source image first if supplied, then reference images. References constrain generated content without making it an edit.',
-          outputSchema: INTENT_JSON_SCHEMA,
+          outputSchema: responseSchema,
           fixedFields: { version: 1, kind: input.kind, operation: input.sourceImageBase64 ? 'edit' : 'generate', instruction },
           sourceDimensions: input.sourceImageBase64 ? readImageDimensions(Buffer.from(input.sourceImageBase64, 'base64')) : undefined,
           rules: 'Omit region for generation/global edits. Omit unspecified numeric constraints. Keep instruction verbatim. Explicit request constraints override inferred defaults.',
           previousError: problem }) }],
     });
     try {
-      const raw = jsonResponse(response.content ?? '') as Record<string, unknown>;
-      // operation is authoritative (fixed by the presence of a supplied source).
-      // editScope is a required model-guessed enum that small planners frequently
-      // emit in conflict with it (e.g. 'global' for a bare generate with no source).
-      // Normalize the coupled field from the model output before strict parsing so
-      // that an internal contradiction cannot block a legitimate generation request.
-      if (raw.operation === 'generate') raw.editScope = 'none';
-      const intent = MediaIntentSchema.parse(raw);
-      if (intent.instruction !== instruction || intent.kind !== input.kind || intent.operation !== (input.sourceImageBase64 ? 'edit' : 'generate')) throw new Error('Planner changed the original instruction, source operation, or media kind.');
-      // UI/tool numeric fields are explicit constraints and cannot be dropped by a model.
-      for (const key of ['width', 'height', 'durationSeconds'] as const) {
-        if (input[key] !== undefined && intent.constraints[key] !== undefined && input[key] !== intent.constraints[key]) throw new Error(`Conflicting ${key} constraints; resolve the request explicitly.`);
-        if (input[key] !== undefined) intent.constraints[key] = input[key];
-        else if (intent.constraints[key] !== undefined) {
-          const quote = intent.constraints.evidence?.[key];
-          if (!quote || !instruction.includes(quote)) throw new Error(`${key} requires an exact supporting quote from the original request; do not invent a default.`);
-        }
-      }
-      if (input.loop !== undefined) intent.constraints.loop = input.loop;
-      else if (intent.constraints.loop && (!intent.constraints.evidence?.loop || !instruction.includes(intent.constraints.evidence.loop))) throw new Error('Looping requires an exact supporting quote from the original request.');
-      return MediaIntentSchema.parse(intent);
+      const raw = normalizePlannedIntent(jsonResponse(response.content ?? ''), input, instruction, attempt > 0);
+      return MediaIntentSchema.parse(raw);
     } catch (error) { problem = error instanceof Error ? error.message : String(error); }
   }
   throw new Error(`Media intent could not be grounded without changing the request: ${problem}`);
@@ -134,17 +212,30 @@ export async function verifyMediaIntent(registry: ProviderRegistry, input: Verif
   if (input.intent.kind === 'image' && input.intent.editScope === 'localized') {
     // An independent, result-only inspection counteracts desired-result bias in paired evaluation.
     // It stays on the same configured vision provider and cannot turn a failed check into a pass.
-    const inspectionResponse = await resolved.provider.chat({
-      model: resolved.model, temperature: 0, think: false, maxTokens: 2000, signal, responseFormat: INTEGRITY_JSON_SCHEMA,
-      systemPrompt: 'Inspect the supplied result image independently. Describe visible facts; do not assume the requested edit was successful. ' +
-        'Scrutinize body/clothing geometry, straight rectangular compositing boundaries, cut-off parts, broken edges, and discontinuous texture or lighting. ' +
-        'Only count defects that were not explicitly requested: intentional collage, overlays or visible patch borders are allowed when the request calls for them. ' +
-        'Give specific locations of visible defects. If uncertain about coherence, return visuallyCoherent:false. ' +
-        'Return JSON with observation:string, defects:string[], visuallyCoherent:boolean. Do not provide a preservation verdict based on the requested outcome.',
-      messages: [{ role: 'user', images: input.resultImages, content: JSON.stringify({ instruction: input.intent.instruction, task: 'Inspect this result for unrequested structural and compositing defects.' }) }],
-    });
-    const inspection = VisualIntegritySchema.parse(jsonResponse(inspectionResponse.content ?? ''));
-    if (!inspection.visuallyCoherent || inspection.defects.length) {
+    let inspection: z.infer<typeof VisualIntegritySchema> | undefined;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const inspectionResponse = await resolved.provider.chat({
+        model: resolved.model, temperature: 0, think: false, maxTokens: 2000, signal, responseFormat: INTEGRITY_JSON_SCHEMA,
+        systemPrompt: 'Inspect the supplied result image independently. Describe visible facts; do not assume the requested edit was successful. ' +
+          'Scrutinize body/clothing geometry, straight rectangular compositing boundaries, cut-off parts, broken edges, and discontinuous texture or lighting. ' +
+          'Only count defects that were not explicitly requested: intentional collage, overlays or visible patch borders are allowed when the request calls for them. ' +
+          'Give specific locations of visible defects. If uncertain about coherence, return visuallyCoherent:false and name at least one concrete uncertainty in defects. ' +
+          'visuallyCoherent:false requires a non-empty defects array; an empty defects array requires visuallyCoherent:true. ' +
+          'Return JSON with observation:string, defects:string[], visuallyCoherent:boolean. Do not provide a preservation verdict based on the requested outcome.',
+        messages: [{ role: 'user', images: input.resultImages, content: JSON.stringify({
+          instruction: input.intent.instruction,
+          task: 'Inspect this result for unrequested structural and compositing defects.',
+          previousProtocolError: attempt ? 'The prior response said the image was incoherent but named no concrete defect. Return a consistent verdict.' : undefined,
+        }) }],
+      });
+      const candidate = VisualIntegritySchema.parse(jsonResponse(inspectionResponse.content ?? ''));
+      if (!candidate.visuallyCoherent && !candidate.defects.length) continue;
+      inspection = candidate;
+      break;
+    }
+    if (!inspection) {
+      report.composition.evidence = `${report.composition.evidence} Independent inspection was inconclusive because it named no concrete defect.`.slice(0, 1600);
+    } else if (inspection.defects.length) {
       const evidence = [inspection.observation, ...inspection.defects].join(' ').slice(0, 1500);
       report.composition = { passed: false, evidence: `Independent visual integrity check failed: ${evidence}` };
       report.summary = `Independent visual integrity check failed: ${evidence}`;

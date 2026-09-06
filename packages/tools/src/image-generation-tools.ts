@@ -293,6 +293,7 @@ async function dacaisMediaImage(
 
   let response: Response | undefined;
   let lastFailure: Error | undefined;
+  let usedInstructionEditor = preferInstruct;
 
   // Keep retries on the selected method. A transport failure is not permission to regenerate.
   const request = {
@@ -310,16 +311,40 @@ async function dacaisMediaImage(
     if (response?.ok) break;
     if (response) {
       lastFailure = new Error(`DACAIS media image backend ${route} failed: ${await responseError(response)}`);
+      // Auto mode is capability negotiation. If the optional instruction editor
+      // is absent, retain the same prompt/intent and use the baseline image-edit
+      // route. An explicitly selected editor still fails instead of switching.
+      if (preferInstruct && editMode === 'auto' && [404, 501].includes(response.status)) break;
       if (!TRANSIENT_MEDIA_STATUSES.has(response.status)) throw lastFailure;
     }
     if (attempt < 2) await (services.sleep ?? wait)(500 * (attempt + 1));
+  }
+
+  if (!response?.ok && preferInstruct && editMode === 'auto' && response && [404, 501].includes(response.status)) {
+    usedInstructionEditor = false;
+    const fallbackRoute = '/v1/edit-image';
+    const fallbackRequest = { ...request, body: standardPayload } satisfies RequestInit;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      response = undefined;
+      try { response = await services.fetch(`${base}${fallbackRoute}`, fallbackRequest); }
+      catch (error) {
+        if (signal?.aborted) throw error;
+        lastFailure = error instanceof Error ? error : new Error(String(error));
+      }
+      if (response?.ok) break;
+      if (response) {
+        lastFailure = new Error(`DACAIS media image backend ${fallbackRoute} failed: ${await responseError(response)}`);
+        if (!TRANSIENT_MEDIA_STATUSES.has(response.status)) throw lastFailure;
+      }
+      if (attempt < 2) await (services.sleep ?? wait)(500 * (attempt + 1));
+    }
   }
 
   if (!response?.ok) throw lastFailure ?? new Error('DACAIS media image backend did not respond.');
   const body = await response.json() as { imageBase64?: unknown; model?: unknown; seed?: unknown };
   return {
     image: decodePng(body.imageBase64),
-    mode: preferInstruct ? editMode === 'auto' ? 'instruction' : editMode : edit ? 'img2img' : 'txt2img',
+    mode: usedInstructionEditor ? editMode === 'auto' ? 'instruction' : editMode : edit ? 'img2img' : 'txt2img',
     model: typeof body.model === 'string' ? body.model : undefined,
     seed: typeof body.seed === 'number' ? body.seed : undefined,
   };

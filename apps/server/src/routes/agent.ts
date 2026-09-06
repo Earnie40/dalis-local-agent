@@ -129,7 +129,10 @@ interface AgentBody {
 }
 
 const IMAGE_GENERATION_INTENT =
-  /(?:\b|you)(?:generate|create|make|produce|render|draw|paint|illustrate|design|edit|modify|update|transform)\b[\s\S]{0,160}\b(?:ai\s+)?(?:image|photo|picture|portrait|artwork)\b|\b(?:ai\s+)?(?:image|photo|picture|portrait|artwork)\b[\s\S]{0,160}\b(?:generate|create|make|produce|render|draw|paint|illustrate|design|edit|modify|update|transform)\b|\b(?:image|photo|picture|portrait|artwork)\s+of\b/;
+  /(?:\b|you)(?:generate|create|make|produce|render|draw|paint|illustrate|design|edit|modify|update|transform)\b[\s\S]{0,160}\b(?:ai\s+)?(?:image|photo|picture|portrait|artwork|illustration|drawing|logo|icon|poster|banner|graphic|cover\s+art|concept\s+art|wallpaper|thumbnail)\b|\b(?:ai\s+)?(?:image|photo|picture|portrait|artwork|illustration|drawing|logo|icon|poster|banner|graphic|cover\s+art|concept\s+art|wallpaper|thumbnail)\b[\s\S]{0,160}\b(?:generate|create|make|produce|render|draw|paint|illustrate|design|edit|modify|update|transform)\b|\b(?:image|photo|picture|portrait|artwork|illustration|drawing)\s+of\b/;
+const STANDALONE_VISUAL_CREATION_INTENT = /^\s*(?:(?:please|can you|could you)\s+)?(?:draw|paint|illustrate|sketch)\b/i;
+const CONTINUED_IMAGE_EDIT_INTENT =
+  /^\s*(?:(?:please|can you|could you)\s+)?(?:make|change|edit|modify|update|transform|retouch|restyle|remove|replace|add|recolor|crop|brighten|darken)\b[\s\S]{0,200}\b(?:hair|face|skin|eyes?|shirt|jacket|dress|clothing|outfit|body|pose|hands?|arms?|legs?|background|foreground|sky|lighting|color|tone|contrast|composition|her|him|his|their|its|it)\b/i;
 
 // Short descriptive prompts often omit the word "image" entirely. Require a
 // visual/person/scene subject and exclude obvious repository or question
@@ -153,6 +156,8 @@ const VIDEO_GENERATION_INTENT =
 export interface MediaIntentOptions {
   /** True when a PNG/JPEG/WebP upload is attached to this request. */
   hasImageAttachment?: boolean;
+  /** True when this conversation has a tool-proven generated image to refine. */
+  hasPriorGeneratedImage?: boolean;
 }
 
 export function isImageGenerationRequest(
@@ -177,13 +182,17 @@ export function isImageGenerationRequest(
     && DESCRIPTIVE_IMAGE_INTENT.test(descriptivePrompt)
     && !NON_IMAGE_REQUEST_INTENT.test(descriptivePrompt);
   return IMAGE_GENERATION_INTENT.test(normalized)
+    || (STANDALONE_VISUAL_CREATION_INTENT.test(normalized) && !NON_IMAGE_REQUEST_INTENT.test(normalized))
+    || (options.hasPriorGeneratedImage === true && CONTINUED_IMAGE_EDIT_INTENT.test(normalized))
     || isDescriptiveVisualRequest
     || [...requestedTools].includes('image.generate');
 }
 
 export function isImageEditRequest(prompt: string, options: MediaIntentOptions = {}): boolean {
   const normalized = prompt.toLowerCase();
-  return IMAGE_EDIT_INTENT.test(normalized) || Boolean(
+  return IMAGE_EDIT_INTENT.test(normalized)
+    || (options.hasPriorGeneratedImage === true && CONTINUED_IMAGE_EDIT_INTENT.test(normalized))
+    || Boolean(
     options.hasImageAttachment &&
     normalized.trim().length > 0 &&
     !ATTACHED_IMAGE_INSPECTION_INTENT.test(normalized),
@@ -937,10 +946,12 @@ export function registerAgentRoutes(
     const promptImages = visionAttachments.map((attachment) => attachment.base64);
     const advancedRequested = new Set(body.tools ?? []);
     const prompt = effectivePrompt.toLowerCase();
+    const priorGeneratedImage = lastGeneratedImageFromHistory(conversationHistory);
     // Video intent wins over image intent for prompts such as "animate this
     // image". Otherwise that phrase would be incorrectly routed to a new PNG.
     const directMediaKind = classifyDirectMediaRequest(effectivePrompt, advancedRequested, {
       hasImageAttachment: Boolean(editableImage),
+      hasPriorGeneratedImage: Boolean(priorGeneratedImage),
     });
     const imageGenerationRun = directMediaKind === 'image';
     const videoGenerationRun = directMediaKind === 'video';
@@ -1091,7 +1102,7 @@ export function registerAgentRoutes(
       ...(imageGenerationRun
         ? createImageGenerationTools()
         : []),
-      ...(wantsVideoGeneration && workspace.capabilities.read && workspace.capabilities.write && workspace.capabilities.network
+      ...(wantsVideoGeneration
         ? VIDEO_GENERATION_TOOLS
         : []),
       // Read-only static review. Needs no capability beyond the read access every
@@ -1601,13 +1612,14 @@ export function registerAgentRoutes(
         const attachedSource = editableImage;
         const imageEditRun = imageGenerationRun && isImageEditRequest(effectivePrompt, {
           hasImageAttachment: Boolean(attachedSource),
+          hasPriorGeneratedImage: Boolean(priorGeneratedImage),
         });
         // A refinement of the picture the previous turn produced arrives with an
         // empty attachment bar, so continue from that artifact instead of
         // rejecting the request. Only an edit resolves a source this way: a
         // fresh generation must never be conditioned on the last image.
         const continuedPath = imageEditRun && !attachedSource
-          ? lastGeneratedImageFromHistory(conversationHistory)
+          ? priorGeneratedImage
           : undefined;
         const continuedSource = continuedPath
           ? await workspaceImageDescriptor(workspace.rootPath, continuedPath)

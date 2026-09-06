@@ -313,7 +313,7 @@ export function AgentPanel() {
     if (active?.capabilities.shell) names.push('tests.run', 'shell.run', 'engineering.capabilities.inspect');
     if (active?.capabilities.network) names.push('web.fetch', 'web.search', 'download.approved');
     if (active?.capabilities.write) names.push('image.generate');
-    if (active?.capabilities.read && active?.capabilities.write && active?.capabilities.network) names.push('video.generate');
+    if (active?.capabilities.read && active?.capabilities.write) names.push('video.generate');
     names.push('mcp.list', 'engineering.artifact.inspect');
     if (active?.capabilities.shell) names.push('code.diagnostics', 'workspace.open-file', 'terminal.open');
     if (active?.capabilities.write && active?.capabilities.shell) names.push(
