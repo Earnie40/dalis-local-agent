@@ -31,8 +31,17 @@ export const MediaIntentSchema = z.object({
       placement: z.string().trim().min(1).max(500).optional(),
     }).strict()).max(24).default([]),
     explicit: z.array(z.string().trim().min(1).max(1000)).max(40).default([]),
+    evidence: z.object({
+      width: z.string().trim().min(1).max(1000).optional(),
+      height: z.string().trim().min(1).max(1000).optional(),
+      durationSeconds: z.string().trim().min(1).max(1000).optional(),
+      loop: z.string().trim().min(1).max(1000).optional(),
+    }).strict().optional(),
   }).strict(),
 }).strict().superRefine((intent, context) => {
+  if (intent.kind === 'image' && intent.constraints.durationSeconds !== undefined) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: 'Image intents cannot have a video duration.', path: ['constraints', 'durationSeconds'] });
+  }
   if (intent.operation === 'generate' && intent.editScope !== 'none') {
     context.addIssue({ code: z.ZodIssueCode.custom, message: 'Generation has no source edit scope.', path: ['editScope'] });
   }

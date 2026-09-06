@@ -194,7 +194,6 @@ export function AgentPanel() {
     // File content is no longer spliced into the prompt: the server reads the
     // stored upload and appends it, so the transcript keeps what was typed.
     const text = prompt.trim();
-    const directImageRequest = isImageGenerationPrompt(text, attachments);
     if (!text || !workspaceId || running) return;
 
     setError(undefined);
@@ -880,4 +879,3 @@ function AgentArtifactPreview({ artifact, workspaceId }: { artifact: AgentArtifa
     </figure>
   );
 }
-

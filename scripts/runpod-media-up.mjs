@@ -41,7 +41,9 @@ const mediaSourceDirectory = resolve(
 );
 const mediaSources = [
   ['media_service.py', process.env.DACAI_MEDIA_SERVICE_SOURCE?.trim()],
+  ['media_intent.py'],
   ['sdxl_backdrop_runner.py', resolve('deploy/runpod-media/sdxl_backdrop_runner.py')],
+  ['svd_backdrop_runner.py'],
   ['instruct_edit_runner.py'],
   ['anatomy_edit_runner.py'],
   ['anatomy_video_runner.py'],

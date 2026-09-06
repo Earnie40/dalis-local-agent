@@ -14,6 +14,7 @@ from diffusers import StableDiffusionXLImg2ImgPipeline, StableDiffusionXLPipelin
 from PIL import Image
 
 import gpu_runtime
+from media_intent import aligned_size, inference_instruction, finalize_image, output_size
 
 ORIGINAL_STDOUT = sys.stdout
 MODEL_ROOT = Path(os.environ.get("DACAIS_SDXL_MODEL_ROOT", "/opt/dacais-sdxl/stable-diffusion-xl-base-1.0"))
@@ -96,7 +97,7 @@ def main() -> int:
             command_type = command.get("type")
             if command_type not in ("backdrop", "edit"):
                 raise ValueError("Unsupported SDXL worker command")
-            prompt = str(command.get("prompt", "")).strip()
+            prompt = inference_instruction(command)
             if not prompt:
                 raise ValueError("prompt is required")
             output = Path(str(command["output"]))
@@ -106,11 +107,11 @@ def main() -> int:
             seed = int(command["seed"]) if command.get("seed") is not None else int(torch.seed() % 2147483648)
             generator = torch.Generator(device=device).manual_seed(seed)
             with torch.inference_mode(), contextlib.redirect_stdout(sys.stderr):
-                width = int(command.get("width", WIDTH))
-                height = int(command.get("height", HEIGHT))
+                original_source = None
+                width, height = aligned_size(output_size(command, (WIDTH, HEIGHT)))
                 common = {
                     "prompt": prompt,
-                    "negative_prompt": str(command.get("negativePrompt") or NEGATIVE),
+                    "negative_prompt": str(command.get("negativePrompt", "" if command.get("intent") else NEGATIVE)),
                     "num_inference_steps": int(command.get("steps", STEPS)),
                     "guidance_scale": float(command.get("guidanceScale", 6.5)),
                     "generator": generator,
@@ -119,12 +120,15 @@ def main() -> int:
                     source = Path(str(command.get("input", "")))
                     if not source.is_file():
                         raise FileNotFoundError(f"source image does not exist: {source}")
-                    initial = Image.open(source).convert("RGB").resize((width, height), Image.LANCZOS)
-                    image = edit_pipeline(
+                    original_source = Image.open(source).convert("RGB")
+                    width, height = aligned_size(output_size(command, original_source.size))
+                    initial = original_source.resize((width, height), Image.LANCZOS)
+                    image = original_source.copy() if command.get("strength") == 0 else edit_pipeline(
                         **common, image=initial, strength=float(command.get("strength", 0.65)),
                     ).images[0]
                 else:
                     image = pipeline(**common, width=width, height=height).images[0]
+            image, precision = finalize_image(image, command, original_source)
             image.save(output, format="PNG")
             emit({
                 "type": "complete",
@@ -133,6 +137,7 @@ def main() -> int:
                 "height": image.height,
                 "seed": seed,
                 "peakVramMb": gpu_peak_mb(),
+                **precision,
             })
         except Exception as error:
             traceback.print_exc(file=sys.stderr)
