@@ -209,30 +209,47 @@ export async function verifyMediaIntent(registry: ProviderRegistry, input: Verif
       resultFrameCount: input.resultImages.length, ordering: 'Sources first, followed by result frames in chronological order.' }) }],
   });
   const report = MediaVerificationSchema.parse(jsonResponse(response.content ?? ''));
-  if (input.intent.kind === 'image' && input.intent.editScope === 'localized') {
+  if (input.intent.kind === 'image' && input.intent.editScope === 'localized' && input.sourceImages.length) {
     // An independent, result-only inspection counteracts desired-result bias in paired evaluation.
     // It stays on the same configured vision provider and cannot turn a failed check into a pass.
-    let inspection: z.infer<typeof VisualIntegritySchema> | undefined;
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const inspectionResponse = await resolved.provider.chat({
-        model: resolved.model, temperature: 0, think: false, maxTokens: 2000, signal, responseFormat: INTEGRITY_JSON_SCHEMA,
-        systemPrompt: 'Inspect the supplied result image independently. Describe visible facts; do not assume the requested edit was successful. ' +
-          'Scrutinize body/clothing geometry, straight rectangular compositing boundaries, cut-off parts, broken edges, and discontinuous texture or lighting. ' +
-          'Only count defects that were not explicitly requested: intentional collage, overlays or visible patch borders are allowed when the request calls for them. ' +
-          'Give specific locations of visible defects. If uncertain about coherence, return visuallyCoherent:false and name at least one concrete uncertainty in defects. ' +
-          'visuallyCoherent:false requires a non-empty defects array; an empty defects array requires visuallyCoherent:true. ' +
-          'Return JSON with observation:string, defects:string[], visuallyCoherent:boolean. Do not provide a preservation verdict based on the requested outcome.',
-        messages: [{ role: 'user', images: input.resultImages, content: JSON.stringify({
-          instruction: input.intent.instruction,
-          task: 'Inspect this result for unrequested structural and compositing defects.',
-          previousProtocolError: attempt ? 'The prior response said the image was incoherent but named no concrete defect. Return a consistent verdict.' : undefined,
-        }) }],
-      });
-      const candidate = VisualIntegritySchema.parse(jsonResponse(inspectionResponse.content ?? ''));
-      if (!candidate.visuallyCoherent && !candidate.defects.length) continue;
-      inspection = candidate;
-      break;
-    }
+    //
+    // The identical inspection runs first on the unedited source to establish a baseline. Asked to
+    // find defects in a bare photograph of a person, a vision model reliably reports soft anatomy
+    // and lighting complaints that describe the subject rather than damage the edit introduced, and
+    // for any edit it reports that the image "looks composited" at all. Without a baseline the check
+    // is unfalsifiable: every edit fails on grounds no editor can act on, and three attempts publish
+    // nothing. Only a fault the result has and the source does not is attributable to the edit.
+    const inspect = async (images: string[], options: { baseline?: string[] } = {}) => {
+      const isResult = options.baseline !== undefined;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const inspectionResponse = await resolved.provider.chat({
+          model: resolved.model, temperature: 0, think: false, maxTokens: 2000, signal, responseFormat: INTEGRITY_JSON_SCHEMA,
+          systemPrompt: 'Inspect the supplied image independently and describe visible facts; do not assume any requested edit was successful. ' +
+            'You are looking at a finished image of unknown origin. Whether it was edited, composited, retouched or model-generated is expected and is NEVER a defect: never report that the image looks manipulated, artificial, superimposed or composited, and never speculate about how it was produced. ' +
+            'Report only faults visible in the depicted content: cut-off, duplicated or missing body parts, impossible limb or joint geometry, a hard rectangular boundary crossing a subject, broken or misaligned edges, garbled texture, or a shadow cast in a direction no other object in the frame shares. ' +
+            'Name the exact part and what is visibly wrong with it. A general impression such as "the anatomy looks off", "the lighting does not match" or "it looks digitally altered" is not a defect and must be omitted. ' +
+            'Only count defects that were not explicitly requested: intentional collage, overlays or visible patch borders are allowed when the request calls for them. ' +
+            'If uncertain about coherence, return visuallyCoherent:false and name at least one concrete located fault in defects. ' +
+            'visuallyCoherent:false requires a non-empty defects array; an empty defects array requires visuallyCoherent:true. ' +
+            'Return JSON with observation:string, defects:string[], visuallyCoherent:boolean. Do not provide a preservation verdict based on the requested outcome.',
+          messages: [{ role: 'user', images, content: JSON.stringify({
+            instruction: isResult ? input.intent.instruction : undefined,
+            task: 'Inspect this image for structural and compositing faults in the depicted content.',
+            faultsAlreadyInTheOriginal: options.baseline?.length ? options.baseline : undefined,
+            faultsAlreadyInTheOriginalRule: options.baseline?.length
+              ? 'These faults were already present before any editing. They are not damage to report: omit them and any equivalent restatement.'
+              : undefined,
+            previousProtocolError: attempt ? 'The prior response said the image was incoherent but named no concrete located fault. Return a consistent verdict.' : undefined,
+          }) }],
+        });
+        const candidate = VisualIntegritySchema.parse(jsonResponse(inspectionResponse.content ?? ''));
+        if (!candidate.visuallyCoherent && !candidate.defects.length) continue;
+        return candidate;
+      }
+      return undefined;
+    };
+    const baseline = await inspect(input.sourceImages.slice(0, 1));
+    const inspection = await inspect(input.resultImages, { baseline: baseline?.defects ?? [] });
     if (!inspection) {
       report.composition.evidence = `${report.composition.evidence} Independent inspection was inconclusive because it named no concrete defect.`.slice(0, 1600);
     } else if (inspection.defects.length) {

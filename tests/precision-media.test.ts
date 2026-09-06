@@ -239,7 +239,8 @@ describe('strict evaluator protocol', () => {
   it('requests constrained output but still validates all evidence', async () => {
     const intent = MediaIntentSchema.parse(intentFixture('change shirt'));
     const { registry, chat } = registryWith(report(intent));
-    chat.mockResolvedValueOnce({ content: JSON.stringify(report(intent)) }).mockResolvedValueOnce({ content: JSON.stringify({ observation: 'Continuous shirt and body edges.', defects: [], visuallyCoherent: true }) });
+    const clean = { content: JSON.stringify({ observation: 'Continuous shirt and body edges.', defects: [], visuallyCoherent: true }) };
+    chat.mockResolvedValueOnce({ content: JSON.stringify(report(intent)) }).mockResolvedValueOnce(clean).mockResolvedValueOnce(clean);
     await verifyMediaIntent(registry, { intent, sourceImages: ['source'], resultImages: ['result'], metadata: {} });
     expect(chat.mock.calls[0][0]).toMatchObject({ responseFormat: { type: 'object', required: expect.arrayContaining(['requestedChanges', 'protectedAttributes', 'temporalProgression']) } });
     expect(JSON.stringify(chat.mock.calls[0][0].responseFormat)).not.toContain('maxLength');
@@ -250,23 +251,41 @@ describe('strict evaluator protocol', () => {
   it('rejects an optimistic preservation verdict when independent inspection finds seams', async () => {
     const intent = MediaIntentSchema.parse(intentFixture('change shirt'));
     const { registry, chat } = registryWith(report(intent));
-    chat.mockResolvedValueOnce({ content: JSON.stringify(report(intent)) }).mockResolvedValueOnce({ content: JSON.stringify({ observation: 'A rectangular shirt patch cuts across the neck.', defects: ['Neck and arm edges are discontinuous at the patch boundary.'], visuallyCoherent: false }) });
+    chat.mockResolvedValueOnce({ content: JSON.stringify(report(intent)) })
+      .mockResolvedValueOnce({ content: JSON.stringify({ observation: 'An intact, unedited subject.', defects: [], visuallyCoherent: true }) })
+      .mockResolvedValueOnce({ content: JSON.stringify({ observation: 'A rectangular shirt patch cuts across the neck.', defects: ['Neck and arm edges are discontinuous at the patch boundary.'], visuallyCoherent: false }) });
     const verification = await verifyMediaIntent(registry, { intent, sourceImages: ['source'], resultImages: ['result'], metadata: {} });
     expect(verification.composition.passed).toBe(false);
     expect(verification.correction).toContain('Neck and arm');
-    expect(chat.mock.calls[1][0]).toMatchObject({ messages: [{ images: ['result'] }] });
+    expect(chat.mock.calls[1][0]).toMatchObject({ messages: [{ images: ['source'] }] });
+    expect(chat.mock.calls[2][0]).toMatchObject({ messages: [{ images: ['result'] }] });
+  });
+  it('excludes faults the unedited source already had from the result verdict', async () => {
+    const intent = MediaIntentSchema.parse(intentFixture('change shirt'));
+    const { registry, chat } = registryWith(report(intent));
+    const prior = 'The left hand has six fingers.';
+    chat.mockResolvedValueOnce({ content: JSON.stringify(report(intent)) })
+      .mockResolvedValueOnce({ content: JSON.stringify({ observation: 'A person with a malformed left hand.', defects: [prior], visuallyCoherent: false }) })
+      .mockResolvedValueOnce({ content: JSON.stringify({ observation: 'The same subject wearing a new shirt.', defects: [], visuallyCoherent: true }) });
+    const verification = await verifyMediaIntent(registry, { intent, sourceImages: ['source'], resultImages: ['result'], metadata: {} });
+    expect(verification.composition.passed).toBe(true);
+    const baselineCall = chat.mock.calls[1][0] as unknown as { messages: { content: string }[] };
+    const resultCall = chat.mock.calls[2][0] as unknown as { messages: { content: string }[] };
+    // The baseline pass never sees the request; the result pass must exclude what the source already had.
+    expect(baselineCall.messages[0].content).not.toContain(intent.instruction);
+    expect(resultCall.messages[0].content).toContain(prior);
   });
   it('does not let a defect-free but false boolean override the paired verdict', async () => {
     const intent = MediaIntentSchema.parse(intentFixture('change shirt'));
     const { registry, chat } = registryWith(report(intent));
     const inconsistent = { observation: 'No structural or compositing defects are visible.', defects: [], visuallyCoherent: false };
     chat.mockResolvedValueOnce({ content: JSON.stringify(report(intent)) })
-      .mockResolvedValueOnce({ content: JSON.stringify(inconsistent) })
-      .mockResolvedValueOnce({ content: JSON.stringify(inconsistent) });
+      .mockResolvedValue({ content: JSON.stringify(inconsistent) });
     const verification = await verifyMediaIntent(registry, { intent, sourceImages: ['source'], resultImages: ['result'], metadata: {} });
     expect(verification.composition.passed).toBe(true);
     expect(verification.composition.evidence).toContain('inconclusive');
-    expect(chat).toHaveBeenCalledTimes(3);
+    // The paired report, then two rejected attempts for each of the baseline and result passes.
+    expect(chat).toHaveBeenCalledTimes(5);
   });
   it('does not accept malformed independent inspection as preservation', async () => {
     const intent = MediaIntentSchema.parse(intentFixture('change shirt'));
