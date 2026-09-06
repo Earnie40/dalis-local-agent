@@ -9,6 +9,7 @@ export default defineConfig({
     alias: [
       { find: '@dacai-local-agent/shared', replacement: packageSrc('shared') },
       { find: '@dacai-local-agent/agent-core', replacement: packageSrc('agent-core') },
+      { find: '@dacai-local-agent/memory', replacement: packageSrc('memory') },
       { find: '@dacai-local-agent/security', replacement: packageSrc('security') },
       { find: '@dacai-local-agent/providers', replacement: packageSrc('providers') },
       { find: '@dacai-local-agent/telemetry', replacement: packageSrc('telemetry') },

@@ -848,3 +848,95 @@ describe('duplicate failed actions trigger replanning instead of repetition', ()
     expect(result.completionState).toBe('BLOCKED');
   });
 });
+
+describe('timeout recovery and duplicate-call avoidance', () => {
+  const schema = (name: string): ToolSchema => ({ name, description: name, inputSchema: { type: 'object' } });
+
+  it('a timed-out call yields failure-recovery guidance and a materially different next action', async () => {
+    const provider = scriptedProvider([
+      { toolCalls: [call('shell.run', { command: 'nmap -sS 10.0.0.0/24' })] },
+      // After the timeout and the injected recovery guidance, the model must
+      // change approach rather than repeat the same expensive scan.
+      { toolCalls: [call('shell.run', { command: 'arp -a' }, 'c2')] },
+      { content: 'TASK_COMPLETE: identified the host from the neighbor table.' },
+    ]);
+    const exec = executor((requested) => {
+      const command = requested.arguments.command;
+      if (typeof command === 'string' && command.includes('nmap')) {
+        return { output: 'scan timed out after 120s', success: false, error: 'ETIMEDOUT' };
+      }
+      return { output: '10.0.0.7  aa-bb-cc-dd-ee-ff  dynamic', success: true };
+    }, [schema('shell.run')]);
+
+    const result = await runAgentLoop({
+      provider,
+      model: 'm',
+      capabilities: VERIFIED,
+      executor: exec,
+      prompt: 'discover the host on the local subnet',
+      completionSignalRequired: true,
+      failureRecovery: async () => ({
+        message: 'SELF-CORRECTION REQUIRED: change approach after timeout.',
+      }),
+      maxTurns: 6,
+    });
+
+    // Both distinct calls ran and in order; the timeout did not stop the run and
+    // the failing call was not repeated verbatim.
+    expect(exec.calls.map((requested) => requested.arguments.command)).toEqual([
+      'nmap -sS 10.0.0.0/24',
+      'arp -a',
+    ]);
+    // The recovery guidance reached the model before its next turn.
+    expect(
+      provider.requests.some((request) =>
+        request.messages.some(
+          (message) =>
+            typeof message.content === 'string' &&
+            message.content.includes('change approach after timeout'),
+        ),
+      ),
+    ).toBe(true);
+    expect(result.retries).toBeGreaterThanOrEqual(1);
+    expect(result.stopReason).toBe('final-answer');
+  });
+
+  it('changing arguments avoids the duplicate-call blocker; only a verbatim repeat is refused', async () => {
+    const provider = scriptedProvider([
+      { toolCalls: [call('shell.run', { command: 'arp -a 10.0.0.5' })] },
+      // A different argument is a new call, not a duplicate — it must execute.
+      { toolCalls: [call('shell.run', { command: 'arp -a 10.0.0.6' }, 'c2')] },
+      // A verbatim repeat of the first call must be refused, not executed again.
+      { toolCalls: [call('shell.run', { command: 'arp -a 10.0.0.5' }, 'c3')] },
+      { content: 'TASK_COMPLETE: neighbor table read.' },
+    ]);
+    const exec = executor(() => ({ output: 'neighbor entry', success: true }), [schema('shell.run')]);
+
+    const result = await runAgentLoop({
+      provider,
+      model: 'm',
+      capabilities: VERIFIED,
+      executor: exec,
+      prompt: 'read the neighbor table for two hosts',
+      completionSignalRequired: true,
+      maxTurns: 8,
+    });
+
+    // The two distinct calls ran; the verbatim third call never reached the executor.
+    expect(exec.calls.map((requested) => requested.arguments.command)).toEqual([
+      'arp -a 10.0.0.5',
+      'arp -a 10.0.0.6',
+    ]);
+    expect(result.rejectedCalls).toBeGreaterThanOrEqual(1);
+    expect(
+      provider.requests.some((request) =>
+        request.messages.some(
+          (message) =>
+            typeof message.content === 'string' &&
+            message.content.includes('already called with these exact arguments'),
+        ),
+      ),
+    ).toBe(true);
+    expect(result.stopReason).toBe('final-answer');
+  });
+});

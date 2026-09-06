@@ -27,7 +27,7 @@ function compact(value: string): string {
     .slice(0, 800);
 }
 
-function classify(
+export function classifyToolFailure(
   input: ToolFailureInput,
 ): {
   category: string;
@@ -35,6 +35,19 @@ function classify(
 } {
   const text = `${input.error ?? ''} ${input.output}`
     .toLowerCase();
+
+  // WSL user-mapping failure must be checked before the path/permission
+  // branches: its message often reads "getpwuid(1000) failed: No such file or
+  // directory", which would otherwise be misclassified as a missing path.
+  if (
+    /getpwuid|cannot find name for user id|no passwd entry|uid \d+ .*not (?:found|exist)/.test(text)
+  ) {
+    return {
+      category: 'wsl-user-mapping',
+      correctiveAction:
+        'This is a WSL user-mapping failure: the Linux user id running the command has no /etc/passwd entry (getpwuid failed), so tools such as Nmap that resolve the current user abort before doing any work. Do NOT retry the same command unchanged. First repair the mapping — run the command as a user that exists in /etc/passwd (for example the distribution default user, or root via `wsl -u root`), or add the missing passwd entry — then re-run only once the cause is fixed.',
+    };
+  }
 
   if (
     /permission|denied|not allowed|unauthorized|forbidden/.test(text)
@@ -158,7 +171,7 @@ export async function buildFailureRecovery(
   input: ToolFailureInput,
 ): Promise<FailureRecovery> {
   const classified =
-    classify(input);
+    classifyToolFailure(input);
 
   const signature =
     compact(

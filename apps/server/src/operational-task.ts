@@ -509,11 +509,16 @@ export function operationalConstraintsInstructions(input: {
           : '- No live-system tool is selected for this run, so the task cannot be observed or executed here. Report TASK_BLOCKED naming the missing capability instead of inspecting the repository.',
         'LOCAL EXECUTION HOST: local hostname, IP, adapter, process, and listener data are evidence about the machine running the agent, not the requested remote target. Do not infer target identity from those values.',
         'REQUESTED REMOTE TARGET: target conclusions require direct target-scoped evidence from the remote target or an authenticated remote channel. Local-host facts are never sufficient.',
+        'LOCAL SUBNET: Do not assume a subnet such as 192.168.1.0/24. First observe this host\'s actual IPv4 address, subnet mask, and default gateway from live output (ipconfig / Get-NetIPConfiguration / ip addr) and derive the local subnet from those values. Scope any discovery to the observed subnet, never an assumed one.',
+        'WI-FI SSID IS NOT A HOST: A Wi-Fi SSID names the wireless network this host is joined to, not a device, hostname, or scan target. Never treat an SSID as the target host or resolve/scan it as one. Identify hosts by IP address, hostname, vendor, or authenticated evidence instead.',
         '- Distinguish: local listener inspection; remote reachability; remote port/service probing; authenticated remote execution.',
         '- Ground each conclusion in real command output. Do not claim a host was found, a service is running, or an action succeeded without a successful tool result that shows it.',
         '- An ARP entry or a MAC address similar to the access point does not identify a device. Require direct hostname, vendor, service, or authenticated management evidence before naming a host.',
+        '- Prefer non-invasive host discovery first: read the local ARP/neighbor table (arp -a, Get-NetNeighbor), use DNS/mDNS/NetBIOS name resolution, or a light reachability check to identify a host before any active port/service scan. Escalate to active scanning only when passive discovery is insufficient.',
         '- A command that changes the local clipboard, process list, or desktop does not affect a remote host. Verify remote effects through the authenticated remote channel that performed them.',
+        '- When a command fails or times out, read the specific error and change the plan before acting again. Do not re-issue the identical tool with identical arguments — that verbatim retry is blocked and wastes the turn. Diagnose the cause the error names (a runtime or user-mapping error, a missing prerequisite, an unreachable service) and choose a materially different next step, or report TASK_BLOCKED with the specific blocker.',
         '- If the requested remote action requires credentials or a configured management channel that is unavailable, report TASK_BLOCKED. Never replace authentication with a backdoor or access-control bypass.',
+        '- Perform the final authorized action on another host only through an existing, authorized administrative/remote-management channel with explicit credentials — for example RDP, WinRM/PowerShell Remoting, or an approved remote-support tool. Do not exploit, bypass, brute-force, or work around authentication, and do not use an unauthenticated path.',
       ].join('\n'),
     );
   }

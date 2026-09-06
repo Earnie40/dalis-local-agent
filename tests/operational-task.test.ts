@@ -378,3 +378,64 @@ describe('typed execution scopes and target identity', () => {
     expect(authed.requiresTargetScope).toBe(false);
   });
 });
+
+describe('grounded discovery guidance for the red-team flow', () => {
+  const operationalDirective = () =>
+    operationalConstraintsInstructions({ operational: true, availableTools: LIVE_TOOLS });
+
+  it('subnet discovery: the actual subnet must be detected, never assumed as 192.168.1.0/24', () => {
+    const directive = operationalDirective();
+    expect(directive).toContain('LOCAL SUBNET');
+    // The exact anti-pattern from the failure trace is named and rejected.
+    expect(directive).toContain('Do not assume a subnet such as 192.168.1.0/24');
+    // It must require reading real address/mask/gateway before scoping discovery.
+    expect(directive).toMatch(/IPv4 address, subnet mask, and default gateway/i);
+    expect(directive).toMatch(/derive the local subnet/i);
+    expect(directive).toMatch(/Scope any discovery to the observed subnet/i);
+  });
+
+  it('an SSID is treated as a Wi-Fi network name, not a target host', () => {
+    const directive = operationalDirective();
+    expect(directive).toContain('WI-FI SSID IS NOT A HOST');
+    expect(directive).toMatch(/never treat an SSID as the target host/i);
+    expect(directive).toMatch(/resolve\/scan it as one/i);
+  });
+
+  it('non-invasive host discovery is preferred before any active scan', () => {
+    const directive = operationalDirective();
+    expect(directive).toMatch(/Prefer non-invasive host discovery first/i);
+    // Passive methods are named; active scanning is the escalation, not the default.
+    expect(directive).toMatch(/arp -a|Get-NetNeighbor/);
+    expect(directive).toMatch(/DNS\/mDNS\/NetBIOS/);
+    expect(directive).toMatch(/before any active port\/service scan/i);
+    expect(directive).toMatch(/Escalate to active scanning only when passive discovery is insufficient/i);
+  });
+
+  it('failure-aware branching: diagnose the error and change the plan instead of a verbatim retry', () => {
+    const directive = operationalDirective();
+    expect(directive).toMatch(/When a command fails or times out/i);
+    expect(directive).toMatch(/Do not re-issue the identical tool with identical arguments/i);
+    expect(directive).toMatch(/verbatim retry is blocked/i);
+    expect(directive).toMatch(/user-mapping error/i);
+    expect(directive).toMatch(/materially different next step/i);
+  });
+
+  it('the final authorized action uses an existing authenticated Windows admin/remote-management path', () => {
+    const directive = operationalDirective();
+    expect(directive).toMatch(/RDP, WinRM\/PowerShell Remoting/);
+    expect(directive).toMatch(/explicit credentials/i);
+    expect(directive).toMatch(/Do not exploit, bypass, brute-force, or work around authentication/i);
+    expect(directive).toMatch(/do not use an unauthenticated path/i);
+    // The pre-existing no-backdoor guarantee is preserved alongside the new guidance.
+    expect(directive).toContain('Never replace authentication with a backdoor or access-control bypass');
+  });
+
+  it('none of the new grounding guidance leaks into an ordinary coding run', () => {
+    const directive = operationalConstraintsInstructions({
+      operational: false,
+      executionEnvironment: undefined,
+      availableTools: LIVE_TOOLS,
+    });
+    expect(directive).toBe('');
+  });
+});

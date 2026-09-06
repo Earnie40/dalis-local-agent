@@ -131,7 +131,19 @@ exec "$MODEL_PYTHON" "$ROOT/service/media_service.py"
 LAUNCHER
 chmod +x "$ROOT/run-media.sh"
 if ${syncService ? 'true' : '! curl -fsS --max-time 2 http://127.0.0.1:8090/v1/health >/dev/null 2>&1'}; then
-  pkill -f '[m]edia_service.py' >/dev/null 2>&1 || true
+  old_media_pids=$(pgrep -f '[m]edia_service.py' || true)
+  for old_pid in $old_media_pids; do
+    # The launcher uses setsid, so the service and all model workers share its
+    # process group. Kill the group first; reparented workers must not survive
+    # a media-service restart and compete for the GPU with the new instance.
+    kill -TERM -- "-$old_pid" >/dev/null 2>&1 || true
+    kill -TERM "$old_pid" >/dev/null 2>&1 || true
+  done
+  sleep 2
+  for old_pid in $old_media_pids; do
+    kill -KILL -- "-$old_pid" >/dev/null 2>&1 || true
+    kill -KILL "$old_pid" >/dev/null 2>&1 || true
+  done
   setsid "$ROOT/run-media.sh" > "$ROOT/logs/media-service.log" 2>&1 < /dev/null &
 fi
 for i in $(seq 1 30); do
