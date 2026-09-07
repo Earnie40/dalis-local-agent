@@ -202,6 +202,29 @@ describe('ungrounded region and contradictory protection guards', () => {
     constraints: { loop: false, subjects: [], explicit: [] },
   });
 
+  it('routes a garment removal to the geometry-aware editor whatever the planner says', async () => {
+    // "remove" must mean remove. Taking a garment off changes what body is
+    // visible, so it needs the anatomy editor; the instruction editor leaves the
+    // request half-done. The planner is told not to set this for clothing, so the
+    // routing must not depend on it.
+    for (const instruction of [
+      'remove her shirt',
+      'take off the jacket',
+      'edit the photo without the dress',
+    ]) {
+      const registry = { resolveAlias: async () => ({ model: 'vision', provider: { chat: async () => JSON.stringify({}) && ({ content: JSON.stringify({
+        version: 1, kind: 'image', operation: 'edit', editScope: 'global', instruction,
+        changes: [{ action: 'remove', target: 'shirt' }],
+        protectedAttributes: ['background'], requiresBodyGeometry: false, changesPose: false,
+        constraints: { loop: false, subjects: [], explicit: [] },
+      }) }) } }) };
+      const intent = await planMediaIntent(registry as never, {
+        kind: 'image', instruction, sourceImageBase64: pngFixture(64, 64).toString('base64'),
+      });
+      expect(intent.requiresBodyGeometry, instruction).toBe(true);
+    }
+  });
+
   it('demotes the planner constant centre box to a global edit', async () => {
     // 0.45/0.30/0.55/0.40 is what the planner returns when it cannot locate the
     // target: 1% of the frame, which would restore 99% of the source.

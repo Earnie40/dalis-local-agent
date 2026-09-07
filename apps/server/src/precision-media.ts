@@ -140,6 +140,9 @@ function normalizePlannedIntent(
       raw.editScope = 'global';
     }
     raw.protectedAttributes = survivingProtections(raw.protectedAttributes, changes);
+    // Only for an edit: generation would route to the anatomy generator, whose
+    // weights are not installed, turning a working request into a 501.
+    if (BODY_REVEALING_EDIT.test(instruction)) raw.requiresBodyGeometry = true;
   }
   return raw;
 }
@@ -156,6 +159,16 @@ function minimumRegionArea(): number {
   const configured = Number(process.env.DACAI_MEDIA_MIN_REGION_AREA);
   return Number.isFinite(configured) && configured >= 0 && configured <= 1 ? configured : 0.02;
 }
+
+/**
+ * Taking a garment off changes what body is visible, so the edit needs the
+ * geometry-aware editor and not the instruction editor, which leaves the request
+ * half-done. The planner is told the opposite — "not merely that the request
+ * mentions clothing" — and a 7B planner does not reliably weigh that anyway, so
+ * the routing is decided from the request instead of from its judgement.
+ */
+const BODY_REVEALING_EDIT =
+  /\b(?:remove|removing|take\s+off|taking\s+off|strip|stripping|undress|unclothe|without|delete|erase)\b[\s\S]{0,80}\b(?:shirt|top|blouse|dress|skirt|pants|trousers|jeans|shorts|underwear|undergarments?|bra|panties|lingerie|swimsuit|bikini|jacket|coat|sweater|hoodie|uniform|clothing|clothes|garments?|outfit|apparel)\b/i;
 
 /** Broad protections that subsume a specific target, e.g. "clothing" over "shirt". */
 const SUBSUMING_PROTECTIONS: Array<{ category: RegExp; members: RegExp }> = [
