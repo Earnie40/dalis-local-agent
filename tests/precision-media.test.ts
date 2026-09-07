@@ -186,6 +186,41 @@ describe('precision intent planning', () => {
   });
 });
 
+describe('ungrounded region and contradictory protection guards', () => {
+  const plan = async (raw: Record<string, unknown>) => {
+    const registry = { resolveAlias: async () => ({ model: 'vision', provider: { chat: async () => ({ content: JSON.stringify(raw) }) } }) };
+    return planMediaIntent(registry as never, {
+      kind: 'image', instruction: 'change the color of her shirt to deep blue',
+      sourceImageBase64: pngFixture(64, 64).toString('base64'),
+    });
+  };
+  const planned = (region: Record<string, number>, protectedAttributes: string[]) => ({
+    version: 1, kind: 'image', operation: 'edit', editScope: 'localized',
+    instruction: 'change the color of her shirt to deep blue',
+    changes: [{ action: 'recolor', target: 'shirt', region }],
+    protectedAttributes, requiresBodyGeometry: false, changesPose: false,
+    constraints: { loop: false, subjects: [], explicit: [] },
+  });
+
+  it('demotes the planner constant centre box to a global edit', async () => {
+    // 0.45/0.30/0.55/0.40 is what the planner returns when it cannot locate the
+    // target: 1% of the frame, which would restore 99% of the source.
+    const intent = await plan(planned({ left: 0.45, top: 0.3, right: 0.55, bottom: 0.4 }, ['background']));
+    expect(intent.editScope).toBe('global');
+  });
+
+  it('keeps a region that plausibly contains the target localized', async () => {
+    const intent = await plan(planned({ left: 0.3, top: 0.35, right: 0.7, bottom: 0.75 }, ['background']));
+    expect(intent.editScope).toBe('localized');
+  });
+
+  it('drops a protection that subsumes the change target but keeps siblings', async () => {
+    const intent = await plan(planned({ left: 0.3, top: 0.35, right: 0.7, bottom: 0.75 },
+      ['clothing', 'shirt', 'shoes', 'background']));
+    expect(intent.protectedAttributes).toEqual(['shoes', 'background']);
+  });
+});
+
 describe('verified artifact publication', () => {
   it('retries on the same source, intent, mode and controls; publishes only a passing candidate', async () => {
     const ws = await workspace(); await writeFile(join(ws.rootPath, 'source.png'), pngFixture(512, 512));
