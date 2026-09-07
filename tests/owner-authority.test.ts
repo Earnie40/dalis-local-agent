@@ -45,6 +45,8 @@ describe('owner authority invariants', () => {
     const media = source('apps/server/src/precision-media.ts');
     expect(media).toContain('verified: false');
     expect(media).toMatch(/fallback/);
+    // A later 500 used to return before publish and then unlink the PNG.
+    expect(media).toMatch(/later 500 used to return here/);
     // The strict gate remains available, but only when explicitly demanded.
     expect(media).toContain('DACAI_MEDIA_VERIFICATION');
   });

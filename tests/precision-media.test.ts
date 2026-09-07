@@ -349,6 +349,29 @@ describe('verified artifact publication', () => {
     // The retained candidate is published, not left behind beside the result.
     expect(await readdir(ws.rootPath)).toEqual(['result.png', 'source.png']);
   });
+  it('publishes the earlier image when a later attempt fails to generate', async () => {
+    // A first PNG used to be unlinked when retry hit anatomy-generate 500.
+    const ws = await workspace(); await writeFile(join(ws.rootPath, 'source.png'), pngFixture(512, 512));
+    const resultBytes = pngFixture(512, 512, 123);
+    const intent = MediaIntentSchema.parse(intentFixture('change only the shirt color'));
+    const execute = vi.fn(async (request: NormalizedToolCall) => {
+      if (execute.mock.calls.length >= 2) {
+        return { success: false, output: 'Anatomy-capable image backend failed: HTTP 500: Qwen/Qwen-Image-2512 weights not found' };
+      }
+      const path = String(request.arguments.outputPath);
+      await writeFile(join(ws.rootPath, path), resultBytes, { flag: 'wx' });
+      return { success: true, output: JSON.stringify({ path, method: 'anatomy' }) };
+    });
+    const verify = vi.fn().mockResolvedValue(report(intent, false));
+    const executor = new PrecisionMediaExecutor(inner(execute), { workspace: ws, plan: async () => intent, verify });
+
+    const result = await executor.execute(call({ prompt: intent.instruction, sourcePath: 'source.png' }));
+
+    expect(result.success).toBe(true);
+    expect(JSON.parse(result.output)).toMatchObject({ path: 'result.png', verified: false, verificationAttempts: 1 });
+    expect(await readFile(join(ws.rootPath, 'result.png'))).toEqual(resultBytes);
+    expect(await readdir(ws.rootPath)).toEqual(['result.png', 'source.png']);
+  });
   it('preserves preexisting outputs and collision races', async () => {
     const ws = await workspace(); const intent = MediaIntentSchema.parse(intentFixture('generate', { generate: true }));
     const execute = writer(ws.rootPath);

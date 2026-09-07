@@ -579,6 +579,26 @@ export class PrecisionMediaExecutor implements ToolExecutor {
         // find defects in a photograph of a person reliably finds some, so an
         // unverified result is usually a usable image with a caveat — not a
         // failure worth throwing the pixels away over.
+        const publishUnverified = async (detail: string): Promise<LoopToolResult | undefined> => {
+          if (!fallback || process.env.DACAI_MEDIA_VERIFICATION?.trim().toLowerCase() === 'enforce') return undefined;
+          const retained = fallback;
+          fallback = undefined;
+          try {
+            signal?.throwIfAborted();
+            await mkdir(dirname(output), { recursive: true });
+            await copyFile(retained.candidate, output, constants.COPYFILE_EXCL);
+            const bytes = await readFile(output);
+            const published = {
+              ...retained.metadata, path: requestedPath, format: extension.slice(1), bytes: bytes.length,
+              sha256: createHash('sha256').update(bytes).digest('hex'), intent,
+              verification: retained.verification, verificationAttempts: retained.attempts, verified: false,
+            };
+            return { ...retained.result, output: JSON.stringify(published), evidence: [
+              { kind: 'artifact_hash', summary: `Unverified final media artifact ${requestedPath}`, detail: published },
+              { kind: 'media-verification', summary: `Published without passing verification. ${detail}`, detail: published },
+            ] };
+          } finally { await unlink(retained.candidate).catch(() => undefined); }
+        };
         for (let attempt = 0; attempt < 3; attempt++) {
           signal?.throwIfAborted();
           const candidatePath = `${requestedPath.slice(0, -extname(requestedPath).length)}.candidate-${randomUUID()}${extname(requestedPath)}`;
@@ -586,7 +606,13 @@ export class PrecisionMediaExecutor implements ToolExecutor {
           let owned = false;
           try {
             const result = await this.inner.execute({ ...call, arguments: { ...args, outputPath: candidatePath, correction } }, signal);
-            if (!result.success) return result;
+            if (!result.success) {
+              // A later 500 used to return here, then the outer finally deleted
+              // the earlier PNG. Keep that image; the failure is annotated.
+              const published = await publishUnverified(result.output);
+              if (published) return published;
+              return result;
+            }
             const artifact = JSON.parse(result.output) as Record<string, unknown>;
             if (artifact.path !== candidatePath) throw new Error('Media tool returned an unexpected artifact path.');
             owned = true;
@@ -628,6 +654,10 @@ export class PrecisionMediaExecutor implements ToolExecutor {
               { kind: 'artifact_hash', summary: `Verified final media artifact ${requestedPath}`, detail: published },
               { kind: 'media-verification', summary: verification.summary, detail: published },
             ] };
+          } catch (error) {
+            const published = await publishUnverified(error instanceof Error ? error.message : String(error));
+            if (published) return published;
+            throw error;
           } finally { if (owned) await unlink(candidate).catch(() => undefined); }
         }
         const detail = lastVerification
@@ -638,23 +668,8 @@ export class PrecisionMediaExecutor implements ToolExecutor {
         // did produce an image, and the caller can see both it and what the
         // inspection objected to. Set DACAI_MEDIA_VERIFICATION=enforce to keep
         // the strict gate that discards anything it cannot fully verify.
-        if (fallback && process.env.DACAI_MEDIA_VERIFICATION?.trim().toLowerCase() !== 'enforce') {
-          try {
-            signal?.throwIfAborted();
-            await mkdir(dirname(output), { recursive: true });
-            await copyFile(fallback.candidate, output, constants.COPYFILE_EXCL);
-            const bytes = await readFile(output);
-            const published = {
-              ...fallback.metadata, path: requestedPath, format: extension.slice(1), bytes: bytes.length,
-              sha256: createHash('sha256').update(bytes).digest('hex'), intent,
-              verification: fallback.verification, verificationAttempts: fallback.attempts, verified: false,
-            };
-            return { ...fallback.result, output: JSON.stringify(published), evidence: [
-              { kind: 'artifact_hash', summary: `Unverified final media artifact ${requestedPath}`, detail: published },
-              { kind: 'media-verification', summary: `Published without passing verification. ${detail}`, detail: published },
-            ] };
-          } finally { await unlink(fallback.candidate).catch(() => undefined); }
-        }
+        const published = await publishUnverified(detail);
+        if (published) return published;
         if (fallback) await unlink(fallback.candidate).catch(() => undefined);
         throw new MediaFidelityError(`Media fidelity verification failed after 3 compatible attempts; no final artifact was published. ${detail}`);
       } finally {
