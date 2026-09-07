@@ -133,15 +133,25 @@ export interface Upload {
  * matches the body it generated.
  */
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+const MAX_VIDEO_UPLOAD_BYTES = 100 * 1024 * 1024;
+
+function isVideoUpload(file: File): boolean {
+  return file.type.startsWith('video/') || /\.(mp4|webm|mov)$/i.test(file.name);
+}
+
+function uploadLimitBytes(file: File): number {
+  return isVideoUpload(file) ? MAX_VIDEO_UPLOAD_BYTES : MAX_UPLOAD_BYTES;
+}
 
 export async function uploadWorkspaceFiles(
   workspaceId: string,
   files: readonly File[],
   signal?: AbortSignal,
 ): Promise<Upload[]> {
-  const oversized = files.find((file) => file.size > MAX_UPLOAD_BYTES);
+  const oversized = files.find((file) => file.size > uploadLimitBytes(file));
   if (oversized) {
-    throw new Error(`${oversized.name} exceeds the 25 MB upload limit.`);
+    const limitMb = Math.floor(uploadLimitBytes(oversized) / (1024 * 1024));
+    throw new Error(`${oversized.name} exceeds the ${limitMb} MB upload limit.`);
   }
 
   const form = new FormData();

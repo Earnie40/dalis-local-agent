@@ -23,7 +23,7 @@ import { registerInfrastructureRoutes } from './routes/infrastructure';
 import { registerIntelligenceRoutes } from './routes/intelligence';
 import { registerStudioRoutes } from './routes/studio';
 import { registerUploadRoutes } from './routes/uploads';
-import { MAX_UPLOAD_BYTES } from './workspace-uploads';
+import { MAX_VIDEO_UPLOAD_BYTES } from './workspace-uploads';
 import { registerMediaStudioRoutes } from './routes/media-studio';
 import { RunpodService } from './infrastructure/runpod-service';
 import { resolveRunpodPodPresence } from './infrastructure/runpod-pod-status';
@@ -66,10 +66,10 @@ const server = Fastify({
 });
 
 // Workspace uploads are the only multipart route group. The per-file cap
-// mirrors MAX_UPLOAD_BYTES in workspace-uploads.ts so an oversized body is
-// rejected while streaming instead of after it is fully buffered.
+// matches the video clip limit so a face-swap MP4 is not rejected before
+// saveUpload applies the smaller image/text cap.
 void server.register(fastifyMultipart, {
-  limits: { fileSize: MAX_UPLOAD_BYTES, files: 10 },
+  limits: { fileSize: MAX_VIDEO_UPLOAD_BYTES, files: 10 },
 });
 
 // The web app is served from a different origin in development. Both spellings

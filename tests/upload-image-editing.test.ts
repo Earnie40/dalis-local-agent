@@ -283,7 +283,10 @@ describe('uploadFailure', () => {
       code: 'FST_REQ_FILE_TOO_LARGE',
       statusCode: 413,
     });
-    expect(uploadFailure(error)).toEqual({ status: 413, message: 'Uploads are limited to 25 MB.' });
+    expect(uploadFailure(error)).toEqual({
+      status: 413,
+      message: 'Uploads are limited to 25 MB for images and 100 MB for video.',
+    });
   });
 
   it('keeps UploadError status', () => {

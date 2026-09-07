@@ -3,12 +3,13 @@ import { PostgresWorkspaceRegistry } from '@dacai-local-agent/workspace';
 import {
   listUploads,
   MAX_UPLOAD_BYTES,
+  MAX_VIDEO_UPLOAD_BYTES,
   removeUpload,
   saveUpload,
   UploadError,
 } from '../workspace-uploads';
 
-const SIZE_LIMIT_MESSAGE = `Uploads are limited to ${Math.floor(MAX_UPLOAD_BYTES / (1024 * 1024))} MB.`;
+const SIZE_LIMIT_MESSAGE = `Uploads are limited to ${Math.floor(MAX_UPLOAD_BYTES / (1024 * 1024))} MB for images and ${Math.floor(MAX_VIDEO_UPLOAD_BYTES / (1024 * 1024))} MB for video.`;
 
 function errorCode(error: unknown): string {
   return error && typeof error === 'object' && 'code' in error ? String((error as { code: unknown }).code) : '';
@@ -60,7 +61,7 @@ export function registerUploadRoutes(server: FastifyInstance): void {
 
   server.post<{ Params: { id: string } }>(
     '/api/workspaces/:id/uploads',
-    { bodyLimit: MAX_UPLOAD_BYTES * 10 + 1024 * 1024 },
+    { bodyLimit: MAX_VIDEO_UPLOAD_BYTES * 10 + 1024 * 1024 },
     async (request, reply) => {
       const workspace = await workspaces.get(request.params.id);
       if (!workspace) return reply.code(404).send({ error: 'Workspace not found.' });
@@ -116,5 +117,6 @@ export function registerUploadRoutes(server: FastifyInstance): void {
 
   server.get('/api/uploads/limits', async () => ({
     maxBytes: MAX_UPLOAD_BYTES,
+    maxVideoBytes: MAX_VIDEO_UPLOAD_BYTES,
   }));
 }

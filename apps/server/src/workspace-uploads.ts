@@ -11,6 +11,8 @@ import { containsSecret, resolveWithinWorkspace, PathContainmentError } from '@d
 export const UPLOAD_DIR = '.dacai/uploads';
 
 export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+/** Clips for video.faceSwap; the tool already accepts this size. Images stay at MAX_UPLOAD_BYTES. */
+export const MAX_VIDEO_UPLOAD_BYTES = 100 * 1024 * 1024;
 
 /** Text extracted for prompt inlining is bounded well below the file cap. */
 export const MAX_INLINE_TEXT_CHARS = 200_000;
@@ -245,15 +247,18 @@ export async function saveUpload(
   assertWritable(workspace);
 
   if (file.content.length === 0) throw new UploadError('The uploaded file is empty.');
-  if (file.content.length > MAX_UPLOAD_BYTES) {
-    throw new UploadError(
-      `Uploads are limited to ${Math.floor(MAX_UPLOAD_BYTES / (1024 * 1024))} MB.`,
-      413,
-    );
-  }
 
   const safeName = sanitizeUploadName(file.fileName);
   const { kind, mimeType } = classify(safeName);
+  const limit = SWAPPABLE_VIDEO_MIME_TYPES.has(mimeType) ? MAX_VIDEO_UPLOAD_BYTES : MAX_UPLOAD_BYTES;
+  if (file.content.length > limit) {
+    throw new UploadError(
+      SWAPPABLE_VIDEO_MIME_TYPES.has(mimeType)
+        ? `Video uploads are limited to ${Math.floor(MAX_VIDEO_UPLOAD_BYTES / (1024 * 1024))} MB.`
+        : `Uploads are limited to ${Math.floor(MAX_UPLOAD_BYTES / (1024 * 1024))} MB.`,
+      413,
+    );
+  }
 
   let textPreview: string | undefined;
   let truncated = false;
