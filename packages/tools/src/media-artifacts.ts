@@ -88,3 +88,20 @@ export function validateVideoConstraints(actual: VideoMetadata, expected: { widt
   if ((expected.width !== undefined && actual.width !== expected.width) || (expected.height !== undefined && actual.height !== expected.height)) throw new Error(`Video dimensions ${actual.width}x${actual.height} do not match the requested dimensions ${expected.width}x${expected.height}.`);
   if (expected.durationSeconds !== undefined && Math.abs(actual.durationSeconds - expected.durationSeconds) > Math.max(0.1, 1 / actual.fps)) throw new Error(`Video duration ${actual.durationSeconds}s does not match requested duration ${expected.durationSeconds}s.`);
 }
+
+/**
+ * Decode a base64 MP4 returned by the media service. Signature and size are
+ * checked before anything is written to disk; a decodable video stream is
+ * confirmed separately by `probeVideo` once the file exists.
+ */
+export function decodeMp4(value: unknown, maxBytes: number): Buffer {
+  if (typeof value !== 'string' || !value.trim()) throw new Error('The video backend returned no video data.');
+  const video = Buffer.from(value.replace(/^data:video\/mp4;base64,/i, ''), 'base64');
+  if (video.byteLength < 12 || video.byteLength > maxBytes) {
+    throw new Error(`The generated video is empty or exceeds the ${Math.round(maxBytes / 1024 / 1024)} MB limit.`);
+  }
+  if (video.subarray(4, 8).toString('ascii') !== 'ftyp') {
+    throw new Error('The video backend did not return a valid MP4 file.');
+  }
+  return video;
+}

@@ -940,3 +940,20 @@ describe('timeout recovery and duplicate-call avoidance', () => {
     expect(result.stopReason).toBe('final-answer');
   });
 });
+
+describe('empty final responses', () => {
+  it('fails instead of reporting goal completion after corrective retries are exhausted', async () => {
+    const result = await runAgentLoop({
+      provider: scriptedProvider([{ content: '' }]),
+      model: 'm',
+      capabilities: VERIFIED,
+      executor: executor(() => ({ output: 'unused', success: true })),
+      prompt: 'Generate an image.',
+      maxTurns: 8,
+    });
+
+    expect(result.stopReason).toBe('no-progress');
+    expect(result.completionState).toBe('FAILED');
+    expect(result.answer).toContain('no result was produced');
+  });
+});

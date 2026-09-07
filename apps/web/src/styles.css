@@ -506,6 +506,27 @@ button.icon {
   padding: 6px 0 0;
 }
 
+.attach-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.attach-button.attach-face {
+  border-color: color-mix(in srgb, #f59e0b 55%, var(--border));
+  color: #fbbf24;
+}
+
+.attach-button.attach-video {
+  border-color: color-mix(in srgb, #38bdf8 55%, var(--border));
+  color: #7dd3fc;
+}
+
+.attach-button.attach-character {
+  border-color: color-mix(in srgb, #a78bfa 55%, var(--border));
+  color: #c4b5fd;
+}
+
 .attach-button {
   font-size: 12px;
   padding: 4px 10px;
@@ -531,18 +552,42 @@ button.icon {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  max-width: 260px;
+  max-width: 420px;
   padding: 3px 8px;
   border: 1px solid var(--border);
   border-radius: 999px;
   background: var(--panel-2);
   color: var(--muted);
   font-size: 12px;
-  /* A long filename truncates instead of pushing the send controls off-row. */
+}
+
+.attachment-role {
+  flex: 0 0 auto;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text);
+}
+
+.attachment-name {
+  max-width: 120px;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
 }
+
+.attachment select {
+  max-width: 140px;
+  font-size: 11px;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.attachment.role-face { border-color: color-mix(in srgb, #f59e0b 50%, var(--border)); }
+.attachment.role-video { border-color: color-mix(in srgb, #38bdf8 50%, var(--border)); }
+.attachment.role-character { border-color: color-mix(in srgb, #a78bfa 50%, var(--border)); }
 
 .attachment small {
   opacity: 0.7;
@@ -570,6 +615,13 @@ button.icon {
 
 .attachment-error {
   color: var(--danger, #ef4444);
+}
+
+.attachment-map {
+  flex: 1 0 100%;
+  margin: 0;
+  font-size: 12px;
+  color: var(--text);
 }
 
 .composer-workspace {

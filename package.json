@@ -21,7 +21,8 @@
     "tomahawk": "node scripts/tomahawk.mjs",
     "runpod:media": "node --import tsx scripts/runpod-media-up.mjs",
     "runpod:app": "node --env-file=.env --import tsx scripts/runpod-app-up.mjs",
-    "test:providers:live": "node --import tsx scripts/live-provider-check.mjs"
+    "test:providers:live": "node --import tsx scripts/live-provider-check.mjs",
+    "media:faceswap:verify": "node --import tsx scripts/face-swap-live-check.mts"
   },
   "devDependencies": {
     "@stryker-mutator/core": "8.7.1",

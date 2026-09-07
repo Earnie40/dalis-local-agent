@@ -51,6 +51,9 @@ const mediaSources = [
   ['download_instruct_edit_model.py'],
   ['download_svd_model.py'],
   ['download_anatomy_models.py'],
+  ['face_swap_runner.py', resolve('deploy/runpod-media/face_swap_runner.py')],
+  ['download_face_swap_models.py', resolve('deploy/runpod-media/download_face_swap_models.py')],
+  ['provision-face-swap.sh', resolve('deploy/runpod-media/provision-face-swap.sh')],
   ['provision-anatomy-edit.sh'],
   ['gpu_runtime.py'],
 ].map(([name, override]) => ({ name, source: resolve(override || mediaSourceDirectory, override ? '' : name) }));
@@ -127,6 +130,8 @@ export DACAIS_ANATOMY_VIDEO_PYTHON="\${DACAIS_ANATOMY_VIDEO_PYTHON:-$ROOT/venvs/
 export DACAIS_ANATOMY_GENERATION_MODEL_ROOT="$ROOT/models/qwen-image-2512"
 export DACAIS_ANATOMY_EDIT_MODEL_ROOT="$ROOT/models/qwen-image-edit-2511"
 export DACAIS_ANATOMY_VIDEO_MODEL_ROOT="$ROOT/models/wan2.2-ti2v-5b"
+export DACAIS_FACE_SWAP_PYTHON="\${DACAIS_FACE_SWAP_PYTHON:-$ROOT/venvs/face-swap/bin/python}"
+export DACAIS_FACE_SWAP_MODEL_ROOT="$ROOT/models/face-swap"
 export DACAIS_SVD_PYTHON="$MODEL_PYTHON"
 export DACAIS_SVD_MODEL_ROOT="$ROOT/models/svd-xt"
 export HF_HOME="$ROOT/cache/huggingface"

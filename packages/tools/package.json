@@ -19,6 +19,7 @@
     "@dacai-local-agent/repository-index": "workspace:*",
     "@dacai-local-agent/context": "workspace:*",
     "@dacai-local-agent/memory": "workspace:*",
+    "@dacai-local-agent/domain-knowledge": "workspace:*",
     "@dacai-local-agent/smart-contract": "workspace:*"
   },
   "devDependencies": {

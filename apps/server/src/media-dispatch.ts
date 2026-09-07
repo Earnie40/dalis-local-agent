@@ -24,13 +24,21 @@ export function startMediaRecovery(
   }).catch(() => undefined);
 }
 
-/** Dispatch now; supervised recovery remains concurrent. */
-export function dispatchWithMediaRecovery<T>(options: {
+/** Wait for the managed transport/model to be ready, then dispatch once. */
+export async function dispatchWithMediaRecovery<T>(options: {
   kind: MediaDispatchKind;
   media?: MediaReadinessSupervisor;
   execute: () => Promise<T>;
   onUnavailable?: (status: MediaReadinessStatus) => void | Promise<void>;
 }): Promise<T> {
-  startMediaRecovery(options.kind, options.media, options.onUnavailable);
+  if (options.media) {
+    const status = options.kind === 'image'
+      ? await options.media.ensureImageReady()
+      : await options.media.ensureVideoReady();
+    if (!status.ready) {
+      await options.onUnavailable?.(status);
+      throw new Error(status.error ?? `The ${options.kind} backend is not ready.`);
+    }
+  }
   return options.execute();
 }

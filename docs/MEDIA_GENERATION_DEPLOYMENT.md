@@ -80,6 +80,61 @@ GET  /api/infrastructure/media/status
 POST /api/infrastructure/media/reconnect
 ```
 
+## Face swap lane
+
+`video.faceSwap` replaces one character's face in an existing clip with the face
+from an image. It synthesizes no new scene: every frame keeps its original
+motion, framing, timing and audio, and only the tracked identity is repainted.
+The lane runs on the same `dacais-media` service as `DACAI_VIDEO_BACKEND`, in its
+own venv, so a swap can run while the large diffusion pipelines are unloaded:
+
+- detection and recognition use an InsightFace pack (`buffalo_l` by default);
+- the swap itself uses `inswapper_128.onnx`;
+- `GFPGANv1.4` optionally restores the swapped region and is not required.
+
+Those weights are licensed for **non-commercial research use**, so acquisition is
+deliberately opt-in:
+
+```bash
+cd /workspace/dacais-media/service
+DACAIS_ACCEPT_FACE_SWAP_MODEL_LICENSE=1 ./provision-face-swap.sh
+```
+
+`/v1/health` reports `faceSwapModel` once the lane is installed; until then
+`/v1/face-swap` answers 501 rather than degrading to a different renderer. The
+swapper is pinned by sha256, so a substituted mirror build is deleted instead of
+installed.
+
+Two GPU details are load-bearing on a Blackwell (sm_120) pod, and both were
+found by running the lane rather than by loading it:
+
+- onnxruntime-gpu must carry cubins for the card. 1.23.0 builds its sessions
+  happily and then fails the first node with `cudaErrorNoKernelImageForDevice`.
+- 1.29.0 has the kernels but is a CUDA 13 build, while the pod ships CUDA 12.8.
+  The `[cuda,cudnn]` extras bring the matching runtime, and the runner calls
+  `onnxruntime.preload_dlls()` because the media service is started from a
+  non-login shell with no `LD_LIBRARY_PATH` to find it by.
+
+Neither failure is visible at load time — the second one degrades to
+`CPUExecutionProvider` silently, which is the same job at roughly fifty times
+the cost. So the provisioner's smoke test launches a real kernel and asserts the
+bound provider, the runner refuses to start on CPU unless
+`DACAIS_FACE_SWAP_ALLOW_CPU=1`, and every result reports the `provider` that
+actually rendered it.
+
+`pnpm media:faceswap:verify` proves the whole path end to end against the live
+service: it generates a synthetic face and an SVD-animated target clip on the
+pod, runs the real `video.faceSwap` tool over them, and fails unless a frame was
+genuinely swapped. Add `--reuse` to keep the previous fixtures.
+
+Every frame of the target clip is re-rendered, so `DACAI_FACE_SWAP_MAX_SECONDS`
+(default 120) bounds one job. The tool probes the clip locally and rejects a
+longer one before uploading anything. The runner writes a synthetic-media tag
+into the result's MP4 metadata and returns it as `syntheticMediaTag`, and the
+tool deletes the artifact unless the service reports at least one swapped frame.
+The `face-swap-video` skill carries the operating procedure and the authorization
+guardrails for the agent.
+
 ## Production
 
 Production does not use SSH. Put the media container behind a TLS endpoint and

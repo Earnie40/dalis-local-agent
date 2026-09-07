@@ -317,14 +317,17 @@ await ssh(`bash ${APP_ROOT}/deploy/runpod-native/start.sh`, {
   inherit: true,
 });
 
-async function remoteJson(url) {
-  const response = await ssh(`curl -fsS --max-time 30 ${url}`);
+// A forced GPU re-probe enumerates devices and re-runs routing, which takes well
+// over a minute on a cold driver. Every readiness probe here is cheap except that
+// one, so it gets its own budget instead of reporting a healthy deploy as failed.
+async function remoteJson(url, seconds = 30) {
+  const response = await ssh(`curl -fsS --max-time ${seconds} '${url}'`, { timeoutMs: (seconds + 20) * 1000 });
   return JSON.parse(response.stdout);
 }
 
 const [health, gpu, media, tags, workspaces] = await Promise.all([
   remoteJson('http://127.0.0.1:3101/health'),
-  remoteJson('http://127.0.0.1:3101/api/infrastructure/gpu-routing?refresh=1'),
+  remoteJson('http://127.0.0.1:3101/api/infrastructure/gpu-routing?refresh=1', 180),
   remoteJson('http://127.0.0.1:3101/api/infrastructure/media/status'),
   remoteJson('http://127.0.0.1:11434/api/tags'),
   remoteJson('http://127.0.0.1:3101/api/workspaces'),

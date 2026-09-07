@@ -62,6 +62,7 @@ export const ENGINEERING_MUTATION_TOOLS = new Set([
   'scene.render',
   'image.generate',
   'video.generate',
+  'video.faceSwap',
 ]);
 
 export function isMutationTool(toolName: string): boolean {

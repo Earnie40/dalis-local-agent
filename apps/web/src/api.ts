@@ -99,6 +99,15 @@ async function json<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+export type AttachmentRole = 'file' | 'image' | 'face' | 'video' | 'character';
+
+export interface AgentAttachmentRef {
+  id: string;
+  role?: AttachmentRole;
+  targetFaceIndex?: number;
+  swapTargetId?: string;
+}
+
 export interface Upload {
   id: string;
   name: string;
@@ -111,6 +120,11 @@ export interface Upload {
   /** Text files only; used to inline content where there is no workspace. */
   textPreview?: string;
   truncated?: boolean;
+  /** Composer-assigned use of this file for image edit / face swap. */
+  role?: AttachmentRole;
+  targetFaceIndex?: number;
+  /** Face→character pairing: character upload id, or `person:N`. */
+  swapTargetId?: string;
 }
 
 /**
@@ -118,11 +132,18 @@ export interface Upload {
  * unset on purpose: the browser must supply it so the multipart boundary
  * matches the body it generated.
  */
+const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+
 export async function uploadWorkspaceFiles(
   workspaceId: string,
   files: readonly File[],
   signal?: AbortSignal,
 ): Promise<Upload[]> {
+  const oversized = files.find((file) => file.size > MAX_UPLOAD_BYTES);
+  if (oversized) {
+    throw new Error(`${oversized.name} exceeds the 25 MB upload limit.`);
+  }
+
   const form = new FormData();
   for (const file of files) form.append('files', file, file.name);
 
@@ -629,7 +650,7 @@ export async function streamAgent(
     sessionId?: string;
     history?: Array<{ role: 'user' | 'assistant'; content: string }>;
     runMode?: 'interactive' | 'coding' | 'repository_audit' | 'deep_research';
-    attachments?: string[];
+    attachments?: Array<string | AgentAttachmentRef>;
   },
   onEvent: (event: AgentEvent) => void,
   signal: AbortSignal,

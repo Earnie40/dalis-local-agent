@@ -6,14 +6,20 @@ import {
   classifyDirectMediaRequest,
   isImageEditRequest,
   isImageGenerationRequest,
+  isMultiImageReferenceGenerationRequest,
   lastGeneratedImageFromHistory,
 } from '../apps/server/src/routes/agent';
+import { uploadFailure } from '../apps/server/src/routes/uploads';
 import {
   fitGenerationSize,
   readImageDimensions,
+  attachmentsIndicateFaceSwap,
+  faceSwapPairs,
+  normalizeAgentAttachments,
   renderUploadsForPrompt,
   selectEditableImage,
   workspaceImageDescriptor,
+  UploadError,
   type UploadDescriptor,
 } from '../apps/server/src/workspace-uploads';
 
@@ -110,6 +116,30 @@ describe('media intent with an attached image', () => {
   });
 });
 
+describe('multiple attached identity references', () => {
+  const references = { hasImageAttachment: true, imageAttachmentCount: 2 };
+
+  it('treats a new shared scene as generation with references, not a single-image edit', () => {
+    const prompt = 'Create one new complete image using both attached photos as identity references, together in the same kitchen scene.';
+    expect(isMultiImageReferenceGenerationRequest(prompt, references)).toBe(true);
+    expect(isImageGenerationRequest(prompt, [], references)).toBe(true);
+    expect(isImageEditRequest(prompt, references)).toBe(false);
+    expect(classifyDirectMediaRequest(prompt, [], references)).toBe('image');
+  });
+
+  it('keeps an explicit modification of attached images on the edit path', () => {
+    const prompt = 'Edit the attached image to make her hair blonde.';
+    expect(isMultiImageReferenceGenerationRequest(prompt, references)).toBe(false);
+    expect(isImageEditRequest(prompt, references)).toBe(true);
+  });
+
+  it('does not turn an edit of both attachments into reference generation', () => {
+    const prompt = 'Edit both attached photos to make their clothing blue.';
+    expect(isMultiImageReferenceGenerationRequest(prompt, references)).toBe(false);
+    expect(isImageEditRequest(prompt, references)).toBe(true);
+  });
+});
+
 describe('selectEditableImage', () => {
   it('picks the most recently attached editable image', () => {
     const first = upload({ id: 'a', name: 'first.png' });
@@ -191,6 +221,83 @@ describe('renderUploadsForPrompt for images', () => {
     ]);
     expect(rendered).toContain('Read it with a tool');
     expect(rendered).not.toContain('sourcePath');
+  });
+
+  it('emits authoritative face-swap paths from composer roles', () => {
+    const rendered = renderUploadsForPrompt([
+      upload({ id: 'face', name: 'face.png', path: '.dacai/uploads/face.png', role: 'face' }),
+      upload({
+        id: 'clip', name: 'clip.mp4', path: '.dacai/uploads/clip.mp4',
+        mimeType: 'video/mp4', role: 'video', targetFaceIndex: 1,
+      }),
+    ]);
+    expect(rendered).toContain('facePath = .dacai/uploads/face.png');
+    expect(rendered).toContain('video.faceSwap videoPath = .dacai/uploads/clip.mp4');
+    expect(rendered).toContain('targetFaceIndex = 1');
+    expect(rendered).toContain('Do not invent a different path');
+  });
+});
+
+describe('labeled agent attachments', () => {
+  it('accepts both the legacy id list and the role objects', () => {
+    expect(normalizeAgentAttachments(['a', { id: 'b', role: 'face' }, { id: 'c', role: 'video', targetFaceIndex: 2 }])).toEqual([
+      { id: 'a' },
+      { id: 'b', role: 'face', targetFaceIndex: undefined, swapTargetId: undefined },
+      { id: 'c', role: 'video', targetFaceIndex: 2, swapTargetId: undefined },
+    ]);
+  });
+
+  it('detects a marked face plus clip as a face-swap request', () => {
+    expect(attachmentsIndicateFaceSwap([
+      upload({ role: 'face' }),
+      upload({ mimeType: 'video/mp4', role: 'video' }),
+    ])).toBe(true);
+    expect(attachmentsIndicateFaceSwap([upload({ role: 'face' })])).toBe(false);
+  });
+
+  it('maps each face onto a person or character still', () => {
+    const clip = upload({ id: 'clip', name: 'clip.mp4', path: '.dacai/uploads/clip.mp4', mimeType: 'video/mp4', role: 'video' });
+    const left = upload({ id: 'alice', name: 'alice.png', path: '.dacai/uploads/alice.png', role: 'face', swapTargetId: 'person:0' });
+    const right = upload({ id: 'bob', name: 'bob.png', path: '.dacai/uploads/bob.png', role: 'face', swapTargetId: 'char-1' });
+    const still = upload({ id: 'char-1', name: 'right.jpg', path: '.dacai/uploads/right.jpg', mimeType: 'image/jpeg', role: 'character' });
+    expect(faceSwapPairs([left, right, still, clip])).toEqual([
+      {
+        facePath: '.dacai/uploads/alice.png', faceName: 'alice.png', videoPath: '.dacai/uploads/clip.mp4',
+        targetReferencePath: undefined, targetFaceIndex: 0, targetLabel: 'person 1 from the left',
+      },
+      {
+        facePath: '.dacai/uploads/bob.png', faceName: 'bob.png', videoPath: '.dacai/uploads/clip.mp4',
+        targetReferencePath: '.dacai/uploads/right.jpg', targetFaceIndex: undefined, targetLabel: 'character still right.jpg',
+      },
+    ]);
+    const rendered = renderUploadsForPrompt([left, right, still, clip]);
+    expect(rendered).toContain('pair 1: facePath = .dacai/uploads/alice.png');
+    expect(rendered).toContain('pair 2: facePath = .dacai/uploads/bob.png');
+    expect(rendered).toContain('Run video.faceSwap once per pair');
+  });
+});
+
+describe('uploadFailure', () => {
+  it('maps multipart oversize to 413 instead of 500', () => {
+    const error = Object.assign(new Error('request file too large'), {
+      code: 'FST_REQ_FILE_TOO_LARGE',
+      statusCode: 413,
+    });
+    expect(uploadFailure(error)).toEqual({ status: 413, message: 'Uploads are limited to 25 MB.' });
+  });
+
+  it('keeps UploadError status', () => {
+    expect(uploadFailure(new UploadError('This workspace is read-only. Enable the write capability before uploading files into it.', 403))).toEqual({
+      status: 403,
+      message: 'This workspace is read-only. Enable the write capability before uploading files into it.',
+    });
+  });
+
+  it('keeps unknown failures as 500', () => {
+    expect(uploadFailure(new Error('disk full'))).toEqual({
+      status: 500,
+      message: 'The upload could not be stored.',
+    });
   });
 });
 

@@ -71,7 +71,7 @@ describe('media precision regressions', () => {
     const fetchMock = vi.fn();
     const tool = createImageGenerationTools({ env: { DACAI_IMAGE_BACKEND: 'dacais-media' }, fetch: fetchMock as typeof fetch })[0];
     await expect(tool.execute({ prompt: 'shirt', intent: { requiresBodyGeometry: 'false' }, outputPath: 'result.png' }, { workspaceRoot: root })).rejects.toThrow();
-    await expect(tool.execute({ prompt: 'shirt', intent: intentFixture('shirt'), mode: 'img2img', sourcePath: 'source.png', outputPath: 'result.png' }, { workspaceRoot: root })).rejects.toThrow('protected content');
+    await expect(tool.execute({ prompt: 'shirt', intent: intentFixture('shirt'), mode: 'img2img', sourcePath: 'source.png', outputPath: 'result.png' }, { workspaceRoot: root })).rejects.toThrow('localized edit or preservation constraints');
     expect(fetchMock).not.toHaveBeenCalled();
   });
 

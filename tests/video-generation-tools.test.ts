@@ -8,7 +8,7 @@ import {
   videoGenerationRequiresNetwork,
 } from '../packages/tools/src/video-generation-tools';
 
-import { VIDEO_FIXTURE as MP4, mockVideoProbe } from './media-fixtures';
+import { VIDEO_FIXTURE as MP4, intentFixture, mockVideoProbe } from './media-fixtures';
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const cleanup: string[] = [];
 
@@ -36,7 +36,7 @@ describe('video generation tool', () => {
   it('generates a text-to-video MP4 through the Wan media service', async () => {
     const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       expect(String(url)).toBe('http://127.0.0.1:18090/v1/anatomy-video');
-      expect(JSON.parse(String(init?.body))).toMatchObject({ prompt: 'cinematic ocean', animate: true, frames: 20, mode: 'anatomy' });
+      expect(JSON.parse(String(init?.body))).toMatchObject({ prompt: 'cinematic ocean', animate: true, frames: 20, mode: 'auto' });
       return new Response(JSON.stringify({
         videoBase64: MP4.toString('base64'), videoModel: 'Wan-AI/Wan2.2-TI2V-5B-Diffusers', videoFrames: 20,
       }), { status: 200 });
@@ -88,13 +88,34 @@ describe('video generation tool', () => {
       env: { DACAI_VIDEO_BACKEND: 'dacais-media' }, fetch: fetchMock as typeof fetch,
     })[0];
 
+    const prompt = 'two adults walking side by side with consistent full-body anatomy';
+    const intent = { ...intentFixture(prompt, { geometry: true }), kind: 'video' as const };
     const result = await tool.execute({
-      prompt: 'two adults walking side by side with consistent full-body anatomy',
+      prompt,
+      intent,
       sourcePath: 'source.png', outputPath: 'walking.mp4',
     }, { workspaceRoot: root }) as Record<string, unknown>;
 
     expect(result).toMatchObject({ model: 'Wan-AI/Wan2.2-TI2V-5B-Diffusers', frames: 480 });
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('passes provider-permitted mature video intent verbatim without app classification or rewriting', async () => {
+    const prompt = 'Tasteful mature boudoir fashion film of consenting adults; preserve wardrobe, pose, camera angle, and lighting.';
+    const intent = { ...intentFixture(prompt, { generate: true }), kind: 'video' as const };
+    const fetchMock = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      expect(JSON.parse(String(init?.body))).toMatchObject({
+        prompt, intent, negativePrompt: '', mode: 'auto',
+      });
+      return new Response(JSON.stringify({ videoBase64: MP4.toString('base64'), videoModel: 'provider-video-model' }), { status: 200 });
+    });
+    const tool = createVideoGenerationTools({
+      probeVideo: mockVideoProbe, env: { DACAI_VIDEO_BACKEND: 'dacais-media' }, fetch: fetchMock as typeof fetch,
+    })[0];
+
+    await expect(tool.execute({ prompt, intent, outputPath: 'mature.mp4' }, { workspaceRoot: await workspace() }))
+      .resolves.toMatchObject({ path: 'mature.mp4', model: 'provider-video-model' });
+    expect(fetchMock).toHaveBeenCalledOnce();
   });
 
   it('requires explicit authenticated HTTPS for production backends and rejects unsafe paths/data/overwrites', async () => {

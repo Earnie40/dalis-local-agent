@@ -806,6 +806,16 @@ ${toolsForTurn.map((tool) => `- ${tool.name}`).join('\n')}`,
         }
       }
 
+      // An exhausted corrective budget does not turn an empty provider response
+      // into a completed task. Surface an explicit failed state so callers and
+      // the UI cannot report GOAL_COMPLETE with no answer or artifact.
+      if (looksLikeEmptyAnswer(content)) {
+        answer = 'TASK_FAILED: The model returned an empty response after corrective retries; no result was produced.';
+        stopReason = 'no-progress';
+        completionState = 'FAILED';
+        break;
+      }
+
       // Small/local models format the terminal marker loosely: on its own
       // line, wrapped in Markdown emphasis, or without the colon. The shared
       // parser accepts those declarations and rejects incidental mentions in

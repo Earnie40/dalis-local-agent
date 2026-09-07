@@ -17,6 +17,7 @@ const ARTIFACT_TOOLS = new Set([
   'bim.execute',
   'image.generate',
   'video.generate',
+  'video.faceSwap',
 ]);
 
 function artifactFromPath(path: unknown): AgentArtifact | undefined {

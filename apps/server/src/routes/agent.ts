@@ -39,6 +39,9 @@ import {
   loadUploadsForPrompt,
   renderUploadsForPrompt,
   loadVisionAttachments,
+  attachmentsIndicateFaceSwap,
+  normalizeAgentAttachments,
+  type AgentAttachmentRef,
   isEditableImage,
   selectEditableImage,
   workspaceImageDescriptor,
@@ -127,7 +130,7 @@ interface AgentBody {
   /** Visible user/assistant turns from this browser conversation. */
   history?: Array<{ role: 'user' | 'assistant'; content: string }>;
   /** Ids of files uploaded to this workspace and attached to the prompt. */
-  attachments?: string[];
+  attachments?: Array<string | AgentAttachmentRef>;
 }
 
 const IMAGE_GENERATION_INTENT =
@@ -367,7 +370,7 @@ const CODING_PROMPT = `You are a local coding agent working inside a registered 
 
 Rules:
 - Inspect before you answer. Never answer from memory about this project.
-- The active language model is text/tool based. When image.generate is available and the user asks for a photo, photoreal image, portrait, image edit, or raster artwork, call image.generate and report its returned workspace path. If an edit names an area but not the replacement, fill only that requested area with what is anatomically or structurally correct for the depicted subject (person, place, or thing); do not invent unrequested regions. If that unspecified replacement is in an area of possible concern, do not generate: alert the user and emit TASK_WAITING_FOR_USER: asking them to confirm or name the replacement. When video.generate is available and the user asks for a generated video or to animate an image, call video.generate. When video.faceSwap is available and the user asks to put a face from one file onto a person in a video, call video.faceSwap with the attached image as facePath and the attached video as videoPath. For simple diagrams or when raster generation is unavailable, create a real workspace-relative SVG or standalone HTML/canvas artifact with filesystem.write, preferably under output/. The agent chat previews generated images and videos. Never claim media was generated unless a successful tool result proves the artifact exists.
+- The active language model is text/tool based. When image.generate is available and the user asks for a photo, photoreal image, portrait, image edit, or raster artwork, call image.generate and report its returned workspace path. If an edit names an area but not the replacement, fill only that requested area with what is anatomically or structurally correct for the depicted subject (person, place, or thing); do not invent unrequested regions. If that unspecified replacement is in an area of possible concern, do not generate: alert the user and emit TASK_WAITING_FOR_USER: asking them to confirm or name the replacement. When video.generate is available and the user asks for a generated video or to animate an image, call video.generate. When video.faceSwap is available and the user asks to put a face from one file onto a person in a video, or attached files are marked role=face and role=video, call video.faceSwap. When a face-swap map is present, treat each listed pair as one video.faceSwap call in that order: facePath and targetReferencePath/targetFaceIndex come from the pair; videoPath is the marked clip for the first pair and the previous pair's output MP4 for later pairs. Do not guess other files or mix faces across pairs. For simple diagrams or when raster generation is unavailable, create a real workspace-relative SVG or standalone HTML/canvas artifact with filesystem.write, preferably under output/. The agent chat previews generated images and videos. Never claim media was generated unless a successful tool result proves the artifact exists.
 - For repository-code discovery, prefer code.architecture.context and code.symbol.search before broad recursive filesystem listings.
 - Before modifying an important symbol, use code.symbol.impact to inspect callers, dependencies, references, and related tests.
 - The runtime may return a pre_edit_impact_gate instead of performing the first requested file mutation. When this occurs, the mutation has NOT executed. Review the supplied dependency and test impact, adjust the patch if necessary, then retry the mutation once.
@@ -1013,7 +1016,7 @@ export function registerAgentRoutes(
     // objective, acceptance criteria and image prompt keep the text the user
     // actually typed, so an attached file never rewrites what the run is for.
     const attachedUploads = body.attachments?.length
-      ? await loadUploadsForPrompt(workspace.rootPath, body.attachments)
+      ? await loadUploadsForPrompt(workspace.rootPath, normalizeAgentAttachments(body.attachments))
       : [];
     const promptWithAttachments = effectivePrompt + renderUploadsForPrompt(attachedUploads);
     // The most recently attached PNG/JPEG/WebP is what an edit acts on.
@@ -1028,11 +1031,13 @@ export function registerAgentRoutes(
     const priorGeneratedImage = lastGeneratedImageFromHistory(conversationHistory);
     // Video intent wins over image intent for prompts such as "animate this
     // image". Otherwise that phrase would be incorrectly routed to a new PNG.
-    const directMediaKind = classifyDirectMediaRequest(effectivePrompt, advancedRequested, {
-      hasImageAttachment: Boolean(editableImage),
-      imageAttachmentCount: editableImages.length,
-      hasPriorGeneratedImage: Boolean(priorGeneratedImage),
-    });
+    const directMediaKind = attachmentsIndicateFaceSwap(attachedUploads)
+      ? undefined
+      : classifyDirectMediaRequest(effectivePrompt, advancedRequested, {
+          hasImageAttachment: Boolean(editableImage),
+          imageAttachmentCount: editableImages.length,
+          hasPriorGeneratedImage: Boolean(priorGeneratedImage),
+        });
     const unspecifiedFillConfirmation = isUnspecifiedFillConfirmation(effectivePrompt, historyText);
     const imageGenerationRun = directMediaKind === 'image' || unspecifiedFillConfirmation;
     const videoGenerationRun = directMediaKind === 'video';
@@ -1130,7 +1135,8 @@ export function registerAgentRoutes(
     const wantsQuality = /\b(test|property|fuzz|mutation|invariant|coverage)\b/.test(prompt);
     const wantsVision = /\b(image|screenshot|mockup|visual|ui|layout|design|vision|anatomy|anatomical|body|face|animal|object|place)\b/i.test(prompt);
     const wantsVideoGeneration = isVideoGenerationRequest(effectivePrompt, advancedRequested);
-    const wantsFaceSwap = isFaceSwapRequest(effectivePrompt, advancedRequested);
+    const wantsFaceSwap = isFaceSwapRequest(effectivePrompt, advancedRequested)
+      || attachmentsIndicateFaceSwap(attachedUploads);
     const wantsSmartContract =
       /\b(solidity|smart ?contract|\.sol\b|reentrancy|erc-?(20|721|1155)|evm|delegatecall|onlyowner)\b/.test(prompt);
     const wantsEngineering =

@@ -123,7 +123,7 @@ function stringArgument(arguments_: Record<string, unknown> | undefined, keys: s
 function classifyTool(name: string): AgentActivityType {
   if (name === 'filesystem.read' || name === 'filesystem.stat') return 'file_read';
   if (name === 'filesystem.edit' || name === 'filesystem.write' || name === 'filesystem.move' || name === 'filesystem.copy') return 'file_edit';
-  if (name === 'image.generate' || name === 'video.generate') return 'file_edit';
+  if (name === 'image.generate' || name === 'video.generate' || name === 'video.faceSwap') return 'file_edit';
   if (name === 'filesystem.list' || name === 'code.architecture.context') return 'inspection';
   if (name === 'filesystem.search' || name.startsWith('code.symbol.') || name === 'code.path.trace') return 'search';
   if (name === 'shell.run' || name === 'git.run') return 'command';
@@ -168,6 +168,9 @@ function toolIntent(toolName: string, filePath: string | undefined, command: str
   }
   if (toolName === 'video.generate') {
     return { title: 'I’m generating a video', message: `I’m using the configured GPU media backend to create ${filePath ?? 'a workspace MP4'}. Permission checks still guard the generated file.` };
+  }
+  if (toolName === 'video.faceSwap') {
+    return { title: 'I’m swapping a face in a video', message: `I’m using the configured GPU media backend to put the selected face onto one character in the clip, writing ${filePath ?? 'a workspace MP4'}. Permission checks still guard the generated file.` };
   }
   if (toolName === 'tests.run' || toolName === 'code.diagnostics' || toolName.startsWith('quality.')) {
     return { title: 'I’m verifying the work', message: command ? `I’m running ${command} to test the current evidence.` : 'I’m running a targeted verification step before treating the work as complete.' };

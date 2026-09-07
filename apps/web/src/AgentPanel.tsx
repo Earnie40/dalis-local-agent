@@ -30,6 +30,10 @@ const IMAGE_GENERATION_INTENT =
   /(?:\b|you)(?:generate|create|make|produce|render|draw|paint|illustrate|design|edit|modify|update|transform)\b[\s\S]{0,160}\b(?:ai\s+)?(?:image|photo|picture|portrait|artwork)\b|\b(?:ai\s+)?(?:image|photo|picture|portrait|artwork)\b[\s\S]{0,160}\b(?:generate|create|make|produce|render|draw|paint|illustrate|design|edit|modify|update|transform)\b|\b(?:image|photo|picture|portrait|artwork)\s+of\b/;
 const DESCRIPTIVE_IMAGE_INTENT =
   /\b(?:woman|women|man|men|female|male|person|people|model|character|characters|fashion|outfit|portrait|face|body|figure|landscape|mountain|beach|ocean|cityscape|architecture|interior|still[- ]life|product|animal|dog|cat|bird|flower|sunset|night[- ]sky)\b/i;
+const VISUAL_CREATION_VERB =
+  /^\s*(?:(?:please|can you|could you|would you)\s+)?(?:generate|create|make|produce|render|draw|paint|illustrate|design)\b/i;
+const VISUAL_STYLE_INTENT =
+  /\b(?:photo[- ]?realistic|photorealism|cinematic|editorial|lifestyle\s+photograph|studio\s+(?:photo|portrait)|macro\s+photograph|watercolou?r|oil\s+painting|digital\s+art|concept\s+art|anime|manga|comic|pixel\s+art|3d\s+render|cgi|film\s+grain|shallow\s+depth\s+of\s+field)\b/i;
 const NON_IMAGE_REQUEST_INTENT =
   /\b(?:code|coding|repository|repo|file|function|class|bug|error|test|typescript|javascript|python|api|endpoint|database|sql|regex|command|terminal|shell|explain|describe|analy[sz]e|inspect|identify|what|who|where|when|why|how)\b/i;
 
@@ -49,6 +53,10 @@ function isImageGenerationPrompt(value: string, uploads: readonly Upload[] = [])
   return IMAGE_GENERATION_INTENT.test(normalized)
     || (normalized.length > 2
       && DESCRIPTIVE_IMAGE_INTENT.test(normalized)
+      && !NON_IMAGE_REQUEST_INTENT.test(normalized))
+    || (normalized.length > 2
+      && VISUAL_CREATION_VERB.test(normalized)
+      && VISUAL_STYLE_INTENT.test(normalized)
       && !NON_IMAGE_REQUEST_INTENT.test(normalized));
 }
 
@@ -83,6 +91,7 @@ const TOOL_LABELS: Record<string, string> = {
   'scene.render': 'Render approved Blender scene',
   'image.generate': 'Generate photoreal raster image',
   'video.generate': 'Generate photoreal video',
+  'video.faceSwap': 'Swap a face into a video',
   'workspace.open-file': 'Open file in VS Code',
   'terminal.open': 'Open PowerShell/CMD/WSL/Docker',
   'security.simulation.api-input': 'Synthetic API fuzzing',
@@ -235,7 +244,14 @@ export function AgentPanel() {
         sessionId: activeSessionId,
         history: agentConversationHistory(events),
         runMode,
-        attachments: attachments.length ? attachments.map((upload) => upload.id) : undefined,
+        attachments: attachments.length
+          ? attachments.map((upload) => ({
+              id: upload.id,
+              role: upload.role,
+              targetFaceIndex: upload.targetFaceIndex,
+              swapTargetId: upload.swapTargetId,
+            }))
+          : undefined,
       }, (event) => {
         if (event.type === 'activity' && event.activity) {
           appendActivity(activeSessionId, event.activity);
@@ -665,6 +681,7 @@ export function AgentPanel() {
           uploads={attachments}
           onChange={setAttachments}
           disabled={running}
+          mediaRoles
         />
         <div className="actions">
           {running ? (
