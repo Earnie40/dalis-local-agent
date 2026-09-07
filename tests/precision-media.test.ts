@@ -28,9 +28,17 @@ function report(intent: MediaIntent, passed = true): MediaVerification {
     summary: passed ? 'Verified all requested features.' : 'Requested color is wrong.', correction: passed ? '' : 'Change the shirt to the requested blue; keep every protected attribute unchanged.' };
 }
 function registryWith(content: unknown) {
-  const chat = vi.fn(async (_request: Record<string, unknown>) => ({ content: typeof content === 'string' ? content : JSON.stringify(content) }));
+  const chat = vi.fn(async (request: Record<string, unknown>) => {
+    if (request.responseFormat) {
+      return { content: typeof content === 'string' ? content : JSON.stringify(content) };
+    }
+    return { content: JSON.stringify({ sceneSummary: 'A visible source scene.', requestedChange: '', targetRegions: [], regions: [] }) };
+  });
   const resolveAlias = vi.fn(async () => ({ provider: { chat }, model: 'test-vision' }));
   return { registry: { resolveAlias } as unknown as ProviderRegistry, chat, resolveAlias };
+}
+function planningCalls(chat: ReturnType<typeof vi.fn>) {
+  return chat.mock.calls.filter((entry) => (entry[0] as { responseFormat?: unknown })?.responseFormat);
 }
 function visualDefect(description: string, options: { location?: string; presentInOriginal?: boolean; contradictsRequest?: boolean } = {}) {
   return {
@@ -62,7 +70,40 @@ describe('precision intent planning', () => {
     const intent = await planMediaIntent(registry, { kind: 'image', instruction, sourceImageBase64: 'source-pixels' });
     expect(intent).toMatchObject({ requiresBodyGeometry: geometry, changesPose: false, editScope: 'localized' });
     expect(intent.changes[0].target).toBe(target);
-    expect(chat.mock.calls[0][0]).toMatchObject({ think: false, responseFormat: { type: 'object', required: expect.arrayContaining(['version', 'kind', 'changes']) } });
+    expect(planningCalls(chat)[0][0]).toMatchObject({ think: false, responseFormat: { type: 'object', required: expect.arrayContaining(['version', 'kind', 'changes']) } });
+  });
+  it('feeds vision clothing and region facts into the planner instead of guessing from the user sentence', async () => {
+    const instruction = 'remove her shirt';
+    const expected = intentFixture(instruction, { geometry: true });
+    expected.changes[0].target = 'shirt';
+    const chat = vi.fn(async (request: Record<string, unknown>) => {
+      if (request.responseFormat) return { content: JSON.stringify(expected) };
+      return { content: JSON.stringify({
+        sceneSummary: 'An adult woman wearing a blue button-down shirt and black trousers.',
+        requestedChange: 'remove her shirt',
+        targetRegions: ['blue button-down shirt covering the torso'],
+        regions: [{
+          label: 'shirt', location: 'torso-center',
+          box: { left: 0.28, top: 0.22, right: 0.72, bottom: 0.68 },
+          visibleDetails: 'blue button-down shirt covering the torso',
+        }],
+      }) };
+    });
+    const registry = { resolveAlias: vi.fn(async () => ({ provider: { chat }, model: 'qwen2.5vl:7b' })) } as unknown as ProviderRegistry;
+    const intent = await planMediaIntent(registry, { kind: 'image', instruction, sourceImageBase64: 'source-pixels' });
+    expect(intent.requiresBodyGeometry).toBe(true);
+    const analysis = chat.mock.calls[0][0] as { messages: Array<{ images?: string[]; content?: string }> };
+    expect(analysis.messages[0].images).toEqual(['source-pixels']);
+    expect(analysis.responseFormat).toBeUndefined();
+    const planned = planningCalls(chat)[0][0] as { messages: Array<{ content: string }> };
+    const payload = JSON.parse(planned.messages[0].content) as {
+      visualEvidence: { regions: Array<{ label: string; visibleDetails: string }> };
+      visualEvidenceRule?: string;
+    };
+    expect(payload.visualEvidence.regions[0]).toMatchObject({
+      label: 'shirt', visibleDetails: 'blue button-down shirt covering the torso',
+    });
+    expect(payload.visualEvidenceRule).toMatch(/identify clothing/i);
   });
   it('retains multi-part instructions, counts and placement', async () => {
     const instruction = 'Place exactly two red cubes on the left and one blue sphere on the right.';
@@ -82,7 +123,7 @@ describe('precision intent planning', () => {
     });
     expect(intent).toMatchObject({ version: 1, kind: 'image', operation: 'edit', instruction: 'change shirt',
       constraints: { width: 512, height: 512, loop: false } });
-    expect(chat).toHaveBeenCalledOnce();
+    expect(planningCalls(chat)).toHaveLength(1);
   });
   it('never widens a localized edit when the planner omits its grounded region', async () => {
     const response = { ...intentFixture('change shirt'), changes: [{ action: 'change shirt', target: 'shirt' }] };
@@ -90,7 +131,7 @@ describe('precision intent planning', () => {
     await expect(planMediaIntent(registry, {
       kind: 'image', instruction: 'change shirt', sourceImageBase64: 'source',
     })).rejects.toThrow('could not be grounded without changing the request');
-    expect(chat).toHaveBeenCalledTimes(2);
+    expect(planningCalls(chat)).toHaveLength(2);
   });
   it('rejects oversized prompts without truncation or provider calls', async () => {
     const { registry, chat } = registryWith({});
@@ -113,7 +154,7 @@ describe('precision intent planning', () => {
     const intent = await planMediaIntent(registry, { kind: 'image', instruction });
     expect(intent.constraints.durationSeconds).toBeUndefined();
     expect(chat).toHaveBeenCalledOnce();
-    const schema = chat.mock.calls[0][0].responseFormat as Record<string, any>;
+    const schema = planningCalls(chat)[0][0].responseFormat as Record<string, any>;
     expect(schema.properties.kind.enum).toEqual(['image']);
     expect(schema.properties.operation.enum).toEqual(['generate']);
     expect(schema.properties.constraints.properties.durationSeconds).toBeUndefined();
@@ -165,7 +206,7 @@ describe('precision intent planning', () => {
     const { registry, chat } = registryWith(response);
     await expect(planMediaIntent(registry, { kind: 'image', instruction, sourceImageBase64: 'source' }))
       .rejects.toThrow('could not be grounded without changing the request');
-    expect(chat).toHaveBeenCalledTimes(2);
+    expect(planningCalls(chat)).toHaveLength(2);
   });
   it('retains reference identity constraints during generation', async () => {
     const instruction = 'Create a new portrait of both supplied adults together.';

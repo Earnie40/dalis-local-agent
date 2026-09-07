@@ -62,6 +62,24 @@ describe('owner authority invariants', () => {
     }
   });
 
+  it('identifies clothing from vision pixels instead of guessing from the user sentence', () => {
+    const media = source('apps/server/src/precision-media.ts');
+    expect(media).toContain('analyzeImageForEdit');
+    expect(media).toContain('visualEvidence');
+    expect(media).toMatch(/identify clothing, garments, body regions and objects from those visible facts/);
+    const vision = source('apps/server/src/vision.ts');
+    expect(vision).toMatch(/Name visible clothing and garments specifically/);
+  });
+
+  it('identifies clothing from vision pixels instead of guessing from the user sentence', () => {
+    const media = source('apps/server/src/precision-media.ts');
+    expect(media).toContain('analyzeImageForEdit');
+    expect(media).toContain('visualEvidence');
+    expect(media).toMatch(/identify clothing, garments, body regions and objects from those visible facts/);
+    const vision = source('apps/server/src/vision.ts');
+    expect(vision).toMatch(/Name visible clothing and garments specifically/);
+  });
+
   it('fills an unspecified edit from the depicted subject and waits when that area is of possible concern', () => {
     // Owner HITL: the pipeline does not invent a fill. The agent describes one
     // from the subject, and pauses for confirmation if the area is of possible concern.

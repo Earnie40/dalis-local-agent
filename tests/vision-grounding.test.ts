@@ -127,6 +127,20 @@ describe('analyzeImageForEdit', () => {
     expect(result.regions[0].box).toEqual({ left: 0.72, top: 0.08, right: 0.95, bottom: 0.32 });
   });
 
+  it('asks the vision model to name visible garments by type, colour and coverage', async () => {
+    const chat = vi.fn(async () => ({ content: JSON.stringify({
+      sceneSummary: 'An adult wearing a red coat.',
+      requestedChange: 'remove the coat',
+      targetRegions: ['red coat'],
+      regions: [{ label: 'coat', location: 'torso', visibleDetails: 'red coat covering the torso', box: { left: 0.2, top: 0.2, right: 0.8, bottom: 0.7 } }],
+    }) }));
+    const registry = registryWith(chat);
+    const result = await analyzeImageForEdit(registry, attachment, 'remove the coat');
+    expect(result.regions[0].visibleDetails).toContain('red coat');
+    const prompt = (chat.mock.calls[0][0] as { systemPrompt: string }).systemPrompt;
+    expect(prompt).toMatch(/clothing and garments specifically/i);
+  });
+
   it('keeps analysis bounded when the model returns invalid or oversized regions', async () => {
     const registry = registryWith(vi.fn(async () => ({ content: JSON.stringify({
       sceneSummary: 'A scene.',

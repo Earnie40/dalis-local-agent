@@ -17,7 +17,8 @@ const MAX_REGION_TEXT_CHARS = 280;
 const DESCRIBE_SYSTEM_PROMPT =
   'You describe images for an image-editing pipeline. Reply with one dense, literal caption and nothing else. ' +
   'Cover the subject, their pose and position, hair colour and style, clothing, visible anatomy, expression, ' +
-  'background, lighting and camera framing. State only what is visibly present. Do not add commentary, ' +
+  'background, lighting and camera framing. Name each visible garment by type, colour and coverage. ' +
+  'State only what is visibly present. Do not add commentary, ' +
   'headings, bullet points, or any opinion about the image.';
 
 export interface GroundedEdit {
@@ -263,6 +264,9 @@ export async function analyzeImageForEdit(
     model: resolved.model,
     systemPrompt:
       'You analyze images for a conversational editing assistant. Identify the exact visual regions relevant to the user request. ' +
+      'Name visible clothing and garments specifically (type, colour, coverage, and which body region they occupy) when they are present. ' +
+      'Ground subjects accurately across human anatomy (distinguishing female and male anatomical landmarks, head, face, cervical, pectoral/mammary, abdomen, pelvic, limbs, hands, feet), ' +
+      'animals (quadrupeds, avians, limbs, features), and scene context (objects, indoor/outdoor places, surfaces, backgrounds). ' +
       'Use image-relative locations such as upper-left, center, or lower-right and normalized coordinates from 0 to 1. ' +
       'Only report visible facts; never invent hidden content. Return JSON only.',
     messages: [{
