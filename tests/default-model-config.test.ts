@@ -36,4 +36,21 @@ describe('default model aliases', () => {
     expect(result.models.gpu_chat.model).toBe(result.models.chat.model);
     expect(result.models.gpu_coder.model).toBe(result.models.coder.model);
   });
+
+  it('uses the low-refusal Qwen checkpoint for planner, reasoner, reviewer, and structured roles', () => {
+    const result = loadModelAliases(
+      resolve(process.cwd(), 'config/models/default.yaml'),
+      process.env,
+    );
+
+    expect(result.status).toBe('loaded');
+    const lowRefusal = 'huihui_ai/qwen3-abliterated:8b';
+    for (const alias of ['planner', 'reasoner', 'reviewer', 'structured_agent', 'intelligence_local'] as const) {
+      expect(result.models[alias].model, alias).toBe(lowRefusal);
+    }
+    expect(result.models.gpu_planner.model).toBe(result.models.planner.model);
+    expect(result.models.gpu_reasoner.model).toBe(result.models.reasoner.model);
+    expect(result.models.gpu_reviewer.model).toBe(result.models.reviewer.model);
+    expect(result.models.gpu_structured_agent.model).toBe(result.models.structured_agent.model);
+  });
 });

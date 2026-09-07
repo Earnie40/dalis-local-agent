@@ -21,11 +21,6 @@ MODEL_ROOT = Path(os.environ.get("DACAIS_SDXL_MODEL_ROOT", "/opt/dacais-sdxl/sta
 WIDTH = int(os.environ.get("DACAIS_SDXL_WIDTH", "1344"))
 HEIGHT = int(os.environ.get("DACAIS_SDXL_HEIGHT", "768"))
 STEPS = int(os.environ.get("DACAIS_SDXL_STEPS", "28"))
-NEGATIVE = os.environ.get(
-    "DACAIS_SDXL_NEGATIVE",
-    "text, watermark, logo, signature, low quality, lowres, blurry, "
-    "distorted, deformed, disfigured, extra limbs, bad anatomy",
-)
 # Free VRAM needed to decode the latent in one pass instead of slicing the VAE.
 UNSLICED_DECODE_GIB = float(os.environ.get("DACAIS_SDXL_UNSLICED_DECODE_GIB", "12"))
 
@@ -111,7 +106,9 @@ def main() -> int:
                 width, height = aligned_size(output_size(command, (WIDTH, HEIGHT)))
                 common = {
                     "prompt": prompt,
-                    "negative_prompt": str(command.get("negativePrompt", "" if command.get("intent") else NEGATIVE)),
+                    # Negative guidance is caller-owned. Injecting a default here
+                    # can negate requested text, composition, style, or anatomy.
+                    "negative_prompt": str(command.get("negativePrompt", "")),
                     "num_inference_steps": int(command.get("steps", STEPS)),
                     "guidance_scale": float(command.get("guidanceScale", 6.5)),
                     "generator": generator,

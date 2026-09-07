@@ -28,6 +28,7 @@ import {
   VISION_TOOLS,
   createImageGenerationTools,
   VIDEO_GENERATION_TOOLS,
+  FACE_SWAP_TOOLS,
   SMART_CONTRACT_TOOLS,
   ENGINEERING_TOOLS,
 } from '@dacai-local-agent/tools';
@@ -38,6 +39,7 @@ import {
   loadUploadsForPrompt,
   renderUploadsForPrompt,
   loadVisionAttachments,
+  isEditableImage,
   selectEditableImage,
   workspaceImageDescriptor,
 } from '../workspace-uploads';
@@ -139,6 +141,10 @@ const CONTINUED_IMAGE_EDIT_INTENT =
 // language so coding and inspection requests stay on the normal agent path.
 const DESCRIPTIVE_IMAGE_INTENT =
   /\b(?:woman|women|man|men|female|male|person|people|model|character|characters|fashion|outfit|portrait|face|body|figure|landscape|mountain|beach|ocean|cityscape|architecture|interior|still[- ]life|product|animal|dog|cat|bird|flower|sunset|night[- ]sky)\b/i;
+const VISUAL_CREATION_VERB =
+  /^\s*(?:(?:please|can you|could you|would you)\s+)?(?:generate|create|make|produce|render|draw|paint|illustrate|design)\b/i;
+const VISUAL_STYLE_INTENT =
+  /\b(?:photo[- ]?realistic|photorealism|cinematic|editorial|lifestyle\s+photograph|studio\s+(?:photo|portrait)|macro\s+photograph|watercolou?r|oil\s+painting|digital\s+art|concept\s+art|anime|manga|comic|pixel\s+art|3d\s+render|cgi|film\s+grain|shallow\s+depth\s+of\s+field)\b/i;
 const NON_IMAGE_REQUEST_INTENT =
   /\b(?:code|coding|repository|repo|file|function|class|bug|error|test|typescript|javascript|python|api|endpoint|database|sql|regex|command|terminal|shell|explain|describe|analy[sz]e|inspect|identify|what|who|where|when|why|how)\b/i;
 const REPOSITORY_TASK_INTENT =
@@ -146,6 +152,8 @@ const REPOSITORY_TASK_INTENT =
 
 const IMAGE_EDIT_INTENT =
   /\b(?:edit|modify|update|transform|retouch|restyle|change|remove|replace|add)\b[\s\S]{0,160}\b(?:image|photo|picture|portrait|artwork)\b|\b(?:make|turn)\b[\s\S]{0,80}\b(?:this|the\s+attached|the\s+uploaded)\b[\s\S]{0,40}\b(?:image|photo|picture|portrait)\b|\b(?:attached|uploaded)\b[\s\S]{0,40}\b(?:image|photo|picture|portrait)\b[\s\S]{0,160}\b(?:edit|modify|update|transform|retouch|restyle|change|remove|replace|add|make|turn)\b/;
+const MULTI_IMAGE_REFERENCE_INTENT =
+  /\b(?:attached|uploaded|provided|reference)\b[\s\S]{0,160}\b(?:images?|photos?|pictures?|references?|identit(?:y|ies)|people|persons?|subjects?)\b[\s\S]{0,200}\b(?:both|together|combine|merge|compose|same\s+scene|new\s+scene|identity\s+references?)\b|\b(?:both|combine|merge|compose|together|same\s+scene|new\s+scene)\b[\s\S]{0,200}\b(?:attached|uploaded|provided|reference)\b[\s\S]{0,120}\b(?:images?|photos?|pictures?|references?|identit(?:y|ies)|people|persons?|subjects?)\b/i;
 
 const ATTACHED_IMAGE_INSPECTION_INTENT =
   /^\s*(?:(?:please\s+)?(?:describe|analy[sz]e|inspect|identify|explain|summarize|read|transcribe|extract|compare)\b|(?:what|who|where|when|why|how|which)\b|(?:can|could|would|will)\s+you\s+(?:describe|analy[sz]e|inspect|identify|explain|tell|read|transcribe|extract)\b)/;
@@ -153,9 +161,14 @@ const ATTACHED_IMAGE_INSPECTION_INTENT =
 const VIDEO_GENERATION_INTENT =
   /\b(?:generate|create|make|produce|render|animate)\b[\s\S]{0,100}\b(?:video|clip|animation|footage)\b|\banimate\b[\s\S]{0,100}\b(?:image|photo|picture|portrait)\b|\b(?:video|clip|animation|footage)\b[\s\S]{0,100}\b(?:generate|create|make|produce|render|animate)\b/;
 
+const FACE_SWAP_INTENT =
+  /\bface[\s-]?swap(?:ping|ped|s)?\b|\bdeep[\s-]?fake\b|\b(?:swap|replace|put|place|transplant)\b[\s\S]{0,80}\bfaces?\b|\bfaces?\b[\s\S]{0,80}\b(?:swap|swapped|onto|instead of)\b/;
+
 export interface MediaIntentOptions {
   /** True when a PNG/JPEG/WebP upload is attached to this request. */
   hasImageAttachment?: boolean;
+  /** Number of attached PNG/JPEG/WebP images available to the request. */
+  imageAttachmentCount?: number;
   /** True when this conversation has a tool-proven generated image to refine. */
   hasPriorGeneratedImage?: boolean;
 }
@@ -181,15 +194,39 @@ export function isImageGenerationRequest(
   const isDescriptiveVisualRequest = descriptivePrompt.length > 2
     && DESCRIPTIVE_IMAGE_INTENT.test(descriptivePrompt)
     && !NON_IMAGE_REQUEST_INTENT.test(descriptivePrompt);
+  // Natural image prompts often name the medium but not the artifact: e.g.
+  // "Generate a photorealistic red apple". Requiring the literal word image
+  // drops image.generate and leaves a text-only model to handle the request.
+  const isStyledVisualRequest = descriptivePrompt.length > 2
+    && VISUAL_CREATION_VERB.test(descriptivePrompt)
+    && VISUAL_STYLE_INTENT.test(descriptivePrompt)
+    && !NON_IMAGE_REQUEST_INTENT.test(descriptivePrompt);
   return IMAGE_GENERATION_INTENT.test(normalized)
     || (STANDALONE_VISUAL_CREATION_INTENT.test(normalized) && !NON_IMAGE_REQUEST_INTENT.test(normalized))
     || (options.hasPriorGeneratedImage === true && CONTINUED_IMAGE_EDIT_INTENT.test(normalized))
     || isDescriptiveVisualRequest
+    || isStyledVisualRequest
     || [...requestedTools].includes('image.generate');
+}
+
+export function isMultiImageReferenceGenerationRequest(
+  prompt: string,
+  options: MediaIntentOptions = {},
+): boolean {
+  if ((options.imageAttachmentCount ?? 0) < 2) return false;
+  const normalized = prompt.toLowerCase().trim();
+  if (!normalized || REPOSITORY_TASK_INTENT.test(normalized)) return false;
+  const explicitlyEditsAttachments = /\b(?:edit|modify|update|transform|retouch|restyle|recolor|change)\b[\s\S]{0,160}\b(?:both|all|attached|uploaded|provided)\b/i.test(normalized);
+  if (explicitlyEditsAttachments) return false;
+  const requestsNewVisual = VISUAL_CREATION_VERB.test(normalized)
+    || /\b(?:generate|create|produce|render|draw|paint|illustrate|design|combine|merge|compose)\b/i.test(normalized)
+    || /\b(?:new|complete|coherent|single|one)\s+(?:image|photo|picture|portrait|scene)\b/i.test(normalized);
+  return requestsNewVisual && MULTI_IMAGE_REFERENCE_INTENT.test(normalized);
 }
 
 export function isImageEditRequest(prompt: string, options: MediaIntentOptions = {}): boolean {
   const normalized = prompt.toLowerCase();
+  if (isMultiImageReferenceGenerationRequest(prompt, options)) return false;
   return IMAGE_EDIT_INTENT.test(normalized)
     || (options.hasPriorGeneratedImage === true && CONTINUED_IMAGE_EDIT_INTENT.test(normalized))
     || Boolean(
@@ -197,6 +234,32 @@ export function isImageEditRequest(prompt: string, options: MediaIntentOptions =
     normalized.trim().length > 0 &&
     !ATTACHED_IMAGE_INSPECTION_INTENT.test(normalized),
   );
+}
+
+const REMOVAL_WITHOUT_NAMED_FILL =
+  /\b(?:remove|removing|take\s+off|taking\s+off|strip|stripping|undress|unclothe|delete|erase)\b|\bwithout\s+the\s+\w+/i;
+const NAMED_REPLACEMENT =
+  /\b(?:replace(?:d|ment)?|fill(?:ed)?|cover(?:ed)?|swap(?:ped)?)\b[\s\S]{0,80}\bwith\b|\bput\s+[\s\S]{1,80}?\s+(?:there|instead)|\binto\s+(?:a|an|the)\s+\w+/i;
+
+/**
+ * True when the user asked to remove or erase something but did not name what
+ * should occupy those pixels. The pipeline does not invent a fill. The agent
+ * describes one from the depicted subject, or waits if that area is of possible
+ * concern. Owner HITL rule, disclosed here: unspecified concern-area fills
+ * pause for confirmation instead of generating.
+ */
+export function requestedEditOmitsReplacement(prompt: string): boolean {
+  const text = prompt.trim();
+  if (!text || !REMOVAL_WITHOUT_NAMED_FILL.test(text)) return false;
+  return !NAMED_REPLACEMENT.test(text);
+}
+
+const UNSPECIFIED_FILL_CONFIRMATION =
+  /^(?:yes|y|ok|okay|confirm(?:ed)?|proceed|do it|go ahead)(?:[.!]| please)?$/i;
+
+/** A bare confirmation after an unspecified-fill wait must not one-shot generate. */
+export function isUnspecifiedFillConfirmation(prompt: string, historyText = ''): boolean {
+  return UNSPECIFIED_FILL_CONFIRMATION.test(prompt.trim()) && requestedEditOmitsReplacement(historyText);
 }
 
 /**
@@ -228,11 +291,26 @@ export function isVideoGenerationRequest(prompt: string, requestedTools: Iterabl
   return VIDEO_GENERATION_INTENT.test(normalized) || explicitlyRequestedMediaTool;
 }
 
+/**
+ * A face swap needs two existing workspace inputs and a character choice, so it
+ * runs in the ordinary tool loop rather than the one-shot media path.
+ */
+export function isFaceSwapRequest(prompt: string, requestedTools: Iterable<string> = []): boolean {
+  const normalized = prompt.toLowerCase();
+  const explicitlyRequestedMediaTool = [...requestedTools].includes('video.faceSwap');
+  if (!explicitlyRequestedMediaTool && REPOSITORY_TASK_INTENT.test(normalized)) return false;
+  return FACE_SWAP_INTENT.test(normalized) || explicitlyRequestedMediaTool;
+}
+
 export function classifyDirectMediaRequest(
   prompt: string,
   requestedTools: Iterable<string> = [],
   options: MediaIntentOptions = {},
 ): 'image' | 'video' | undefined {
+  // An attached photo plus an instruction normally reads as an image edit. A
+  // face swap carries exactly that shape and must not be routed there: it edits
+  // the attached video, using the photo only as the source identity.
+  if (isFaceSwapRequest(prompt, requestedTools)) return undefined;
   if (isVideoGenerationRequest(prompt, requestedTools)) return 'video';
   if (isImageGenerationRequest(prompt, requestedTools, options)) return 'image';
   return undefined;
@@ -289,7 +367,7 @@ const CODING_PROMPT = `You are a local coding agent working inside a registered 
 
 Rules:
 - Inspect before you answer. Never answer from memory about this project.
-- The active language model is text/tool based. When image.generate is available and the user asks for a photo, photoreal image, portrait, image edit, or raster artwork, call image.generate and report its returned workspace path. When video.generate is available and the user asks for a generated video or to animate an image, call video.generate. For simple diagrams or when raster generation is unavailable, create a real workspace-relative SVG or standalone HTML/canvas artifact with filesystem.write, preferably under output/. The agent chat previews generated images and videos. Never claim media was generated unless a successful tool result proves the artifact exists.
+- The active language model is text/tool based. When image.generate is available and the user asks for a photo, photoreal image, portrait, image edit, or raster artwork, call image.generate and report its returned workspace path. If an edit names an area but not the replacement, fill only that requested area with what is anatomically or structurally correct for the depicted subject (person, place, or thing); do not invent unrequested regions. If that unspecified replacement is in an area of possible concern, do not generate: alert the user and emit TASK_WAITING_FOR_USER: asking them to confirm or name the replacement. When video.generate is available and the user asks for a generated video or to animate an image, call video.generate. When video.faceSwap is available and the user asks to put a face from one file onto a person in a video, call video.faceSwap with the attached image as facePath and the attached video as videoPath. For simple diagrams or when raster generation is unavailable, create a real workspace-relative SVG or standalone HTML/canvas artifact with filesystem.write, preferably under output/. The agent chat previews generated images and videos. Never claim media was generated unless a successful tool result proves the artifact exists.
 - For repository-code discovery, prefer code.architecture.context and code.symbol.search before broad recursive filesystem listings.
 - Before modifying an important symbol, use code.symbol.impact to inspect callers, dependencies, references, and related tests.
 - The runtime may return a pre_edit_impact_gate instead of performing the first requested file mutation. When this occurs, the mutation has NOT executed. Review the supplied dependency and test impact, adjust the patch if necessary, then retry the mutation once.
@@ -940,6 +1018,7 @@ export function registerAgentRoutes(
     const promptWithAttachments = effectivePrompt + renderUploadsForPrompt(attachedUploads);
     // The most recently attached PNG/JPEG/WebP is what an edit acts on.
     const editableImage = selectEditableImage(attachedUploads);
+    const editableImages = attachedUploads.filter(isEditableImage);
     // Pixels for a vision-capable model. Without these the model only ever
     // sees the filename and cannot relate the prompt to what is depicted.
     const visionAttachments = await loadVisionAttachments(workspace.rootPath, attachedUploads);
@@ -951,11 +1030,20 @@ export function registerAgentRoutes(
     // image". Otherwise that phrase would be incorrectly routed to a new PNG.
     const directMediaKind = classifyDirectMediaRequest(effectivePrompt, advancedRequested, {
       hasImageAttachment: Boolean(editableImage),
+      imageAttachmentCount: editableImages.length,
       hasPriorGeneratedImage: Boolean(priorGeneratedImage),
     });
-    const imageGenerationRun = directMediaKind === 'image';
+    const unspecifiedFillConfirmation = isUnspecifiedFillConfirmation(effectivePrompt, historyText);
+    const imageGenerationRun = directMediaKind === 'image' || unspecifiedFillConfirmation;
     const videoGenerationRun = directMediaKind === 'video';
-    const directMediaRun = directMediaKind !== undefined;
+    // An unspecified replacement must reach the agent loop so it can fill from
+    // the subject or emit TASK_WAITING_FOR_USER. Keep image.generate selected,
+    // but do not take the one-shot media path or skip tool-calling. A later
+    // "yes"/"confirm" is still an image run even though classifyDirectMediaRequest
+    // does not match the confirmation text.
+    const unspecifiedFillNeedsAgent = (imageGenerationRun && requestedEditOmitsReplacement(effectivePrompt))
+      || unspecifiedFillConfirmation;
+    const directMediaRun = directMediaKind !== undefined && !unspecifiedFillNeedsAgent;
     // Media generation is executed by the media subsystem, so do not make it
     // wait for or recover the separate Ollama GPU route.
     const runpodPreflight = directMediaRun
@@ -1040,8 +1128,9 @@ export function registerAgentRoutes(
     const tools = new ToolRegistry();
     const simulationTools = body.role === 'adversarial-twin-simulator' ? createAdversarialSimulationTools() : [];
     const wantsQuality = /\b(test|property|fuzz|mutation|invariant|coverage)\b/.test(prompt);
-    const wantsVision = /\b(image|screenshot|mockup|visual|ui|layout|design)\b/.test(prompt);
+    const wantsVision = /\b(image|screenshot|mockup|visual|ui|layout|design|vision|anatomy|anatomical|body|face|animal|object|place)\b/i.test(prompt);
     const wantsVideoGeneration = isVideoGenerationRequest(effectivePrompt, advancedRequested);
+    const wantsFaceSwap = isFaceSwapRequest(effectivePrompt, advancedRequested);
     const wantsSmartContract =
       /\b(solidity|smart ?contract|\.sol\b|reentrancy|erc-?(20|721|1155)|evm|delegatecall|onlyowner)\b/.test(prompt);
     const wantsEngineering =
@@ -1096,7 +1185,7 @@ export function registerAgentRoutes(
       ...((wantsQuality || [...advancedRequested].some((name) => name.startsWith('quality.'))) && workspace.capabilities.shell
         ? QUALITY_TOOLS
         : []),
-      ...((wantsVision || [...advancedRequested].some((name) => name.startsWith('vision.')))
+      ...((wantsVision || [...advancedRequested].some((name) => name.startsWith('vision.') || name.startsWith('anatomy.')))
         ? VISION_TOOLS
         : []),
       ...(imageGenerationRun
@@ -1104,6 +1193,9 @@ export function registerAgentRoutes(
         : []),
       ...(wantsVideoGeneration
         ? VIDEO_GENERATION_TOOLS
+        : []),
+      ...(wantsFaceSwap && workspace.capabilities.write
+        ? FACE_SWAP_TOOLS
         : []),
       // Read-only static review. Needs no capability beyond the read access every
       // run already has: it opens a .sol file inside the workspace and queries the
@@ -1612,6 +1704,7 @@ export function registerAgentRoutes(
         const attachedSource = editableImage;
         const imageEditRun = imageGenerationRun && isImageEditRequest(effectivePrompt, {
           hasImageAttachment: Boolean(attachedSource),
+          imageAttachmentCount: editableImages.length,
           hasPriorGeneratedImage: Boolean(priorGeneratedImage),
         });
         // A refinement of the picture the previous turn produced arrives with an
@@ -1624,7 +1717,7 @@ export function registerAgentRoutes(
         const continuedSource = continuedPath
           ? await workspaceImageDescriptor(workspace.rootPath, continuedPath)
           : undefined;
-        const sourceImage = attachedSource ?? continuedSource;
+        const sourceImage = imageEditRun ? attachedSource ?? continuedSource : undefined;
         if (imageEditRun && !sourceImage) {
           throw new Error(
             'Image editing requires a source image. Attach a PNG, JPEG, or WebP file, or ask ' +
@@ -1643,12 +1736,14 @@ export function registerAgentRoutes(
         }
 
         const outputPath = `generated/${kind}-${runId}.${format}`;
-        const cleanedPrompt = effectivePrompt.replace(/^yougenerate\b/i, 'generate');
         // Preserve the complete request. The shared precision executor grounds the
         // intent, chooses a workflow and verifies pixels before reporting success.
         const argumentsForTool: Record<string, unknown> = {
-          prompt: cleanedPrompt,
+          prompt: effectivePrompt,
           ...(sourceImage ? { sourcePath: sourceImage.path } : {}),
+          ...(!imageEditRun && editableImages.length > 1
+            ? { referencePaths: editableImages.map((image) => image.path) }
+            : {}),
           ...(imageGenerationRun ? { quality: 'high' } : {}),
           outputPath,
         };
@@ -1671,6 +1766,9 @@ export function registerAgentRoutes(
             backend: imageGenerationRun ? process.env.DACAI_IMAGE_BACKEND ?? 'unconfigured' : process.env.DACAI_VIDEO_BACKEND ?? 'unconfigured',
             provider: resolved.instance.id,
             sourcePath: sourceImage?.path,
+            referencePaths: !imageEditRun && editableImages.length > 1
+              ? editableImages.map((image) => image.path)
+              : undefined,
             precisionVerificationRequired: true,
           },
         });
@@ -1690,8 +1788,8 @@ export function registerAgentRoutes(
             await activity.emit({
               type: 'warning',
               status: 'running',
-              title: 'Media recovery is running in the background',
-              message: mediaStatus.error ?? `The ${kind} backend is still recovering.`,
+              title: 'Media backend is not ready',
+              message: mediaStatus.error ?? `The ${kind} backend did not become ready.`,
               toolName: mediaTool,
             });
           },
@@ -2071,7 +2169,11 @@ export function registerAgentRoutes(
           systemPrompt: [
             systemPromptForRole(role, selected.map((tool) => tool.name), operationalDirective),
             imageGenerationRun
-              ? 'IMAGE REQUEST: Call image.generate immediately using a new workspace-relative PNG outputPath. Do not inspect or search the repository first. The user requested an image, not a coding task. After the tool succeeds, report the artifact path and stop.'
+              ? requestedEditOmitsReplacement(effectivePrompt)
+                ? 'IMAGE REQUEST: The user asked to change an area but did not name the replacement. If that area is of possible concern, do not call image.generate: alert the user with the anatomically or structurally correct fill implied by the depicted subject, and emit TASK_WAITING_FOR_USER: asking them to confirm or name the replacement. Otherwise fill only the requested area with what is anatomically or structurally correct for what the image depicts (person, place, or thing); do not invent unrequested regions; then call image.generate with that filled instruction and a new workspace-relative PNG outputPath. Do not inspect or search the repository first. After the tool succeeds, report the artifact path and stop.'
+                : isUnspecifiedFillConfirmation(effectivePrompt, historyText)
+                  ? 'IMAGE REQUEST: The user confirmed the unspecified fill. Fill only the previously requested area with what is anatomically or structurally correct for the depicted subject; do not invent unrequested regions. Call image.generate with that filled instruction and a new workspace-relative PNG outputPath. Do not wait again. After the tool succeeds, report the artifact path and stop.'
+                  : 'IMAGE REQUEST: Call image.generate immediately using a new workspace-relative PNG outputPath. Do not inspect or search the repository first. The user requested an image, not a coding task. After the tool succeeds, report the artifact path and stop.'
               : '',
             resolvedRunMode.mode === 'repository_audit' ? repositoryAuditInstructions() : '',
           ].filter(Boolean).join('\n\n'),

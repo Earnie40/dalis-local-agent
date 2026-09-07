@@ -4,7 +4,7 @@
  * Two aliases, declared in config/models/default.yaml:
  *
  *   intelligence        remote_gpu_ollama / ${RUNPOD_OLLAMA_MODEL}
- *   intelligence_local  local_ollama / qwen3:8b
+ *   intelligence_local  local_ollama / huihui_ai/qwen3-abliterated:8b
  *
  * Every call in this package prefers the first and names the second as its
  * fallback. StructuredGenerator records `fellBackFrom` on the result when the

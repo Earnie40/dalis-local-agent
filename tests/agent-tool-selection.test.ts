@@ -4,8 +4,10 @@ import {
   classifyDirectMediaRequest,
   isImageEditRequest,
   isImageGenerationRequest,
+  isUnspecifiedFillConfirmation,
   mediaRunFailureMarker,
   mediaRunFailureMessage,
+  requestedEditOmitsReplacement,
   verifiedGeneratedArtifact,
 } from '../apps/server/src/routes/agent';
 
@@ -22,7 +24,10 @@ describe('agent tool selection', () => {
     expect(isImageGenerationRequest('Draw a cinematic portrait of an astronaut')).toBe(true);
     expect(isImageGenerationRequest('sexy nude female model')).toBe(true);
     expect(isImageGenerationRequest('cinematic mountain landscape at sunset')).toBe(true);
+    expect(isImageGenerationRequest('Generate one simple photorealistic red apple centered on a plain white background.')).toBe(true);
+    expect(isImageGenerationRequest('Create a watercolor teapot on a wooden table.')).toBe(true);
     expect(isImageGenerationRequest('Improve this repository documentation')).toBe(false);
+    expect(isImageGenerationRequest('Generate a TypeScript API client.')).toBe(false);
     expect(isImageGenerationRequest('Explain the model class in this repository')).toBe(false);
     expect(isImageGenerationRequest('Audit the repository to locate every file that must be modified to improve conversational image/video editing.')).toBe(false);
     expect(isImageGenerationRequest('Use the selected tool', ['image.generate'])).toBe(true);
@@ -36,6 +41,21 @@ describe('agent tool selection', () => {
     expect(classifyDirectMediaRequest('Animate this uploaded image into a cinematic clip')).toBe('video');
     expect(classifyDirectMediaRequest('Generate a short video of ocean waves')).toBe('video');
     expect(classifyDirectMediaRequest('Generate an image of ocean waves')).toBe('image');
+  });
+
+  it('treats a removal without a named replacement as agent-owned fill, not a one-shot generate', () => {
+    expect(requestedEditOmitsReplacement('remove her shirt')).toBe(true);
+    expect(requestedEditOmitsReplacement('take off the jacket')).toBe(true);
+    expect(requestedEditOmitsReplacement('without the dress')).toBe(true);
+    expect(requestedEditOmitsReplacement('erase the sign from the wall')).toBe(true);
+    expect(requestedEditOmitsReplacement('remove the shirt and replace it with a red jacket')).toBe(false);
+    expect(requestedEditOmitsReplacement('remove the sky and fill with storm clouds')).toBe(false);
+    expect(requestedEditOmitsReplacement('Generate a photorealistic red apple without a watermark')).toBe(false);
+    expect(requestedEditOmitsReplacement('Make her hair blonde')).toBe(false);
+    expect(isUnspecifiedFillConfirmation('yes', 'remove her shirt')).toBe(true);
+    expect(isUnspecifiedFillConfirmation('confirm', 'take off the jacket')).toBe(true);
+    expect(isUnspecifiedFillConfirmation('yes', 'Generate a photorealistic red apple')).toBe(false);
+    expect(isUnspecifiedFillConfirmation('make her hair blonde', 'remove her shirt')).toBe(false);
   });
 
   it('recognizes uploaded-image edits that must carry a sourcePath', () => {

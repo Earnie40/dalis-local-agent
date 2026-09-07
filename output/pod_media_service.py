@@ -544,8 +544,8 @@ def avatar(body: dict[str, Any]) -> dict[str, Any]:
 
 def generate_backdrop(body: dict[str, Any]) -> dict[str, Any]:
     directory = job_dir(str(body.get("jobId", "")))
-    prompt = str(body.get("prompt", "")).strip()
-    if not 1 <= len(prompt) <= 2_000: raise ValueError("prompt length must be between 1 and 2000")
+    prompt = str(body.get("prompt", ""))
+    if not prompt.strip() or len(prompt) > 4_000: raise ValueError("prompt length must be between 1 and 4000")
     output = directory / "backdrop.png"
     command: dict[str, Any] = {"type": "backdrop", "prompt": prompt, "output": str(output)}
     for key in ("negativePrompt", "seed", "steps", "guidanceScale", "width", "height"):
@@ -572,8 +572,8 @@ def generate_backdrop(body: dict[str, Any]) -> dict[str, Any]:
 
 def edit_image(body: dict[str, Any]) -> dict[str, Any]:
     directory = job_dir(str(body.get("jobId", "")))
-    prompt = str(body.get("prompt", "")).strip()
-    if not 1 <= len(prompt) <= 2_000: raise ValueError("prompt length must be between 1 and 2000")
+    prompt = str(body.get("prompt", ""))
+    if not prompt.strip() or len(prompt) > 4_000: raise ValueError("prompt length must be between 1 and 4000")
     mime_type = str(body.get("sourceMimeType", "image/png"))
     if mime_type not in ("image/png", "image/jpeg", "image/webp"):
         raise ValueError("sourceMimeType must be image/png, image/jpeg, or image/webp")
@@ -621,22 +621,16 @@ PRESENTER_PROMPT = (
     "soft even key lighting, sharp focus on the eyes, natural detailed skin texture, "
     "business attire, plain uncluttered neutral background, 85mm lens, shallow depth of field"
 )
-PRESENTER_NEGATIVE = (
-    "cartoon, 3d render, cgi, illustration, anime, stylized, plastic skin, doll, "
-    "open mouth, visible teeth, talking, sunglasses, hat, hands, multiple people, crowd, "
-    "celebrity, text, watermark, logo, blurry, lowres, deformed, disfigured, extra limbs"
-)
-
-
 def generate_presenter(body: dict[str, Any]) -> dict[str, Any]:
     directory = job_dir(str(body.get("jobId", "")))
     descriptor = str(body.get("descriptor", "")).strip()
     if len(descriptor) > 200: raise ValueError("descriptor must be 200 characters or fewer")
-    prompt = str(body.get("prompt", "")).strip() or PRESENTER_PROMPT.format(descriptor=descriptor or "adult")
+    requested_prompt = str(body.get("prompt", ""))
+    prompt = requested_prompt if requested_prompt.strip() else PRESENTER_PROMPT.format(descriptor=descriptor or "adult")
     output = directory / "presenter-generated.png"
     command: dict[str, Any] = {
         "type": "backdrop", "prompt": prompt, "output": str(output),
-        "negativePrompt": str(body.get("negativePrompt") or PRESENTER_NEGATIVE),
+        "negativePrompt": str(body.get("negativePrompt", "")),
         # Square keeps the face centred for the downstream face detector.
         "width": int(body.get("width", 1024)), "height": int(body.get("height", 1024)),
         "steps": int(body.get("steps", 34)), "guidanceScale": float(body.get("guidanceScale", 5.0)),

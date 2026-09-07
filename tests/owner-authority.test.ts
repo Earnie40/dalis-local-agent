@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { MediaIntentSchema } from '@dacai-local-agent/shared';
@@ -62,12 +62,63 @@ describe('owner authority invariants', () => {
     }
   });
 
+  it('fills an unspecified edit from the depicted subject and waits when that area is of possible concern', () => {
+    // Owner HITL: the pipeline does not invent a fill. The agent describes one
+    // from the subject, and pauses for confirmation if the area is of possible concern.
+    const agent = source('apps/server/src/routes/agent.ts');
+    expect(agent).toMatch(/anatomically or structurally correct/);
+    expect(agent).toMatch(/do not invent unrequested regions/i);
+    expect(agent).toMatch(/area of possible concern/i);
+    expect(agent).toContain('TASK_WAITING_FOR_USER');
+    expect(agent).toContain('requestedEditOmitsReplacement');
+
+    const media = source('apps/server/src/precision-media.ts');
+    expect(media).toMatch(/anatomically or structurally correct continuation of the depicted subject/);
+    expect(media).toMatch(/do not invent unrequested regions/i);
+  });
+
   it('adds no application-level content restrictions on top of the provider', () => {
     // Rule 1. Provider and model safety controls are authoritative; the app layer
     // does not duplicate, tighten, or pre-empt them.
     const media = source('apps/server/src/routes/media-studio.ts');
     expect(media).toMatch(/Provider and model safety controls remain authoritative/i);
     expect(media).not.toMatch(/do not add (?:people|text|watermarks|brands|celebrities|real-person likenesses)/i);
+  });
+
+  it('does not inject an unsolicited presenter negative prompt', () => {
+    const local = source('output/pod_media_service.py');
+    expect(local).not.toContain('PRESENTER_NEGATIVE');
+    expect(local).not.toMatch(/celebrity, text, watermark/);
+    expect(local).toContain('"negativePrompt": str(body.get("negativePrompt", "")),');
+
+    const sibling = fileURLToPath(new URL('../../deepbrain-avatar-poc/runpod/media_service.py', import.meta.url));
+    if (existsSync(sibling)) {
+      const pod = readFileSync(sibling, 'utf8');
+      expect(pod).not.toContain('PRESENTER_NEGATIVE');
+      expect(pod).not.toMatch(/celebrity, text, watermark/);
+      expect(pod).toContain('"negativePrompt": str(body.get("negativePrompt") or ""),');
+    }
+
+    const localSdxl = source('deploy/runpod-media/sdxl_backdrop_runner.py');
+    expect(localSdxl).toContain('Negative guidance is caller-owned');
+    expect(localSdxl).toContain('"negative_prompt": str(command.get("negativePrompt", "")),');
+    expect(localSdxl).not.toMatch(/DACAI_SDXL_NEGATIVE/);
+
+    const siblingSdxl = fileURLToPath(new URL('../../deepbrain-avatar-poc/runpod/sdxl_backdrop_runner.py', import.meta.url));
+    if (existsSync(siblingSdxl)) {
+      const podSdxl = readFileSync(siblingSdxl, 'utf8');
+      expect(podSdxl).toContain('Negative guidance is caller-owned');
+      expect(podSdxl).toContain('"negative_prompt": str(command.get("negativePrompt", "")),');
+      expect(podSdxl).not.toMatch(/DACAI_SDXL_NEGATIVE/);
+      expect(podSdxl).not.toMatch(/text, watermark, logo, signature/);
+    }
+
+    const siblingAnatomyVideo = fileURLToPath(new URL('../../deepbrain-avatar-poc/runpod/anatomy_video_runner.py', import.meta.url));
+    if (existsSync(siblingAnatomyVideo)) {
+      const anatomyVideo = readFileSync(siblingAnatomyVideo, 'utf8');
+      expect(anatomyVideo).not.toContain('DEFAULT_NEGATIVE');
+      expect(anatomyVideo).toContain('negative = str(command.get("negativePrompt", "")).strip()');
+    }
   });
 
   it('never lets a verification template stand in for the entry it checks', () => {

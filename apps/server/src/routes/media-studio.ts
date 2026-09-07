@@ -4,7 +4,7 @@ import type { ToolExecutor } from '@dacai-local-agent/agent-core';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { basename, extname, isAbsolute, relative } from 'node:path';
 import type { FastifyInstance } from 'fastify';
-import { startMediaRecovery } from '../media-dispatch';
+import { dispatchWithMediaRecovery } from '../media-dispatch';
 import { z } from 'zod';
 import { PermissionAuditStore } from '@dacai-local-agent/shared';
 import {
@@ -164,6 +164,15 @@ function workspaceRelativePath(workspace: WorkspaceDescriptor, requested: string
   } catch { throw new Error(`${label} is outside the selected workspace.`); }
 }
 
+export function mediaStoryboardSystemPrompt(durationSeconds: number, targetSegments: number): string {
+  return 'Plan narrated video scenes for DACAIS Media Studio and return JSON only. ' +
+    'Each segment selects one supplied foreground presenter with characterId because that is the renderer input for a segment. ' +
+    'Preserve every requested subject, identity, action, interaction, setting, visible text, brand, likeness, clothing, pose, camera angle, composition, style, and ordering in the visualPrompt and narration. ' +
+    'Do not add content restrictions or silently reinterpret a simultaneous composition as alternating action. Provider and model safety controls remain authoritative. ' +
+    `Narration must be natural speech sized for roughly ${Math.round(durationSeconds / targetSegments)} seconds per scene. ` +
+    'Select a non-negative sceneReferenceIndex only when a supplied reference is useful as the scene backdrop.';
+}
+
 function makeStoryboardGenerator(deps: MediaStudioDependencies): GenerateStoryboard {
   if (deps.generateStoryboard) return deps.generateStoryboard;
   if (!deps.registry) throw new Error('Media Studio needs a provider registry or storyboard generator.');
@@ -193,7 +202,7 @@ function makeStoryboardGenerator(deps: MediaStudioDependencies): GenerateStorybo
           },
         },
       },
-      system: `You plan safe, realistic narrated video scenes for DACAIS Media Studio. Return JSON only. The renderer presents ONE supplied character at a time over an image backdrop, so use alternating characterId values for dialogue and never claim two supplied people are physically moving together in the same generated shot. Preserve the user's intended setting, actions, presentation points, and order. Each visualPrompt describes only the location, lighting, props, and camera composition behind the presenter; do not add people, text, watermarks, brands, celebrities, or real-person likenesses. Narration must be natural speech sized for roughly ${Math.round(input.durationSeconds / targetSegments)} seconds per scene. Select a non-negative sceneReferenceIndex only when a supplied reference is useful as the scene backdrop.`,
+      system: mediaStoryboardSystemPrompt(input.durationSeconds, targetSegments),
       user: JSON.stringify({ request: input.prompt, durationSeconds: input.durationSeconds, targetSegments, characters: input.characters, suppliedSceneReferenceCount: input.referenceCount }),
       temperature: .35,
       maxTokens: Math.min(12_000, 1_200 + targetSegments * 500),
@@ -276,18 +285,18 @@ export function registerMediaStudioRoutes(server: FastifyInstance, deps: MediaSt
     if (!workspace) return reply.code(404).send({ error: 'Workspace not found.' });
     try {
       if (parsed.data.sourcePath) workspaceRelativePath(workspace, parsed.data.sourcePath, 'sourcePath');
-      // Keep infrastructure recovery concurrent with the actual request. An
-      // active RunPod must receive generation immediately instead of waiting
-      // behind the supervisor's cold-start polling window.
-      startMediaRecovery('image', deps.media);
       const taskId = `media-image-${randomUUID()}`;
       const executor = makeExecutor(workspace, auditStore, createImageGenerationTools(), taskId, deps.registry);
       const outputPath = `generated/images/${cleanOutputName(parsed.data.outputName, '.png', `image-${Date.now()}`)}`;
-      const artifact = toolResult<{ path: string; bytes: number; sha256: string; model?: string }>(await executor.execute({
-        id: randomUUID(), name: 'image.generate', arguments: {
-          prompt: parsed.data.prompt, negativePrompt: parsed.data.negativePrompt ?? '', sourcePath: parsed.data.sourcePath,
-          outputPath, width: parsed.data.width, height: parsed.data.height, strength: parsed.data.strength,
-        },
+      const artifact = toolResult<{ path: string; bytes: number; sha256: string; model?: string }>(await dispatchWithMediaRecovery({
+        kind: 'image',
+        media: deps.media,
+        execute: () => executor.execute({
+          id: randomUUID(), name: 'image.generate', arguments: {
+            prompt: parsed.data.prompt, negativePrompt: parsed.data.negativePrompt ?? '', sourcePath: parsed.data.sourcePath,
+            outputPath, width: parsed.data.width, height: parsed.data.height, strength: parsed.data.strength,
+          },
+        }),
       }));
       return { artifact };
     } catch (error) {
@@ -319,13 +328,19 @@ export function registerMediaStudioRoutes(server: FastifyInstance, deps: MediaSt
     void (async () => {
       try {
         update({ status: 'planning' });
-        startMediaRecovery('image', deps.media);
-        startMediaRecovery('video', deps.media);
+        const readiness = deps.media
+          ? Promise.all([deps.media.ensureImageReady(), deps.media.ensureVideoReady()])
+          : undefined;
         const plan = await storyboard({
           prompt: parsed.data.prompt, durationSeconds: parsed.data.durationSeconds,
           characters: parsed.data.characters.map(({ id: characterId, name }) => ({ id: characterId, name })),
           referenceCount: parsed.data.referencePaths.length, alias: parsed.data.alias, signal: controller.signal,
         });
+        if (readiness) {
+          const statuses = await readiness;
+          const unavailable = statuses.find((status) => !status.ready);
+          if (unavailable) throw new Error(unavailable.error ?? 'The media backend is not ready.');
+        }
         const segments = plan.segments.map((segment) => ({
           characterId: segment.characterId, narration: segment.narration, visualPrompt: segment.visualPrompt,
           scenePath: segment.sceneReferenceIndex >= 0 ? parsed.data.referencePaths[segment.sceneReferenceIndex] : undefined,
