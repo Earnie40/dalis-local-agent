@@ -28,10 +28,16 @@ const INTENT_JSON_SCHEMA = compactOutputSchema(zodToJsonSchema(MediaIntentSchema
 const VERIFICATION_JSON_SCHEMA = compactOutputSchema(zodToJsonSchema(MediaVerificationSchema, { $refStrategy: 'none' }));
 const VisualIntegritySchema = z.object({
   observation: z.string().trim().min(1).max(2000),
-  defects: z.array(z.string().trim().min(1).max(1600)).max(24),
+  defects: z.array(z.object({
+    description: z.string().trim().min(1).max(1600),
+    specificLocation: z.string().trim().min(1).max(500),
+    presentInOriginal: z.boolean(),
+    contradictsRequest: z.boolean(),
+  }).strict()).max(24),
   visuallyCoherent: z.boolean(),
 }).strict();
 const INTEGRITY_JSON_SCHEMA = compactOutputSchema(zodToJsonSchema(VisualIntegritySchema, { $refStrategy: 'none' }));
+class MediaFidelityError extends Error {}
 
 function record(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
@@ -68,7 +74,6 @@ function normalizePlannedIntent(
   value: unknown,
   input: IntentInput,
   instruction: string,
-  allowVerbatimEditFallback: boolean,
 ): unknown {
   const source = record(value);
   if (!source) return value;
@@ -113,16 +118,16 @@ function normalizePlannedIntent(
 
   if (operation === 'generate') {
     raw.editScope = 'none';
+    // A bare generation has no source attributes to preserve. Reference-based
+    // generation does: retain the planner's identity/composition constraints so
+    // the result is evaluated against every supplied reference.
+    if (!input.referenceImagesBase64?.length) raw.protectedAttributes = [];
   } else {
-    let changes = Array.isArray(raw.changes) ? raw.changes : [];
-    if (!changes.length && allowVerbatimEditFallback) {
-      changes = [{ action: instruction, target: 'source image' }];
-      raw.changes = changes;
-    }
+    const changes = Array.isArray(raw.changes) ? raw.changes : [];
     const allRegionsGrounded = changes.length > 0 && changes.every((change) =>
       MediaRegionSchema.safeParse(record(change)?.region).success,
     );
-    if (!['localized', 'global'].includes(String(raw.editScope)) || (raw.editScope === 'localized' && !allRegionsGrounded)) {
+    if (!['localized', 'global'].includes(String(raw.editScope))) {
       raw.editScope = allRegionsGrounded ? 'localized' : 'global';
     }
   }
@@ -158,9 +163,9 @@ export async function planMediaIntent(registry: ProviderRegistry, input: IntentI
         'Keep every requested change, including multi-part clauses, subject counts, placement, text, lighting, dimensions and duration. ' +
         'For edits, preserve every unrequested visible attribute: identity, face, pose, clothing, composition, background, lighting, text and object positions. ' +
         'List those protected attributes specifically. Choose localized edits whenever the changes can be restricted to identified regions; ' +
-        'ground a tight normalized box for each change in the source pixels. If uncertain, do not invent a box or expand the edit to global: return an error. ' +
-        'Global edits do not require an actual request to change the whole scene or a global attribute. Hair/shirt/finger/object/breast/penis/limbedits are localized. ' +
-        'requiresBodyGeometry means a requested anatomical/pose change or generation requiring body geometry, not the occurrence of words about preserving pose. ' +
+        'ground a tight normalized box for each change in the source pixels. If uncertain, do not invent a box or expand the edit to global. ' +
+        'Use global only when the request actually changes the whole scene or a global visual attribute. Hair, garments, limbs, body regions, and objects can all be localized when the pixels support a tight region. ' +
+        'requiresBodyGeometry means the requested result changes body topology or pose, not merely that the request mentions pose, body, skin, anatomy, clothing, or editing. Preservation instructions never require a different generation pipeline. ' +
         'changesPose means a requested pose change only. Generate means no source; edit means a supplied source. ' +
         'Set loop true only for an explicit request to loop or repeat footage. Return JSON only, no extra keys.',
       messages: [{ role: 'user', images: images.length ? images : undefined,
@@ -175,7 +180,7 @@ export async function planMediaIntent(registry: ProviderRegistry, input: IntentI
           previousError: problem }) }],
     });
     try {
-      const raw = normalizePlannedIntent(jsonResponse(response.content ?? ''), input, instruction, attempt > 0);
+      const raw = normalizePlannedIntent(jsonResponse(response.content ?? ''), input, instruction);
       return MediaIntentSchema.parse(raw);
     } catch (error) { problem = error instanceof Error ? error.message : String(error); }
   }
@@ -225,13 +230,11 @@ export async function verifyMediaIntent(registry: ProviderRegistry, input: Verif
         const inspectionResponse = await resolved.provider.chat({
           model: resolved.model, temperature: 0, think: false, maxTokens: 2000, signal, responseFormat: INTEGRITY_JSON_SCHEMA,
           systemPrompt: 'Inspect the supplied image independently and describe visible facts; do not assume any requested edit was successful. ' +
-            'You are looking at a finished image of unknown origin. Whether it was edited, composited, retouched or model-generated is expected and is NEVER a defect: never report that the image looks manipulated, artificial, superimposed or composited, and never speculate about how it was produced. ' +
-            'Report only faults visible in the depicted content: cut-off, duplicated or missing body parts, impossible limb or joint geometry, a hard rectangular boundary crossing a subject, broken or misaligned edges, garbled texture, or a shadow cast in a direction no other object in the frame shares. ' +
-            'Name the exact part and what is visibly wrong with it. A general impression such as "the anatomy looks off", "the lighting does not match" or "it looks digitally altered" is not a defect and must be omitted. ' +
-            'Only count defects that were not explicitly requested: intentional collage, overlays or visible patch borders are allowed when the request calls for them. ' +
-            'If uncertain about coherence, return visuallyCoherent:false and name at least one concrete located fault in defects. ' +
-            'visuallyCoherent:false requires a non-empty defects array; an empty defects array requires visuallyCoherent:true. ' +
-            'Return JSON with observation:string, defects:string[], visuallyCoherent:boolean. Do not provide a preservation verdict based on the requested outcome.',
+            'Editing, compositing, retouching, mature subject matter, unusual anatomy, and stylization are not defects by themselves. Do not apply a fixed content or anatomy standard. ' +
+            'For each specific visible integrity issue, name its exact location, whether equivalent evidence is present in the original, and whether it directly contradicts the user request. ' +
+            'An intentional feature is valid when the request asks for it, even if it is uncommon. General impressions or speculation about how the image was produced are not integrity issues. ' +
+            'visuallyCoherent:false requires at least one specific located issue; an empty defects array requires visuallyCoherent:true. ' +
+            'Return JSON only. Do not provide a preservation verdict based merely on the desired outcome.',
           messages: [{ role: 'user', images, content: JSON.stringify({
             instruction: isResult ? input.intent.instruction : undefined,
             task: 'Inspect this image for structural and compositing faults in the depicted content.',
@@ -242,7 +245,18 @@ export async function verifyMediaIntent(registry: ProviderRegistry, input: Verif
             previousProtocolError: attempt ? 'The prior response said the image was incoherent but named no concrete located fault. Return a consistent verdict.' : undefined,
           }) }],
         });
-        const candidate = VisualIntegritySchema.parse(jsonResponse(inspectionResponse.content ?? ''));
+        const parsed = VisualIntegritySchema.parse(jsonResponse(inspectionResponse.content ?? ''));
+        const defects = parsed.defects
+          .filter((defect) => !isResult || (!defect.presentInOriginal && defect.contradictsRequest))
+          .map((defect) => `${defect.specificLocation}: ${defect.description}`);
+        const candidate = {
+          ...parsed,
+          defects,
+          // A concrete listed fault is never coherent even if the model emitted
+          // an internally inconsistent true flag. A false verdict with only
+          // subjective defects remains inconclusive and is retried below.
+          visuallyCoherent: defects.length ? false : parsed.visuallyCoherent,
+        };
         if (!candidate.visuallyCoherent && !candidate.defects.length) continue;
         return candidate;
       }
@@ -280,6 +294,53 @@ async function videoFrames(path: string, duration: number, signal?: AbortSignal)
   } finally { await rm(directory, { recursive: true, force: true }); }
 }
 
+export interface ReferenceSheetInput {
+  sources: string[];
+  output: string;
+  width: number;
+  height: number;
+  signal?: AbortSignal;
+}
+
+/** Put separate identity references on one neutral board for the image editor. */
+async function imageReferenceSheet(input: ReferenceSheetInput): Promise<void> {
+  const columns = Math.min(2, input.sources.length);
+  const rows = Math.ceil(input.sources.length / columns);
+  const columnWidths = Array.from({ length: columns }, (_, column) =>
+    Math.floor(input.width / columns) + (column === columns - 1 ? input.width % columns : 0));
+  const rowHeights = Array.from({ length: rows }, (_, row) =>
+    Math.floor(input.height / rows) + (row === rows - 1 ? input.height % rows : 0));
+  const filters: string[] = [];
+  const layout: string[] = [];
+  input.sources.forEach((_, index) => {
+    const column = index % columns;
+    const row = Math.floor(index / columns);
+    const cellWidth = columnWidths[column];
+    const cellHeight = rowHeights[row];
+    const x = columnWidths.slice(0, column).reduce((total, value) => total + value, 0);
+    const y = rowHeights.slice(0, row).reduce((total, value) => total + value, 0);
+    filters.push(
+      `[${index}:v]scale=${cellWidth}:${cellHeight}:force_original_aspect_ratio=decrease,` +
+      `pad=${cellWidth}:${cellHeight}:(ow-iw)/2:(oh-ih)/2:color=white[cell${index}]`,
+    );
+    layout.push(`${x}_${y}`);
+  });
+  filters.push(
+    `${input.sources.map((_, index) => `[cell${index}]`).join('')}` +
+    `xstack=inputs=${input.sources.length}:layout=${layout.join('|')}:fill=white[out]`,
+  );
+  const ffmpegArgs = [
+    '-v', 'error', '-y',
+    ...input.sources.flatMap((source) => ['-i', source]),
+    '-filter_complex', filters.join(';'), '-map', '[out]', '-frames:v', '1', input.output,
+  ];
+  await new Promise<void>((resolve, reject) => execFile(
+    'ffmpeg', ffmpegArgs, { signal: input.signal, timeout: 60_000, windowsHide: true },
+    (error) => error ? reject(error) : resolve(),
+  ));
+  inspectPng(await readFile(input.output));
+}
+
 export interface PrecisionMediaOptions {
   workspace: WorkspaceDescriptor;
   registry?: ProviderRegistry;
@@ -287,6 +348,7 @@ export interface PrecisionMediaOptions {
   plan?: (input: IntentInput, signal?: AbortSignal) => Promise<MediaIntent>;
   verify?: (input: VerificationInput, signal?: AbortSignal) => Promise<MediaVerification>;
   frames?: typeof videoFrames;
+  referenceSheet?: (input: ReferenceSheetInput) => Promise<void>;
 }
 
 /** Every attempt stays permissioned. Only a visually verified candidate is published. */
@@ -324,6 +386,19 @@ export class PrecisionMediaExecutor implements ToolExecutor {
       const kind = call.name === 'image.generate' ? 'image' : 'video';
       const story = call.name === 'video.story.generate';
       const referenceImages: string[] = [];
+      const referencePaths = args.referencePaths === undefined
+        ? []
+        : Array.isArray(args.referencePaths)
+          ? args.referencePaths.map((path) => String(path))
+          : (() => { throw new Error('referencePaths must be an array.'); })();
+      if (referencePaths.length && (kind !== 'image' || referencePaths.length > 12)) {
+        throw new Error('Image reference generation accepts 1–12 referencePaths.');
+      }
+      for (const path of referencePaths) {
+        if (!/\.(?:png|jpe?g|webp)$/i.test(path)) throw new Error('Every referencePath must be a PNG, JPEG, or WebP image.');
+        referenceImages.push(await loadSource(path));
+      }
+      delete args.referencePaths;
       if (story) {
         if (!Array.isArray(args.characters) || !Array.isArray(args.segments)) throw new Error('Story generation requires characters and segments.');
         for (const character of args.characters as Array<{ imagePath: string }>) referenceImages.push(await loadSource(character.imagePath));
@@ -345,7 +420,6 @@ export class PrecisionMediaExecutor implements ToolExecutor {
       }
       for (const key of ['width', 'height', 'durationSeconds'] as const) if (intent.constraints[key] !== undefined) args[key] = intent.constraints[key];
       if (story) {
-        sourceImages.push(...referenceImages);
         const segments = args.segments as Array<Record<string, unknown>>;
         args.segments = [];
         for (const segment of segments) {
@@ -355,48 +429,122 @@ export class PrecisionMediaExecutor implements ToolExecutor {
           (args.segments as unknown[]).push({ ...segment, intent: sceneIntent });
         }
       }
-      let lastProblem = '';
-      for (let attempt = 0; attempt < 3; attempt++) {
-        signal?.throwIfAborted();
-        const candidatePath = `${requestedPath.slice(0, -extname(requestedPath).length)}.candidate-${randomUUID()}${extname(requestedPath)}`;
-        const candidate = resolveWithinWorkspace(workspace.rootPath, candidatePath);
-        let owned = false;
-        try {
-          const result = await this.inner.execute({ ...call, arguments: { ...args, outputPath: candidatePath, correction: lastProblem } }, signal);
-          if (!result.success) return result;
-          const artifact = JSON.parse(result.output) as Record<string, unknown>;
-          if (artifact.path !== candidatePath) throw new Error('Media tool returned an unexpected artifact path.');
-          owned = true;
-          const metadata: Record<string, unknown> = { ...artifact };
-          if (storyboard) metadata.storyboard = storyboard;
-          let resultImages: string[];
-          if (kind === 'image') {
-            const bytes = await readFile(candidate); const dimensions = inspectPng(bytes);
-            if (sourceImages[0] && bytes.equals(Buffer.from(sourceImages[0], 'base64'))) throw new Error('The editor returned the unchanged source; the requested change did not occur.');
-            if ((intent.constraints.width !== undefined && dimensions.width !== intent.constraints.width) || (intent.constraints.height !== undefined && dimensions.height !== intent.constraints.height)) throw new Error('Generated image dimensions do not match the request.');
-            Object.assign(metadata, dimensions); resultImages = [bytes.toString('base64')];
-          } else {
-            const measured = await probeVideo(candidate, signal); validateVideoConstraints(measured, intent.constraints);
-            Object.assign(metadata, measured); resultImages = await (this.options.frames ?? videoFrames)(candidate, measured.durationSeconds, signal);
-          }
-          const verification = MediaVerificationSchema.parse(await verify({ intent, sourceImages, resultImages, metadata }, signal));
-          if (!mediaVerificationPassed(verification, intent)) { lastProblem = `${verification.summary}\n${verification.correction}`.slice(0, 2000); continue; }
+      let referenceSheet: { absolute: string; relative: string } | undefined;
+      let fallback: {
+        candidate: string; metadata: Record<string, unknown>;
+        verification: MediaVerification; result: LoopToolResult; attempts: number;
+      } | undefined;
+      try {
+        if (referencePaths.length) {
+          const relativePath = `.image-reference-${randomUUID()}.png`;
+          const absolutePath = resolveWithinWorkspace(workspace.rootPath, relativePath);
+          await mkdir(dirname(absolutePath), { recursive: true });
+          await (this.options.referenceSheet ?? imageReferenceSheet)({
+            sources: referencePaths.map((path) => resolveWithinWorkspace(workspace.rootPath, path)),
+            output: absolutePath,
+            width: Number(args.width ?? 1024),
+            height: Number(args.height ?? 1024),
+            signal,
+          });
+          referenceSheet = { absolute: absolutePath, relative: relativePath };
+          args.referenceSheetPath = relativePath;
+        }
+        const verificationSources = [...sourceImages, ...referenceImages];
+        let correction: string | undefined;
+        let lastVerification: MediaVerification | undefined;
+        // The best attempt so far, kept on disk rather than deleted. Every check
+        // must pass for a result to be "verified", and a vision model asked to
+        // find defects in a photograph of a person reliably finds some, so an
+        // unverified result is usually a usable image with a caveat — not a
+        // failure worth throwing the pixels away over.
+        for (let attempt = 0; attempt < 3; attempt++) {
           signal?.throwIfAborted();
-          await mkdir(dirname(output), { recursive: true });
-          // COPYFILE_EXCL is atomic with respect to an existing destination; never unlink that destination.
-          await copyFile(candidate, output, constants.COPYFILE_EXCL);
-          const bytes = await readFile(output);
-          const published = { ...metadata, path: requestedPath, format: extension.slice(1), bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), intent, verification, verificationAttempts: attempt + 1 };
-          return { ...result, output: JSON.stringify(published), evidence: [
-            { kind: 'artifact_hash', summary: `Verified final media artifact ${requestedPath}`, detail: published },
-            { kind: 'media-verification', summary: verification.summary, detail: published },
-          ] };
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code === 'EEXIST' || signal?.aborted) throw error;
-          lastProblem = error instanceof Error ? error.message : String(error);
-        } finally { if (owned) await unlink(candidate).catch(() => undefined); }
+          const candidatePath = `${requestedPath.slice(0, -extname(requestedPath).length)}.candidate-${randomUUID()}${extname(requestedPath)}`;
+          const candidate = resolveWithinWorkspace(workspace.rootPath, candidatePath);
+          let owned = false;
+          try {
+            const result = await this.inner.execute({ ...call, arguments: { ...args, outputPath: candidatePath, correction } }, signal);
+            if (!result.success) return result;
+            const artifact = JSON.parse(result.output) as Record<string, unknown>;
+            if (artifact.path !== candidatePath) throw new Error('Media tool returned an unexpected artifact path.');
+            owned = true;
+            const metadata: Record<string, unknown> = { ...artifact };
+            if (storyboard) metadata.storyboard = storyboard;
+            let resultImages: string[];
+            if (kind === 'image') {
+              const bytes = await readFile(candidate); const dimensions = inspectPng(bytes);
+              if (sourceImages[0] && bytes.equals(Buffer.from(sourceImages[0], 'base64'))) throw new Error('The editor returned the unchanged source; the requested change did not occur.');
+              if ((intent.constraints.width !== undefined && dimensions.width !== intent.constraints.width) || (intent.constraints.height !== undefined && dimensions.height !== intent.constraints.height)) throw new Error('Generated image dimensions do not match the request.');
+              Object.assign(metadata, dimensions); resultImages = [bytes.toString('base64')];
+            } else {
+              const measured = await probeVideo(candidate, signal); validateVideoConstraints(measured, intent.constraints);
+              Object.assign(metadata, measured); resultImages = await (this.options.frames ?? videoFrames)(candidate, measured.durationSeconds, signal);
+            }
+            const verification = MediaVerificationSchema.parse(await verify({ intent, sourceImages: verificationSources, resultImages, metadata }, signal));
+            if (!mediaVerificationPassed(verification, intent)) {
+              lastVerification = verification;
+              correction = verification.correction || undefined;
+              // Retain the most-corrected attempt instead of unlinking it. The
+              // candidate is released from `owned` so the finally block leaves
+              // it alone; the previous fallback is what gets collected.
+              if (fallback) await unlink(fallback.candidate).catch(() => undefined);
+              fallback = { candidate, metadata, verification, result, attempts: attempt + 1 };
+              owned = false;
+              continue;
+            }
+            signal?.throwIfAborted();
+            if (fallback) {
+              await unlink(fallback.candidate).catch(() => undefined);
+              fallback = undefined;
+            }
+            await mkdir(dirname(output), { recursive: true });
+            // COPYFILE_EXCL is atomic with respect to an existing destination; never unlink that destination.
+            await copyFile(candidate, output, constants.COPYFILE_EXCL);
+            const bytes = await readFile(output);
+            const published = { ...metadata, path: requestedPath, format: extension.slice(1), bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), intent, verification, verificationAttempts: attempt + 1 };
+            return { ...result, output: JSON.stringify(published), evidence: [
+              { kind: 'artifact_hash', summary: `Verified final media artifact ${requestedPath}`, detail: published },
+              { kind: 'media-verification', summary: verification.summary, detail: published },
+            ] };
+          } finally { if (owned) await unlink(candidate).catch(() => undefined); }
+        }
+        const detail = lastVerification
+          ? `${lastVerification.summary}${lastVerification.correction ? ` ${lastVerification.correction}` : ''}`
+          : 'No compatible verification result was returned.';
+
+        // Publishing an unverified artifact beats publishing nothing: the run
+        // did produce an image, and the caller can see both it and what the
+        // inspection objected to. Set DACAI_MEDIA_VERIFICATION=enforce to keep
+        // the strict gate that discards anything it cannot fully verify.
+        if (fallback && process.env.DACAI_MEDIA_VERIFICATION?.trim().toLowerCase() !== 'enforce') {
+          try {
+            signal?.throwIfAborted();
+            await mkdir(dirname(output), { recursive: true });
+            await copyFile(fallback.candidate, output, constants.COPYFILE_EXCL);
+            const bytes = await readFile(output);
+            const published = {
+              ...fallback.metadata, path: requestedPath, format: extension.slice(1), bytes: bytes.length,
+              sha256: createHash('sha256').update(bytes).digest('hex'), intent,
+              verification: fallback.verification, verificationAttempts: fallback.attempts, verified: false,
+            };
+            return { ...fallback.result, output: JSON.stringify(published), evidence: [
+              { kind: 'artifact_hash', summary: `Unverified final media artifact ${requestedPath}`, detail: published },
+              { kind: 'media-verification', summary: `Published without passing verification. ${detail}`, detail: published },
+            ] };
+          } finally { await unlink(fallback.candidate).catch(() => undefined); }
+        }
+        if (fallback) await unlink(fallback.candidate).catch(() => undefined);
+        throw new MediaFidelityError(`Media fidelity verification failed after 3 compatible attempts; no final artifact was published. ${detail}`);
+      } finally {
+        if (fallback) await unlink(fallback.candidate).catch(() => undefined);
+        if (referenceSheet) await unlink(referenceSheet.absolute).catch(() => undefined);
       }
-      throw new Error(`Media fidelity verification failed after 3 compatible attempts; no final artifact was published. ${lastProblem}`);
-    } catch (error) { return { success: false, output: `Precision media failed: ${error instanceof Error ? error.message : String(error)}`, error: 'media-verification-failed' }; }
+    } catch (error) {
+      return {
+        success: false,
+        output: `Precision media failed: ${error instanceof Error ? error.message : String(error)}`,
+        error: error instanceof MediaFidelityError ? 'media-verification-failed' : 'media-processing-failed',
+      };
+    }
   }
 }

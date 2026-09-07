@@ -5,7 +5,7 @@ import { resolveWithinWorkspace } from '@dacai-local-agent/security';
 import type { ToolDefinition, ToolExecutionContext } from './types';
 import { resolveMediaConnection } from './media-connection';
 import { parseMediaIntent } from '@dacai-local-agent/shared';
-import { probeVideo, validateVideoConstraints, type VideoProbe } from './media-artifacts';
+import { decodeMp4, probeVideo, validateVideoConstraints, type VideoProbe } from './media-artifacts';
 
 interface VideoGenerationServices {
   env: NodeJS.ProcessEnv;
@@ -57,18 +57,6 @@ function sourceMimeType(path: string): string {
   if (extension === '.jpg' || extension === '.jpeg') return 'image/jpeg';
   if (extension === '.webp') return 'image/webp';
   throw new Error('sourcePath must be a PNG, JPEG, or WebP image.');
-}
-
-function decodeMp4(value: unknown): Buffer {
-  if (typeof value !== 'string' || !value.trim()) throw new Error('The video backend returned no video data.');
-  const video = Buffer.from(value.replace(/^data:video\/mp4;base64,/i, ''), 'base64');
-  if (video.byteLength < 12 || video.byteLength > MAX_VIDEO_BYTES) {
-    throw new Error('The generated video is empty or exceeds the 50 MB limit.');
-  }
-  if (video.subarray(4, 8).toString('ascii') !== 'ftyp') {
-    throw new Error('The video backend did not return a valid MP4 file.');
-  }
-  return video;
 }
 
 async function responseError(response: Response): Promise<string> {
@@ -129,8 +117,8 @@ export function createVideoGenerationTools(services: VideoGenerationServices = D
       }
       const output = containedPath(ctx, input.outputPath, '.mp4');
       const source = input.sourcePath === undefined ? undefined : containedPath(ctx, input.sourcePath);
-      const prompt = typeof input.prompt === 'string' ? input.prompt.trim() : '';
-      if (!source && !prompt) throw new Error('prompt is required when sourcePath is not provided.');
+      const prompt = typeof input.prompt === 'string' ? input.prompt : '';
+      if (!source && !prompt.trim()) throw new Error('prompt is required when sourcePath is not provided.');
       if (prompt.length > 4000) throw new Error('prompt must be 4000 characters or fewer.');
       const intent = input.intent === undefined ? undefined : parseMediaIntent(input.intent);
       if (intent && intent.kind !== 'video') throw new Error('Video intent must describe a video.');
@@ -155,8 +143,9 @@ export function createVideoGenerationTools(services: VideoGenerationServices = D
       if (input.negativePrompt !== undefined && (typeof input.negativePrompt !== 'string' || input.negativePrompt.length > 2000)) throw new Error('negativePrompt must be at most 2000 characters.');
       const connection = resolveMediaConnection(services.env);
       const base = connection.baseUrl;
-      const wanRequest = Boolean(prompt);
-      const response = await services.fetch(`${base}${wanRequest ? '/v1/anatomy-video' : '/v1/animate-image'}`, {
+      const textToVideo = Boolean(prompt);
+      const anatomyRequest = intent?.requiresBodyGeometry === true;
+      const response = await services.fetch(`${base}${textToVideo ? '/v1/anatomy-video' : '/v1/animate-image'}`, {
         method: 'POST',
         redirect: 'error',
         headers: connection.headers,
@@ -164,7 +153,7 @@ export function createVideoGenerationTools(services: VideoGenerationServices = D
         body: JSON.stringify({
           jobId: `agent-${randomUUID()}`,
           prompt,
-          negativePrompt: typeof input.negativePrompt === 'string' ? input.negativePrompt.trim() : '',
+          negativePrompt: typeof input.negativePrompt === 'string' ? input.negativePrompt : '',
           width, height, intent,
           correction: input.correction,
           loop: intent?.constraints.loop ?? input.loop ?? false,
@@ -177,7 +166,7 @@ export function createVideoGenerationTools(services: VideoGenerationServices = D
           noiseAug: decimal(input.noiseAug, 0.02, 0, 1, 'noiseAug'),
           sourceFps: integer(input.sourceFps, 16, 8, 24, 'sourceFps'),
           animate: true,
-          mode: wanRequest ? 'anatomy' : 'auto',
+          mode: anatomyRequest ? 'anatomy' : 'auto',
           sourceMediaBase64: sourceData?.toString('base64'),
           sourceMimeType: mimeType,
         }),
@@ -187,7 +176,7 @@ export function createVideoGenerationTools(services: VideoGenerationServices = D
         videoBase64?: unknown; videoModel?: unknown; model?: unknown; videoFrames?: unknown; peakVramMb?: unknown;
         anatomyValidation?: unknown;
       };
-      const video = decodeMp4(body.videoBase64);
+      const video = decodeMp4(body.videoBase64, MAX_VIDEO_BYTES);
       await mkdir(dirname(output.absolute), { recursive: true });
       await writeFile(output.absolute, video, { flag: 'wx' }).catch((error: NodeJS.ErrnoException) => {
         if (error.code === 'EEXIST') throw new Error('Video output already exists; choose a new outputPath.');
@@ -209,9 +198,9 @@ export function createVideoGenerationTools(services: VideoGenerationServices = D
         sha256: createHash('sha256').update(video).digest('hex'),
         backend: 'dacais-media',
         model: typeof body.videoModel === 'string' ? body.videoModel : body.model,
-        method: wanRequest ? 'wan' : 'svd',
+        method: textToVideo ? 'wan' : 'svd',
         peakVramMb: typeof body.peakVramMb === 'number' ? body.peakVramMb : undefined,
-        anatomyValidation: wanRequest && body.anatomyValidation && typeof body.anatomyValidation === 'object'
+        anatomyValidation: anatomyRequest && body.anatomyValidation && typeof body.anatomyValidation === 'object'
           ? body.anatomyValidation
           : undefined,
       };

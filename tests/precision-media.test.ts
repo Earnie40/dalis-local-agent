@@ -11,7 +11,10 @@ import { mediaRunFailureMessage, verifiedGeneratedArtifact } from '../apps/serve
 import { intentFixture, pngFixture, VIDEO_FIXTURE as MP4 } from './media-fixtures';
 
 const roots: string[] = [];
-afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
+afterEach(async () => {
+  vi.unstubAllEnvs();
+  await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })));
+});
 async function workspace(): Promise<WorkspaceDescriptor> {
   const rootPath = await mkdtemp(join(tmpdir(), 'precision-media-')); roots.push(rootPath);
   return { id: 'test', displayName: 'test', rootPath, capabilities: { read: true, write: true, shell: false, network: false }, gitDetected: false, detectedLanguages: [], createdAt: '', updatedAt: '' };
@@ -28,6 +31,14 @@ function registryWith(content: unknown) {
   const chat = vi.fn(async (_request: Record<string, unknown>) => ({ content: typeof content === 'string' ? content : JSON.stringify(content) }));
   const resolveAlias = vi.fn(async () => ({ provider: { chat }, model: 'test-vision' }));
   return { registry: { resolveAlias } as unknown as ProviderRegistry, chat, resolveAlias };
+}
+function visualDefect(description: string, options: { location?: string; presentInOriginal?: boolean; contradictsRequest?: boolean } = {}) {
+  return {
+    description,
+    specificLocation: options.location ?? 'specified subject region',
+    presentInOriginal: options.presentInOriginal ?? false,
+    contradictsRequest: options.contradictsRequest ?? true,
+  };
 }
 const call = (args: Record<string, unknown> = {}, name = 'image.generate'): NormalizedToolCall => ({ id: 'media-test', name, arguments: { prompt: 'Generate exactly two red cubes on the left.', outputPath: 'result.png', ...args } });
 function writer(root: string, bytes = pngFixture(512, 512)) {
@@ -73,12 +84,13 @@ describe('precision intent planning', () => {
       constraints: { width: 512, height: 512, loop: false } });
     expect(chat).toHaveBeenCalledOnce();
   });
-  it('uses global scope when an edit change has no grounded region', async () => {
+  it('never widens a localized edit when the planner omits its grounded region', async () => {
     const response = { ...intentFixture('change shirt'), changes: [{ action: 'change shirt', target: 'shirt' }] };
-    const intent = await planMediaIntent(registryWith(response).registry, {
+    const { registry, chat } = registryWith(response);
+    await expect(planMediaIntent(registry, {
       kind: 'image', instruction: 'change shirt', sourceImageBase64: 'source',
-    });
-    expect(intent.editScope).toBe('global');
+    })).rejects.toThrow('could not be grounded without changing the request');
+    expect(chat).toHaveBeenCalledTimes(2);
   });
   it('rejects oversized prompts without truncation or provider calls', async () => {
     const { registry, chat } = registryWith({});
@@ -121,10 +133,17 @@ describe('precision intent planning', () => {
     // as TASK_BLOCKED/TASK_FAILED. A generate has no source, so editScope must be
     // derived as 'none'.
     const instruction = 'fix the TASK_BLOCKED problem';
-    const response = { ...intentFixture(instruction, { generate: true }), kind: 'video', editScope: 'global' };
+    const response = {
+      ...intentFixture(instruction, { generate: true }),
+      kind: 'video',
+      editScope: 'global',
+      protectedAttributes: ['identity', 'face', 'pose', 'clothing', 'background'],
+    };
     const { registry } = registryWith(response);
     const intent = await planMediaIntent(registry, { kind: 'video', instruction });
-    expect(intent).toMatchObject({ operation: 'generate', kind: 'video', editScope: 'none', instruction });
+    expect(intent).toMatchObject({
+      operation: 'generate', kind: 'video', editScope: 'none', instruction, protectedAttributes: [],
+    });
   });
   it('accepts a pure generate with an empty changes array; only an edit must describe a change', async () => {
     // A generate has no source, so it has no source edits to enumerate. The
@@ -140,14 +159,21 @@ describe('precision intent planning', () => {
     expect(MediaIntentSchema.safeParse({ ...edit, changes: [] }).success).toBe(false);
     expect(MediaIntentSchema.safeParse(edit).success).toBe(true);
   });
-  it('falls back to the verbatim request after two empty edit plans', async () => {
+  it('does not invent a global edit after two empty localized plans', async () => {
     const instruction = 'Change only the turquoise earring to red.';
     const response = { ...intentFixture(instruction), editScope: 'none', changes: [] };
     const { registry, chat } = registryWith(response);
-    const intent = await planMediaIntent(registry, { kind: 'image', instruction, sourceImageBase64: 'source' });
-    expect(intent).toMatchObject({ operation: 'edit', editScope: 'global',
-      changes: [{ action: instruction, target: 'source image' }] });
+    await expect(planMediaIntent(registry, { kind: 'image', instruction, sourceImageBase64: 'source' }))
+      .rejects.toThrow('could not be grounded without changing the request');
     expect(chat).toHaveBeenCalledTimes(2);
+  });
+  it('retains reference identity constraints during generation', async () => {
+    const instruction = 'Create a new portrait of both supplied adults together.';
+    const response = { ...intentFixture(instruction, { generate: true }), protectedAttributes: ['identity', 'face', 'clothing'] };
+    const intent = await planMediaIntent(registryWith(response).registry, {
+      kind: 'image', instruction, referenceImagesBase64: ['person-a', 'person-b'],
+    });
+    expect(intent).toMatchObject({ operation: 'generate', editScope: 'none', protectedAttributes: ['identity', 'face', 'clothing'] });
   });
   it('verifies a generation with no requested changes', async () => {
     const intent = MediaIntentSchema.parse({ ...intentFixture('Generate a scene', { generate: true }), kind: 'video', changes: [] });
@@ -180,6 +206,7 @@ describe('verified artifact publication', () => {
     expect(await readdir(ws.rootPath)).toEqual(['result.png', 'source.png']);
   });
   it.each(['malformed', 'failed', 'missing-check', 'repeated-check', 'unchanged', 'wrong-size'])('does not publish %s evidence', async reason => {
+    vi.stubEnv('DACAI_MEDIA_VERIFICATION', 'enforce');
     const ws = await workspace(); const intent = MediaIntentSchema.parse(intentFixture('change shirt'));
     await writeFile(join(ws.rootPath, 'source.png'), pngFixture(512, 512));
     const execute = writer(ws.rootPath, reason === 'unchanged' ? pngFixture(512, 512) : reason === 'wrong-size' ? pngFixture(768, 512) : pngFixture(512, 512, 123));
@@ -188,13 +215,40 @@ describe('verified artifact publication', () => {
       : report(intent, reason !== 'failed');
     const executor = new PrecisionMediaExecutor(inner(execute), { workspace: ws, plan: async () => intent, verify: vi.fn().mockResolvedValue(evidence) });
     const result = await executor.execute(call({ prompt: intent.instruction, sourcePath: 'source.png' }));
-    expect(result.success).toBe(false); expect(result.output).toContain('after 3 compatible attempts');
+    expect(result.success).toBe(false);
+    if (['failed', 'missing-check', 'repeated-check'].includes(reason)) {
+      expect(result.output).toContain('after 3 compatible attempts');
+      expect(execute).toHaveBeenCalledTimes(3);
+    } else {
+      expect(execute).toHaveBeenCalledOnce();
+    }
     if (reason === 'failed') {
       const message = mediaRunFailureMessage(result, 'image');
       expect(message).toContain('Requested color is wrong.');
       expect(message).toContain('Change the shirt to the requested blue');
     }
     expect(await readdir(ws.rootPath)).toEqual(['source.png']);
+  });
+  it('publishes the corrected attempt when verification never passes', async () => {
+    // The strict gate deleted every candidate and published nothing, so a vision
+    // model calling a photograph "composited" destroyed a usable image. The
+    // artifact now survives, carrying the objection rather than being replaced by
+    // it.
+    const ws = await workspace(); await writeFile(join(ws.rootPath, 'source.png'), pngFixture(512, 512));
+    const resultBytes = pngFixture(512, 512, 123);
+    const intent = MediaIntentSchema.parse(intentFixture('change only the shirt color'));
+    const execute = writer(ws.rootPath, resultBytes);
+    const verify = vi.fn().mockResolvedValue(report(intent, false));
+    const executor = new PrecisionMediaExecutor(inner(execute), { workspace: ws, plan: async () => intent, verify });
+
+    const result = await executor.execute(call({ prompt: intent.instruction, sourcePath: 'source.png' }));
+
+    expect(result.success).toBe(true);
+    expect(execute).toHaveBeenCalledTimes(3);
+    expect(JSON.parse(result.output)).toMatchObject({ path: 'result.png', verified: false, verificationAttempts: 3 });
+    expect(await readFile(join(ws.rootPath, 'result.png'))).toEqual(resultBytes);
+    // The retained candidate is published, not left behind beside the result.
+    expect(await readdir(ws.rootPath)).toEqual(['result.png', 'source.png']);
   });
   it('preserves preexisting outputs and collision races', async () => {
     const ws = await workspace(); const intent = MediaIntentSchema.parse(intentFixture('generate', { generate: true }));
@@ -214,6 +268,7 @@ describe('verified artifact publication', () => {
     expect(execute).toHaveBeenCalledTimes(1); expect(await readdir(ws.rootPath)).toEqual([]);
   });
   it('verifies real decoded video duration and temporal evidence', async () => {
+    vi.stubEnv('DACAI_MEDIA_VERIFICATION', 'enforce');
     const ws = await workspace(); const intent = MediaIntentSchema.parse({ ...intentFixture('moving cubes', { generate: true }), kind: 'video', constraints: { durationSeconds: 1, loop: false } });
     const execute = writer(ws.rootPath, MP4); const verify = vi.fn().mockResolvedValue({ ...report(intent), temporalProgression: { passed: false, evidence: 'Frames repeat the same positions.' } });
     const executor = new PrecisionMediaExecutor(inner(execute), { workspace: ws, plan: async () => intent, verify, frames: async () => ['frame1', 'frame2'] });
@@ -232,6 +287,54 @@ describe('verified artifact publication', () => {
     expect(plan.mock.calls[0][0].referenceImagesBase64).toHaveLength(2);
     expect(verify.mock.calls[0][0].sourceImages).toHaveLength(2);
     expect(verify.mock.calls[0][0].metadata.storyboard).toContain('Keep the scene');
+  });
+
+  it('combines separate image attachments for generation while retaining both as verification references', async () => {
+    const ws = await workspace();
+    await writeFile(join(ws.rootPath, 'person-a.png'), pngFixture(320, 480, 7));
+    await writeFile(join(ws.rootPath, 'person-b.png'), pngFixture(480, 320, 11));
+    const prompt = 'Create both attached adults making pizza together on a date.';
+    const intent = MediaIntentSchema.parse(intentFixture(prompt, { generate: true, geometry: true }));
+    const plan = vi.fn(async () => intent);
+    const verify = vi.fn(async () => report(intent));
+    const referenceSheet = vi.fn(async (input: { sources: string[]; output: string; width: number; height: number }) => {
+      expect(input.sources).toEqual([join(ws.rootPath, 'person-a.png'), join(ws.rootPath, 'person-b.png')]);
+      expect(input).toMatchObject({ width: 512, height: 512 });
+      await writeFile(input.output, pngFixture(512, 512, 19), { flag: 'wx' });
+    });
+    const execute = vi.fn(async (request: NormalizedToolCall) => {
+      expect(request.arguments).toMatchObject({
+        prompt,
+        width: 512,
+        height: 512,
+        intent: { operation: 'generate', protectedAttributes: [] },
+      });
+      expect(request.arguments.sourcePath).toBeUndefined();
+      expect(String(request.arguments.referenceSheetPath)).toMatch(/^\.image-reference-[a-f0-9-]+\.png$/);
+      const path = String(request.arguments.outputPath);
+      await writeFile(join(ws.rootPath, path), pngFixture(512, 512, 23), { flag: 'wx' });
+      return { success: true, output: JSON.stringify({ path, method: 'anatomy' }) };
+    });
+    const executor = new PrecisionMediaExecutor(inner(execute), {
+      workspace: ws,
+      plan,
+      verify,
+      referenceSheet,
+    });
+
+    const result = await executor.execute(call({
+      prompt,
+      referencePaths: ['person-a.png', 'person-b.png'],
+      width: 512,
+      height: 512,
+    }));
+
+    expect(result.success).toBe(true);
+    expect(plan.mock.calls[0][0]).toMatchObject({ sourceImageBase64: undefined, referenceImagesBase64: expect.any(Array) });
+    expect(plan.mock.calls[0][0].referenceImagesBase64).toHaveLength(2);
+    expect(verify.mock.calls[0][0].sourceImages).toHaveLength(2);
+    expect(referenceSheet).toHaveBeenCalledOnce();
+    expect(await readdir(ws.rootPath)).toEqual(['person-a.png', 'person-b.png', 'result.png']);
   });
 });
 
@@ -253,7 +356,11 @@ describe('strict evaluator protocol', () => {
     const { registry, chat } = registryWith(report(intent));
     chat.mockResolvedValueOnce({ content: JSON.stringify(report(intent)) })
       .mockResolvedValueOnce({ content: JSON.stringify({ observation: 'An intact, unedited subject.', defects: [], visuallyCoherent: true }) })
-      .mockResolvedValueOnce({ content: JSON.stringify({ observation: 'A rectangular shirt patch cuts across the neck.', defects: ['Neck and arm edges are discontinuous at the patch boundary.'], visuallyCoherent: false }) });
+      .mockResolvedValueOnce({ content: JSON.stringify({
+        observation: 'A rectangular shirt patch cuts across the neck.',
+        defects: [visualDefect('Neck and arm edges are discontinuous at the patch boundary.', { location: 'shirt neckline and arm opening' })],
+        visuallyCoherent: false,
+      }) });
     const verification = await verifyMediaIntent(registry, { intent, sourceImages: ['source'], resultImages: ['result'], metadata: {} });
     expect(verification.composition.passed).toBe(false);
     expect(verification.correction).toContain('Neck and arm');
@@ -265,7 +372,7 @@ describe('strict evaluator protocol', () => {
     const { registry, chat } = registryWith(report(intent));
     const prior = 'The left hand has six fingers.';
     chat.mockResolvedValueOnce({ content: JSON.stringify(report(intent)) })
-      .mockResolvedValueOnce({ content: JSON.stringify({ observation: 'A person with a malformed left hand.', defects: [prior], visuallyCoherent: false }) })
+      .mockResolvedValueOnce({ content: JSON.stringify({ observation: 'A person with a distinct left hand.', defects: [visualDefect(prior, { location: 'left hand', presentInOriginal: true })], visuallyCoherent: false }) })
       .mockResolvedValueOnce({ content: JSON.stringify({ observation: 'The same subject wearing a new shirt.', defects: [], visuallyCoherent: true }) });
     const verification = await verifyMediaIntent(registry, { intent, sourceImages: ['source'], resultImages: ['result'], metadata: {} });
     expect(verification.composition.passed).toBe(true);
@@ -286,6 +393,42 @@ describe('strict evaluator protocol', () => {
     expect(verification.composition.evidence).toContain('inconclusive');
     // The paired report, then two rejected attempts for each of the baseline and result passes.
     expect(chat).toHaveBeenCalledTimes(5);
+  });
+  it('does not treat generic compositing criticism as a concrete structural defect', async () => {
+    const intent = MediaIntentSchema.parse(intentFixture('put both people in one kitchen scene'));
+    const { registry, chat } = registryWith(report(intent));
+    const subjective = {
+      observation: 'The two people look digitally composited.',
+      defects: [
+        visualDefect('The images are not seamlessly blended.', { contradictsRequest: false }),
+        visualDefect('The lighting and background do not match.', { contradictsRequest: false }),
+        visualDefect('The transition between the subjects is abrupt.', { contradictsRequest: false }),
+      ],
+      visuallyCoherent: false,
+    };
+    chat.mockResolvedValueOnce({ content: JSON.stringify(report(intent)) })
+      .mockResolvedValue({ content: JSON.stringify(subjective) });
+
+    const verification = await verifyMediaIntent(registry, {
+      intent, sourceImages: ['source'], resultImages: ['result'], metadata: {},
+    });
+
+    expect(verification.composition.passed).toBe(true);
+    expect(verification.composition.evidence).toContain('inconclusive');
+  });
+  it('does not reject unusual anatomy that the user explicitly requested', async () => {
+    const intent = MediaIntentSchema.parse(intentFixture('Give the fantasy character six fingers on each hand.'));
+    const { registry, chat } = registryWith(report(intent));
+    const requestedFeature = visualDefect('Each hand has six fingers.', {
+      location: 'both hands',
+      contradictsRequest: false,
+    });
+    chat.mockResolvedValueOnce({ content: JSON.stringify(report(intent)) })
+      .mockResolvedValue({ content: JSON.stringify({ observation: 'The requested six-finger design is visible.', defects: [requestedFeature], visuallyCoherent: false }) });
+
+    const verification = await verifyMediaIntent(registry, { intent, sourceImages: ['source'], resultImages: ['result'], metadata: {} });
+    expect(verification.composition.passed).toBe(true);
+    expect(verification.composition.evidence).toContain('inconclusive');
   });
   it('does not accept malformed independent inspection as preservation', async () => {
     const intent = MediaIntentSchema.parse(intentFixture('change shirt'));
