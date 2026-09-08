@@ -40,6 +40,11 @@ Remove-Item Env:PGSUPERPASSWORD
 pnpm dev
 ```
 
+The server verifies the local Ollama endpoint during startup. If Ollama is
+installed but not running, it launches `ollama serve` in the background and
+waits for the endpoint before a local request or GPU-to-local fallback runs.
+Set `OLLAMA_EXECUTABLE` only when `ollama` is not on `PATH`.
+
 6. Open the web app at http://localhost:5173 and the API at http://localhost:3001/health.
    `GET /api/providers` reports which inference instances are configured.
 

@@ -105,8 +105,23 @@ describe('ProviderRegistry', () => {
     expect(resolved.provider.usageClass).toBe('LOCAL_OLLAMA');
   });
 
+  it('repairs the local provider before resolving a real local model request', async () => {
+    await seed(store, 'qwen2.5-coder:latest', { toolCalling: 'verified' });
+    const registry = new ProviderRegistry(buildConfig(), store);
+    const recover = vi.fn(async () => undefined);
+    registry.setLocalProviderRecovery(recover);
+
+    await registry.resolveAlias('coder');
+
+    expect(recover).toHaveBeenCalledOnce();
+    expect(recover).toHaveBeenCalledWith(expect.objectContaining({ id: 'local_ollama' }));
+  });
+
   it('resolves direct-subsystem requests without probing the text model', async () => {
-    const resolved = await new ProviderRegistry(buildConfig(), store).resolveAlias('coder', {
+    const registry = new ProviderRegistry(buildConfig(), store);
+    const recover = vi.fn(async () => undefined);
+    registry.setLocalProviderRecovery(recover);
+    const resolved = await registry.resolveAlias('coder', {
       preferLocal: true,
       skipCapabilityProbe: true,
     });
@@ -116,6 +131,7 @@ describe('ProviderRegistry', () => {
       model: 'qwen2.5-coder:latest',
       capabilities: { toolCalling: 'unknown', streaming: 'unknown' },
     });
+    expect(recover).not.toHaveBeenCalled();
   });
 
   it('rejects an unknown or disabled alias', async () => {

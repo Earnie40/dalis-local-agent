@@ -28,6 +28,7 @@ import { registerMediaStudioRoutes } from './routes/media-studio';
 import { RunpodService } from './infrastructure/runpod-service';
 import { resolveRunpodPodPresence } from './infrastructure/runpod-pod-status';
 import { RunpodMediaManager } from './infrastructure/runpod-media-manager';
+import { LocalOllamaLifecycle } from './infrastructure/local-ollama-lifecycle';
 import { ApprovalRegistry, approvalOptionsFromEnv } from './approvals';
 
 // Resolved against this file, not the working directory: `pnpm dev` runs the
@@ -96,6 +97,8 @@ server.addHook('onRequest', async (request, reply) => {
 
 const runpodService = new RunpodService();
 const registry = new ProviderRegistry(config, new PostgresCapabilityStore());
+const localOllamaLifecycle = new LocalOllamaLifecycle();
+registry.setLocalProviderRecovery((instance) => localOllamaLifecycle.ensureReady(instance));
 
 /**
  * GPU-first routing. The probe answers "is the pod serving inference right
@@ -322,6 +325,20 @@ const start = async () => {
     }
     await server.listen({ port: config.port, host: listenHost });
     runpodMediaManager.start();
+    // Make the advertised zero-cost fallback ready at boot. Resolution also
+    // calls the same coalesced recovery hook, so a daemon that was not ready at
+    // boot or later stopped is repaired before the next local request.
+    const localOllama = config.providerInstances.local_ollama;
+    if (localOllama?.enabled) {
+      void localOllamaLifecycle.ensureReady(localOllama).then(() => {
+        server.log.info({ instanceId: localOllama.id }, 'Local Ollama fallback is ready');
+      }).catch((error) => {
+        server.log.warn(
+          { instanceId: localOllama.id, error: error instanceof Error ? error.message : String(error) },
+          'Local Ollama fallback could not be started',
+        );
+      });
+    }
     // Report the routing decision once at boot. Under gpu-preferred this probe
     // also repairs a stale tunnel to an already-running, provisioned pod.
     void registry.gpuAvailability(true).then((availability) => {

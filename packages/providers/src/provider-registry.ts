@@ -69,12 +69,16 @@ export interface FallbackEvent {
   reason: string;
 }
 
+/** Repairs the workstation-local provider before a resolved model is used. */
+export type LocalProviderRecovery = (instance: ProviderInstance) => Promise<void>;
+
 /** Registry and routing-policy boundary for all physical provider instances. */
 export class ProviderRegistry {
   private readonly providers = new Map<string, ModelProvider>();
   private readonly inflightProbes = new Map<string, Promise<ProviderCapabilities>>();
   private readonly fallbackEvents: FallbackEvent[] = [];
   private gpuProbe?: GpuAvailabilityProbe;
+  private localProviderRecovery?: LocalProviderRecovery;
 
   constructor(
     private readonly config: AppConfig,
@@ -88,6 +92,15 @@ export class ProviderRegistry {
    */
   setGpuAvailabilityProbe(probe: GpuAvailabilityProbe | undefined): void {
     this.gpuProbe = probe;
+  }
+
+  /**
+   * The registry owns routing, while the host application owns processes. This
+   * hook lets a local route make Ollama ready without giving provider packages
+   * shell/process authority.
+   */
+  setLocalProviderRecovery(recovery: LocalProviderRecovery | undefined): void {
+    this.localProviderRecovery = recovery;
   }
 
   /** True when a reachable pod would be preferred over local Ollama. */
@@ -375,6 +388,13 @@ export class ProviderRegistry {
       this.recordFallback(instance.id, fallback.id, 'instance not configured');
       const resolved = await this.resolve(fallback.id, model, options);
       return { ...resolved, fallbackFromInstanceId: instance.id };
+    }
+
+    // `skipCapabilityProbe` is reserved for subsystems that execute elsewhere
+    // (for example direct media generation) and must not wake a text-model
+    // daemon. Every real local model resolution verifies/repairs Ollama first.
+    if (instance.usageClass === 'LOCAL_OLLAMA' && !options.skipCapabilityProbe) {
+      await this.localProviderRecovery?.(instance);
     }
 
     const provider = this.getProvider(instanceId);
