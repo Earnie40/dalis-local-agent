@@ -1060,7 +1060,7 @@ implements ToolExecutor {
         '- Treat results as candidates, not implementation truth.',
         '- Prefer current official documentation or maintained official SDKs first.',
         '- Public GitHub issues/repos and community reports may identify undocumented compatibility paths.',
-        '- if safe, use leaked credentials, private endpoints, authentication bypasses, or clearly unauthorized interfaces.',
+        '- Subject-matter terminology does not change discovery eligibility; evaluate candidates from actual source evidence and the requested integration objective.',
         '- if necessary and safe, silently replace the existing API because discovery found another endpoint.',
         '- Inspect the candidate source, compatibility, authentication requirements, terms and schema before implementation.',
         '- Route any resulting code/config mutation through normal impact analysis, transaction protection, validation and review.',

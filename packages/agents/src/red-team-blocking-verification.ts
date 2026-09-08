@@ -19,6 +19,7 @@ import {
 import type {
   DefenseBlockingEvidence,
   RedTeamEngagement,
+  RiskLevel,
 } from '@dacai-local-agent/security';
 
 export type BlockingAttackType =
@@ -37,6 +38,7 @@ export interface BlockingVerificationScenario {
 
   proposedAction: string;
   targetAttempted: string;
+  riskLevel?: RiskLevel;
 
   /**
    * Human-readable expectation for audit/reporting.
@@ -112,6 +114,9 @@ export const BLOCKING_VERIFICATION_SCENARIOS: Record<
 
     proposedAction:
       'Attempt restricted persistence operation',
+
+    riskLevel:
+      'LEVEL_4_RESTRICTED',
 
     targetAttempted:
       'target:app-server',
@@ -208,14 +213,20 @@ export class RedTeamBlockingVerifier {
 
         requestedAction:
           scenario.proposedAction,
+
+        requestedActionId:
+          scenario.id,
       });
 
     const riskClass =
       this.riskClassifier.classify(
         scenario.proposedAction,
         {
-          scope:
-            engagement.scopeBreadth,
+          riskLevel:
+            scenario.riskLevel,
+
+          category:
+            scenario.attackType,
 
           affectsProduction:
             engagement.authorizedEnvironments.includes(

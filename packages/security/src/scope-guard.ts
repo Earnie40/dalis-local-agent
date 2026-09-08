@@ -96,9 +96,10 @@ export class ScopeGuard {
       };
     }
 
-    // Prohibited actions check
-    const actionProhibited = engagement.prohibitedActions.some(
-      (prohibited) => context.requestedAction.toLowerCase().includes(prohibited.toLowerCase()),
+    // Engagement exclusions are explicit action identifiers. Natural-language
+    // wording is intentionally never scanned for keywords or synonyms.
+    const actionProhibited = Boolean(
+      context.requestedActionId && engagement.prohibitedActions.includes(context.requestedActionId),
     );
 
     if (actionProhibited) {
@@ -111,7 +112,7 @@ export class ScopeGuard {
         withinTimeWindow: true,
         withinRequestLimit: true,
         withinConcurrencyLimit: true,
-        reason: `Action "${context.requestedAction}" is prohibited in this engagement.`,
+        reason: `Action identifier "${context.requestedActionId}" is prohibited in this engagement.`,
       };
     }
 

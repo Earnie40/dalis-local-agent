@@ -262,6 +262,7 @@ export class AdversarialAgent {
       agentId: 'adversarial-agent',
       requestedTarget: config.target,
       requestedAction: `live-scenario:${scenario.id}`,
+      requestedActionId: scenario.id,
     });
     if (!scopeDecision.authorized) {
       throw new Error(`ScopeGuard denied this live scenario: ${scopeDecision.reason}`);

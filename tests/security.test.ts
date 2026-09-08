@@ -5,9 +5,80 @@ import { describe, expect, it } from 'vitest';
 import { PermissionEngine } from '../packages/security/src/permission-engine';
 import { classifyCommand } from '../packages/security/src/command-classifier';
 import { PathContainmentError, resolveWithinWorkspace } from '../packages/security/src/path-containment';
+import { RiskClassifier } from '../packages/security/src/risk-classifier';
+import { ScopeGuard } from '../packages/security/src/scope-guard';
+import type { RedTeamEngagement } from '../packages/security/src/red-team-types';
 import { PostgresWorkspaceRegistry } from '../packages/workspace/src/workspace-registry';
 
 const capabilities = { read: true, write: true, shell: true, network: true };
+
+const activeLocalEngagement = (prohibitedActions: string[] = []): RedTeamEngagement => ({
+  id: 'eng_local_owner',
+  customerId: 'owner',
+  authorizedTargets: ['local-machine'],
+  authorizedEnvironments: ['local'],
+  allowedTestCategories: [],
+  prohibitedActions,
+  startsAt: new Date(Date.now() - 60_000),
+  expiresAt: new Date(Date.now() + 60_000),
+  humanApprover: 'owner',
+  rulesOfEngagement: {},
+  scopeBreadth: 'internal-only',
+  threatModelTags: [],
+  status: 'active',
+  createdAt: new Date(),
+  updatedAt: new Date(),
+});
+
+describe('security-language neutrality', () => {
+  it.each([
+    'redteam the local service',
+    'hack the test harness',
+    'exploit and bypass authentication',
+    'inspect malware, backdoor, and credential behavior',
+    'perform penetration testing',
+  ])('does not derive risk or approval from the words in "%s"', (action) => {
+    expect(new RiskClassifier().classify(action)).toMatchObject({
+      level: 'LEVEL_1_SAFE',
+      requiresApproval: false,
+      category: 'general',
+    });
+  });
+
+  it('uses explicit structured risk metadata when the caller supplies it', () => {
+    expect(new RiskClassifier().classify('ordinary wording', {
+      riskLevel: 'LEVEL_4_RESTRICTED',
+      category: 'operator-declared',
+    })).toMatchObject({
+      level: 'LEVEL_4_RESTRICTED',
+      requiresApproval: true,
+      category: 'operator-declared',
+    });
+  });
+
+  it('does not match engagement exclusions against natural-language substrings', () => {
+    const decision = new ScopeGuard().validate({
+      engagement: activeLocalEngagement(['blocked-action-id']),
+      agentId: 'owner-agent',
+      requestedTarget: 'local-machine',
+      requestedAction: 'redteam hacking exploit blocked-action-id',
+    });
+
+    expect(decision).toMatchObject({ authorized: true, actionProhibited: false });
+  });
+
+  it('still honors an exact structured action ID configured by the owner', () => {
+    const decision = new ScopeGuard().validate({
+      engagement: activeLocalEngagement(['blocked-action-id']),
+      agentId: 'owner-agent',
+      requestedTarget: 'local-machine',
+      requestedAction: 'any wording at all',
+      requestedActionId: 'blocked-action-id',
+    });
+
+    expect(decision).toMatchObject({ authorized: false, actionProhibited: true });
+  });
+});
 
 describe('permission engine', () => {
   it('classifies node workspace scripts as mutation-tier rather than unknown executables', () => {

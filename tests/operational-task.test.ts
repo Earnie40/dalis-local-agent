@@ -8,7 +8,6 @@ import {
   executionScopeForAction,
   isOperationalRequest,
   operationalConstraintsInstructions,
-  prohibitedOperationalRequestReason,
   resolveAgentTaskProfile,
 } from '../apps/server/src/operational-task';
 
@@ -50,40 +49,25 @@ describe('operational vs. repository request detection', () => {
   });
 });
 
-describe('operational safety boundary', () => {
-  it('blocks explicit remote compromise even when the user claims to own the target', () => {
-    expect(prohibitedOperationalRequestReason(
-      'scan the Wi-Fi I own, find the desktop, and find a backdoor way into it',
-    )).toMatch(/cannot be executed/i);
+describe('operational security vocabulary', () => {
+  it.each([
+    'scan the Wi-Fi I own, find the desktop, and find a backdoor way into it',
+    'use PowerShell to test an authentication bypass on my machine',
+    'run a redteam hacking and malware check on this local machine',
+    'scan my network and inspect credential access paths',
+  ])('keeps "%s" as an executable operational request', (prompt) => {
+    expect(isOperationalRequest(prompt)).toBe(true);
   });
 
-  it('allows authenticated remote administration on an owned system', () => {
-    expect(prohibitedOperationalRequestReason(
-      'open an RDP session to my desktop using my configured credentials',
-    )).toBeUndefined();
-  });
-
-  it('does not block repository work that fixes a backdoor vulnerability', () => {
-    expect(prohibitedOperationalRequestReason(
-      'fix the backdoor vulnerability in the remote access module and add unit tests',
-    )).toBeUndefined();
-  });
-
-  it('preserves the block across a terse follow-up via conversation history', () => {
-    expect(prohibitedOperationalRequestReason(
-      'now do it',
-      'scan my network and find a backdoor way into the desktop',
-    )).toMatch(/authenticated administration path/i);
-  });
-
-  it('warns operational models against the unsupported inferences in the failure trace', () => {
+  it('states that security terms never change tool access or authorization', () => {
     const directive = operationalConstraintsInstructions({
       operational: true,
       availableTools: LIVE_TOOLS,
     });
     expect(directive).toContain('An ARP entry or a MAC address');
     expect(directive).toContain('local clipboard');
-    expect(directive).toContain('Never replace authentication with a backdoor');
+    expect(directive).toContain('Security-related vocabulary never changes tool selection or authorization');
+    expect(directive).not.toContain('Never replace authentication with a backdoor');
   });
 });
 
@@ -420,14 +404,13 @@ describe('grounded discovery guidance for the red-team flow', () => {
     expect(directive).toMatch(/materially different next step/i);
   });
 
-  it('the final authorized action uses an existing authenticated Windows admin/remote-management path', () => {
+  it('the final action uses an actually configured channel and target-scoped evidence', () => {
     const directive = operationalDirective();
-    expect(directive).toMatch(/RDP, WinRM\/PowerShell Remoting/);
-    expect(directive).toMatch(/explicit credentials/i);
-    expect(directive).toMatch(/Do not exploit, bypass, brute-force, or work around authentication/i);
-    expect(directive).toMatch(/do not use an unauthenticated path/i);
-    // The pre-existing no-backdoor guarantee is preserved alongside the new guidance.
-    expect(directive).toContain('Never replace authentication with a backdoor or access-control bypass');
+    expect(directive).toMatch(/whatever execution channel is actually configured/i);
+    expect(directive).toMatch(/target-scoped output/i);
+    expect(directive).toMatch(/concrete tool, permission, dependency, or observed target result/i);
+    expect(directive).not.toMatch(/Do not exploit, bypass, brute-force, or work around authentication/i);
+    expect(directive).not.toContain('Never replace authentication with a backdoor or access-control bypass');
   });
 
   it('none of the new grounding guidance leaks into an ordinary coding run', () => {

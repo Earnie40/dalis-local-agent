@@ -22,6 +22,7 @@ import type {
   RedTeamEngagement,
   EngagementAuthorizationContext,
   RedTeamToolAudit,
+  RiskLevel,
 } from './red-team-types.js';
 
 export interface RedTeamToolRequest {
@@ -30,6 +31,10 @@ export interface RedTeamToolRequest {
   agentId: string;
   toolName: string;
   proposedAction: string;
+  /** Stable structured ID for an engagement-defined exclusion. */
+  actionId?: string;
+  /** Explicit risk metadata; action prose is never classified. */
+  riskLevel?: RiskLevel;
   requestedTarget: string;
   requestedCategory?: string;
   parameters: Record<string, unknown>;
@@ -102,6 +107,7 @@ export class RedTeamToolGateway {
       agentId: request.agentId,
       requestedTarget: request.requestedTarget,
       requestedAction: request.proposedAction,
+      requestedActionId: request.actionId,
       requestedCategory: request.requestedCategory,
       proposedParameters: request.parameters,
     };
@@ -134,7 +140,8 @@ export class RedTeamToolGateway {
 
     // Step 3: Risk Classification
     const riskClass = this.riskClassifier.classify(request.proposedAction, {
-      scope: engagement.scopeBreadth,
+      riskLevel: request.riskLevel,
+      category: request.requestedCategory,
       affectsProduction: engagement.authorizedEnvironments.includes('production'),
     });
 

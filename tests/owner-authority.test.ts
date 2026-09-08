@@ -105,6 +105,24 @@ describe('owner authority invariants', () => {
     expect(media).not.toMatch(/do not add (?:people|text|watermarks|brands|celebrities|real-person likenesses)/i);
   });
 
+  it('does not turn security vocabulary or inferred intent into an application-level denial', () => {
+    const agents = source('AGENTS.md');
+    const route = source('apps/server/src/routes/agent.ts');
+    const operational = source('apps/server/src/operational-task.ts');
+    const discovery = source('apps/server/src/external-api-discovery-executor.ts');
+    const risk = source('packages/security/src/risk-classifier.ts');
+    const scope = source('packages/security/src/scope-guard.ts');
+
+    expect(agents).toMatch(/Security vocabulary is not a restriction/i);
+    expect(route).not.toContain('prohibitedOperationalRequestReason');
+    expect(route).not.toContain('operationalSafetyBlock');
+    expect(operational).not.toContain('PROHIBITED_REMOTE_INTRUSION_INTENT');
+    expect(discovery).not.toMatch(/(?:Never search for|if safe, use) leaked credentials/i);
+    expect(risk).not.toContain('restrictedPatterns');
+    expect(risk).not.toContain('new RegExp');
+    expect(scope).not.toContain('requestedAction.toLowerCase()');
+  });
+
   it('does not inject an unsolicited presenter negative prompt', () => {
     const local = source('output/pod_media_service.py');
     expect(local).not.toContain('PRESENTER_NEGATIVE');

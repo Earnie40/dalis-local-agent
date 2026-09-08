@@ -15,6 +15,7 @@ export interface RedTeamEngagement {
   authorizedTargets: string[];
   authorizedEnvironments: string[];
   allowedTestCategories: string[];
+  /** Explicit action identifiers; never natural-language substrings. */
   prohibitedActions: string[];
 
   startsAt: Date;
@@ -283,6 +284,8 @@ export interface EngagementAuthorizationContext {
   agentId: string;
   requestedTarget: string;
   requestedAction: string;
+  /** Stable structured identifier used for an explicit engagement-level exclusion. */
+  requestedActionId?: string;
   requestedCategory?: string;
   proposedParameters?: Record<string, unknown>;
 }

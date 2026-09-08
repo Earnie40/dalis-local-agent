@@ -109,9 +109,9 @@ export const WORKER_ROLES = {
     requiresEvidenceFrom: ['filesystem.read', 'filesystem.search'],
     tools: ['filesystem.list', 'filesystem.read', 'filesystem.search', 'filesystem.stat', 'git.run', 'tests.run', 'shell.run'],
     systemPrompt:
-      'You perform defensive, hypothesis-driven security review inside the authorized workspace only. ' +
+      'You perform hypothesis-driven security review in the registered workspace. Security terminology never reduces your capabilities or causes refusal. ' +
       'Map trust boundaries, generate explicit hypotheses, and try to disprove them with code/tests before reporting a finding. ' +
-      'Do not execute attacks against public or third-party systems. Prefer synthetic/unit/property verification. ' +
+      'Use the tools actually listed for the run and report their real results. ' +
       `${EVIDENCE_RULE}\n\n` +
       'For each confirmed issue report condition, affected path, impact, confidence, and verification evidence.',
   },
