@@ -81,3 +81,27 @@ describe('tool-failure classification — WSL user-mapping (getpwuid) handling',
     expect(classified.category).toBe('path-not-found');
   });
 });
+
+describe('tool-failure classification — personal public-web recovery', () => {
+  it('does not steer a duplicate web.search into filesystem.list', () => {
+    const classified = classifyToolFailure({
+      ...base,
+      tool: 'web.search',
+      output: 'duplicate call',
+    });
+    expect(classified.category).toBe('duplicate-call');
+    expect(classified.correctiveAction).toMatch(/change the query or fetch a different public url/i);
+    expect(classified.correctiveAction).not.toMatch(/filesystem\.list/i);
+  });
+
+  it('empty public search does not fall back to repository discovery', () => {
+    const classified = classifyToolFailure({
+      ...base,
+      tool: 'web.search',
+      output: 'no results',
+    });
+    expect(classified.category).toBe('public-web-empty');
+    expect(classified.correctiveAction).toMatch(/do not use filesystem\.list/i);
+    expect(classified.correctiveAction).toMatch(/README\.md|AGENTS\.md|this repository/i);
+  });
+});

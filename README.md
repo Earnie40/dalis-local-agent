@@ -4,13 +4,23 @@ Tomahawk1 production-style security tests use the fail-closed
 [`LIVE_VALIDATION` control plane](docs/LIVE_VALIDATION.md). Unit and CI mocks
 remain isolated under the explicit `SIMULATION` mode.
 
-A local-first AI agent platform scaffold built for reusable multi-project use.
+A local-first personal LLM and agent platform for the owner and people the
+owner personally allows, on this machine or another local machine where the
+repo is pulled. It is not a public-access application.
 
 ## Overview
 
-This repository is intentionally designed as a foundation for a future local-first agent platform that can operate across arbitrary software projects, repositories, files, websites, APIs, databases, cloud systems, and task types.
+DACAIS is a private local personal LLM. Image/video generation and repository
+coding are capabilities, not the whole product. Ordinary questions and public
+research use web tools. Coding, audits, and live-system work inspect the
+selected workspace.
 
-It is not a project-specific application, and it avoids coupling to any single codebase.
+Fable 5.1 / `deepbrain-avatar-poc` is a separate end-user product. Those users
+must never be granted a path into this agent.
+
+This repository also remains a foundation for local-first work across software
+projects, files, websites, APIs, databases, and task types. It is not a
+project-specific public application.
 
 ## Local setup (Windows PowerShell)
 

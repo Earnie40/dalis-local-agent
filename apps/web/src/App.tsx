@@ -49,8 +49,43 @@ interface StreamState {
   thinking: boolean;
   active: boolean;
   phase: 'idle' | 'connecting' | 'thinking' | 'generating';
-  elapsedMs: number;
+  /** Epoch ms the run started; 0 while idle. The elapsed display derives from
+   *  this so ticking it never touches App state. */
+  startedAt: number;
   thinkingText: string;
+}
+
+/**
+ * The streaming elapsed counter, isolated so its 250 ms tick repaints one
+ * <span> instead of re-rendering App. It previously lived in App state, which
+ * meant four full-tree renders per second — and the composer textarea is
+ * controlled, so every one of them reconciled the input the user was typing
+ * into. That was felt as typing hesitation during a stream.
+ */
+function StreamElapsed({ startedAt }: { startedAt: number }) {
+  const [elapsedMs, setElapsedMs] = useState(() => Date.now() - startedAt);
+
+  useEffect(() => {
+    setElapsedMs(Date.now() - startedAt);
+    const timer = window.setInterval(() => setElapsedMs(Date.now() - startedAt), 250);
+    return () => window.clearInterval(timer);
+  }, [startedAt]);
+
+  return <span>{(elapsedMs / 1000).toFixed(1)}s</span>;
+}
+
+/**
+ * Structural comparison for the polled media status. The payload is small and
+ * flat, and this runs five times a minute, so serialising both sides is cheaper
+ * than the render it prevents.
+ */
+function sameMediaStatus(
+  a: MediaInfrastructureStatus | undefined,
+  b: MediaInfrastructureStatus | undefined,
+): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return JSON.stringify(a) === JSON.stringify(b);
 }
 
 const EMPTY_STREAM: StreamState = {
@@ -58,7 +93,7 @@ const EMPTY_STREAM: StreamState = {
   thinking: false,
   active: false,
   phase: 'idle',
-  elapsedMs: 0,
+  startedAt: 0,
   thinkingText: '',
 };
 
@@ -125,7 +160,12 @@ export function App() {
   useEffect(() => {
     let active = true;
     const refresh = () => api.mediaStatus().then((status) => {
-      if (active) setMediaStatus(status);
+      if (!active) return;
+      // Each poll parses a fresh object, so storing it unconditionally gave the
+      // state a new identity every 5 s and re-rendered the whole app — composer
+      // included — even when the status had not changed at all. Keep the
+      // previous object when the payload matches so React can bail out.
+      setMediaStatus((current) => (sameMediaStatus(current, status) ? current : status));
     }).catch(() => undefined);
     void refresh();
     const timer = window.setInterval(refresh, 5_000);
@@ -143,17 +183,6 @@ export function App() {
       .catch((e) => setError(String(e)));
   }, [activeId]);
 
-  useEffect(() => {
-    if (!stream.active) return;
-    const startedAt = Date.now() - stream.elapsedMs;
-    const timer = window.setInterval(() => {
-      setStream((current) =>
-        current.active ? { ...current, elapsedMs: Date.now() - startedAt } : current,
-      );
-    }, 250);
-    return () => window.clearInterval(timer);
-  }, [stream.active]);
-
   const send = useCallback(
     async (options: { retry?: boolean } = {}) => {
       const text = input.trim();
@@ -161,7 +190,7 @@ export function App() {
 
       setError(undefined);
       setInput('');
-      setStream({ text: '', thinking: false, active: true, phase: 'connecting', elapsedMs: 0, thinkingText: '' });
+      setStream({ text: '', thinking: false, active: true, phase: 'connecting', startedAt: Date.now(), thinkingText: '' });
 
       if (!options.retry && text) {
         setMessages((current) => [
@@ -273,8 +302,8 @@ export function App() {
     <div className="app">
       <aside className="sidebar">
         <div className="brand">
-          <strong>DacaiLocalAgent</strong>
-          <span className="badge local">local-first</span>
+          <strong>DACAIS</strong>
+          <span className="badge local">local personal LLM</span>
         </div>
 
         {mediaStatus?.configured && (
@@ -359,7 +388,7 @@ export function App() {
           <label>Agent</label>
           <div className="agent-identity">
             <strong>DACAIS Agent</strong>
-            <span>Automatically routes chat, vision, media, and tools</span>
+            <span>Local personal LLM — chat, coding, vision, media, and tools</span>
           </div>
         </div>
         )}
@@ -394,9 +423,11 @@ export function App() {
         <div className="transcript" ref={transcriptScroll.ref} onScroll={transcriptScroll.onScroll}>
           {messages.length === 0 && !stream.active && (
             <div className="empty">
-              <h1>Local chat</h1>
+              <h1>Local personal LLM</h1>
               <p className="muted">
-                Every token is generated on this machine. Conversations persist to PostgreSQL.
+                For you and people you personally allow on a local machine. Ordinary questions stay
+                in conversation. Coding questions can use Agent mode with workspace tools. Tokens
+                stay on this machine; conversations persist to PostgreSQL.
               </p>
             </div>
           )}
@@ -435,7 +466,7 @@ export function App() {
                 {!stream.text && (
                   <p className="muted stream-status">
                     {stream.phase === 'connecting' ? 'connecting to local Ollama…' : 'thinking…'}{' '}
-                    <span>{(stream.elapsedMs / 1000).toFixed(1)}s</span>
+                    <StreamElapsed startedAt={stream.startedAt} />
                   </p>
                 )}
                 {stream.thinking && <p className="muted small">The agent is processing the latest evidence…</p>}

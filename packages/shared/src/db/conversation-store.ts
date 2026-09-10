@@ -1,5 +1,5 @@
 import { createId } from '../utils';
-import { getPool } from './pool';
+import { getPool, queryDatabaseRead } from './pool';
 
 /**
  * Conversation persistence. Every message is durable before it is streamed to
@@ -87,7 +87,7 @@ export function deriveTitle(firstMessage: string): string {
 
 export class ConversationStore {
   async list(limit = 50): Promise<ConversationRecord[]> {
-    const { rows } = await getPool().query<ConversationRow>(
+    const { rows } = await queryDatabaseRead<ConversationRow>(
       `SELECT c.*, count(m.id) AS message_count
          FROM conversations c
          LEFT JOIN messages m ON m.conversation_id = c.id
@@ -100,7 +100,7 @@ export class ConversationStore {
   }
 
   async get(id: string): Promise<ConversationRecord | undefined> {
-    const { rows } = await getPool().query<ConversationRow>('SELECT * FROM conversations WHERE id = $1', [id]);
+    const { rows } = await queryDatabaseRead<ConversationRow>('SELECT * FROM conversations WHERE id = $1', [id]);
     return rows[0] ? toConversation(rows[0]) : undefined;
   }
 
@@ -135,7 +135,7 @@ export class ConversationStore {
   }
 
   async messages(conversationId: string): Promise<MessageRecord[]> {
-    const { rows } = await getPool().query<MessageRow>(
+    const { rows } = await queryDatabaseRead<MessageRow>(
       'SELECT * FROM messages WHERE conversation_id = $1 ORDER BY created_at, id',
       [conversationId],
     );

@@ -235,6 +235,25 @@ describe('parallel model executor', () => {
     expect(calls).toEqual(['filesystem.read']);
   });
 
+  it('keeps public-web tools available to a read-only parallel participant', () => {
+    const schemas: ToolSchema[] = [
+      { name: 'filesystem.read', description: 'read', inputSchema: {} },
+      { name: 'web.search', description: 'search', inputSchema: {} },
+      { name: 'web.fetch', description: 'fetch', inputSchema: {} },
+      { name: 'filesystem.edit', description: 'edit', inputSchema: {} },
+    ];
+    const inner: ToolExecutor = {
+      listTools: () => schemas,
+      execute: async () => ({ success: true, output: 'ok' }),
+    };
+    const executor = new ReadOnlyToolExecutor(inner);
+    expect(executor.listTools().map((tool) => tool.name)).toEqual([
+      'filesystem.read',
+      'web.search',
+      'web.fetch',
+    ]);
+  });
+
   it('keeps model agreement advisory and emits the required evidence synthesis sections', async () => {
     const result = await executeParallelParticipants({
       participants: [participant('sol'), participant('claude')],

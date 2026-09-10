@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { ApprovalRegistry } from '../apps/server/src/approvals';
+import { ApprovalRegistry, approvalRequestPayload } from '../apps/server/src/approvals';
 import { PermissionedToolExecutor } from '../packages/tools/src/permissioned-executor';
 import { ToolRegistry } from '../packages/tools/src/tool-registry';
 import { PermissionEngine } from '../packages/security/src/permission-engine';
@@ -98,6 +98,155 @@ describe('ApprovalRegistry', () => {
     expect(registry.pending()).toHaveLength(1);
     registry.decide(registry.pending()[0].id, false);
     await expect(other).resolves.toBe(false);
+  });
+
+  it('auto-approves only the tools the grant names', async () => {
+    const registry = new ApprovalRegistry();
+    registry.grantRun('run_scoped', { tools: ['tests.run', 'git.commit'] });
+
+    await expect(
+      registry.request({ runId: 'run_scoped', toolName: 'tests.run', decision, input: {} }),
+    ).resolves.toBe(true);
+
+    // A tool the prompt never asked for still parks for a human.
+    const unnamed = registry.request({ runId: 'run_scoped', toolName: 'shell.run', decision, input: {} });
+    expect(registry.pending().map((p) => p.toolName)).toEqual(['shell.run']);
+    registry.decide(registry.pending()[0].id, false);
+    await expect(unnamed).resolves.toBe(false);
+  });
+
+  it('still announces a granted call so the journal records it', async () => {
+    const registry = new ApprovalRegistry();
+    registry.grantRun('run_announce', { tools: ['tests.run'] });
+    const seen: string[] = [];
+
+    await expect(
+      registry.request({
+        runId: 'run_announce',
+        toolName: 'tests.run',
+        decision,
+        input: {},
+        onRequested: (approval) => seen.push(approval.toolName),
+      }),
+    ).resolves.toBe(true);
+
+    expect(seen).toEqual(['tests.run']);
+  });
+
+  it('honours a tier ceiling inside the grant', async () => {
+    const registry = new ApprovalRegistry();
+    registry.grantRun('run_tier', { tools: ['tests.run'], tiers: ['mutation'] });
+
+    // Granted tool, but gated above the tier the grant covers.
+    const escalated = registry.request({ runId: 'run_tier', toolName: 'tests.run', decision, input: {} });
+    expect(registry.pending()).toHaveLength(1);
+    registry.decide(registry.pending()[0].id, false);
+    await expect(escalated).resolves.toBe(false);
+
+    await expect(
+      registry.request({
+        runId: 'run_tier',
+        toolName: 'tests.run',
+        decision: { ...decision, tier: 'mutation' },
+        input: {},
+      }),
+    ).resolves.toBe(true);
+  });
+
+  it('stops auto-approving once the call budget is spent', async () => {
+    const registry = new ApprovalRegistry();
+    registry.grantRun('run_budget', { tools: ['tests.run'], maxCalls: 2 });
+
+    for (let i = 0; i < 2; i += 1) {
+      await expect(
+        registry.request({ runId: 'run_budget', toolName: 'tests.run', decision, input: {} }),
+      ).resolves.toBe(true);
+    }
+
+    const third = registry.request({ runId: 'run_budget', toolName: 'tests.run', decision, input: {} });
+    expect(registry.pending()).toHaveLength(1);
+    registry.decide(registry.pending()[0].id, false);
+    await expect(third).resolves.toBe(false);
+  });
+
+  it('ignores a grant that has already expired', async () => {
+    const registry = new ApprovalRegistry();
+    registry.grantRun('run_expired', { tools: ['tests.run'], expiresAt: Date.now() - 1 });
+
+    const pending = registry.request({ runId: 'run_expired', toolName: 'tests.run', decision, input: {} });
+    expect(registry.pending()).toHaveLength(1);
+    registry.decide(registry.pending()[0].id, false);
+    await expect(pending).resolves.toBe(false);
+  });
+
+  it('fails closed on a grant that names no usable tool', async () => {
+    const registry = new ApprovalRegistry();
+
+    expect(registry.grantRun('run_empty', { tools: [] })).toBe(false);
+    expect(registry.grantRun('run_empty', { tools: ['', ...([undefined] as unknown as string[])] })).toBe(false);
+    expect(registry.grantedTools('run_empty')).toEqual([]);
+
+    const pending = registry.request({ runId: 'run_empty', toolName: 'tests.run', decision, input: {} });
+    expect(registry.pending()).toHaveLength(1);
+    registry.decide(registry.pending()[0].id, false);
+    await expect(pending).resolves.toBe(false);
+  });
+
+  it('keeps a grant to its own run and drops it when the run ends', async () => {
+    const registry = new ApprovalRegistry();
+    registry.grantRun('run_a', { tools: ['tests.run'] });
+
+    // A different run is never covered by another run's grant.
+    const otherRun = registry.request({ runId: 'run_b', toolName: 'tests.run', decision, input: {} });
+    expect(registry.pending()).toHaveLength(1);
+    registry.decide(registry.pending()[0].id, false);
+    await expect(otherRun).resolves.toBe(false);
+
+    registry.clearRun('run_a');
+    expect(registry.grantedTools('run_a')).toEqual([]);
+    const afterEnd = registry.request({ runId: 'run_a', toolName: 'tests.run', decision, input: {} });
+    expect(registry.pending()).toHaveLength(1);
+    registry.decide(registry.pending()[0].id, false);
+    await expect(afterEnd).resolves.toBe(false);
+  });
+
+  it('replaces rather than widens an existing grant', async () => {
+    const registry = new ApprovalRegistry();
+    registry.grantRun('run_replace', { tools: ['tests.run', 'git.commit'] });
+    registry.grantRun('run_replace', { tools: ['tests.run'] });
+
+    expect(registry.grantedTools('run_replace')).toEqual(['tests.run']);
+    const dropped = registry.request({ runId: 'run_replace', toolName: 'git.commit', decision, input: {} });
+    expect(registry.pending()).toHaveLength(1);
+    registry.decide(registry.pending()[0].id, false);
+    await expect(dropped).resolves.toBe(false);
+  });
+
+  it('sends the run id to the client with every approval request', async () => {
+    // Without this the UI cannot render "approve the rest of this run", and the
+    // operator has to click through every single call. It shipped missing once.
+    const registry = new ApprovalRegistry();
+    let payload: ReturnType<typeof approvalRequestPayload> | undefined;
+
+    const pending = registry.request({
+      runId: 'run_emitted',
+      toolName: 'shell.run',
+      decision,
+      input: { command: 'find . -name x' },
+      onRequested: (approval) => {
+        payload = approvalRequestPayload(approval);
+        registry.decide(approval.id, false);
+      },
+    });
+    await pending;
+
+    expect(payload).toMatchObject({
+      runId: 'run_emitted',
+      tool: 'shell.run',
+      tier: 'high-impact',
+      input: { command: 'find . -name x' },
+    });
+    expect(payload?.id).toMatch(/^[0-9a-f-]{36}$/);
   });
 
   it('issues unguessable ids', () => {

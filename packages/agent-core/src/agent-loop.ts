@@ -203,6 +203,21 @@ export interface AgentLoopOptions {
     maxNudges?: number;
   };
 
+  /**
+   * Converts declared procedural uncertainty into investigation.
+   *
+   * Every other recovery path here is failure-triggered: replanning, external
+   * API discovery, environment recovery and deep reasoning all require an
+   * observed failure to classify first. A model that simply does not know how
+   * to proceed produces no failure, so an unexamined guess would otherwise be
+   * accepted as the final answer. This is the uncertainty-triggered sibling.
+   */
+  unresolvedApproach?: {
+    enabled?: boolean;
+    /** Maximum investigation prompts per run. */
+    maxNudges?: number;
+  };
+
   /** Tool output beyond this is truncated before it re-enters the context. */
   maxToolOutputChars?: number;
   signal?: AbortSignal;
@@ -249,6 +264,12 @@ const DEFAULT_MAX_TOOL_OUTPUT = 4000;
 const DEFAULT_MAX_UNPRODUCTIVE_TURNS = 2;
 const DEFAULT_MAX_HISTORY_MESSAGES = 16;
 const DEFAULT_MAX_ALIGNMENT_NUDGES = 1;
+/*
+ * One pass, deliberately. The goal is to convert "I do not know how" into
+ * either an evidence-backed approach or an explicit blocker — not to argue
+ * with the model until it produces a confident-sounding guess.
+ */
+const DEFAULT_MAX_INVESTIGATION_NUDGES = 1;
 
 /** Stable key for duplicate detection: same tool, same arguments. */
 export function toolCallSignature(call: NormalizedToolCall): string {
@@ -382,7 +403,7 @@ function looksLikeMissingPath(result: LoopToolResult): boolean {
  * final answer until one of them succeeds, so hiding them would make the run
  * unsatisfiable and push the model toward whatever repository tool remained.
  */
-function selectToolsForTurn(
+export function selectToolsForTurn(
   tools: ToolSchema[],
   snapshot: AgentLoopContextSnapshot,
   requiredEvidenceTools: readonly string[] = [],
@@ -398,8 +419,11 @@ function selectToolsForTurn(
 
   add(...requiredEvidenceTools);
 
-  // Repository understanding is useful on every coding turn.
-  add('filesystem.list', 'filesystem.read', 'filesystem.search', 'filesystem.stat');
+  // Repository understanding is useful on every coding turn. Personal/general-LLM
+  // runs do not register filesystem tools; do not invent them here.
+  if (tools.some((tool) => tool.name.startsWith('filesystem.'))) {
+    add('filesystem.list', 'filesystem.read', 'filesystem.search', 'filesystem.stat');
+  }
 
   const mutationIntent = goalImpliesMutation(goal);
   if (mutationIntent || snapshot.changedFiles.length > 0) {
@@ -414,7 +438,10 @@ function selectToolsForTurn(
     add('shell.run');
   }
 
-  if (/\b(?:web|website|http|https|online|latest|documentation|docs|research|external)\b/.test(goal)) addPrefix('web.');
+  // Public-web tools stay visible whenever the executor registered them.
+  // Personal/research runs often lack coding keywords, so a keyword gate here
+  // would hide web.search/web.fetch and leave the model with nothing useful.
+  if (tools.some((tool) => tool.name.startsWith('web.'))) addPrefix('web.');
   if (/\b(?:mcp|model context protocol|connector)\b/.test(goal)) add('mcp.list');
   if (/\b(?:network|ip|interface|dns)\b/.test(goal)) add('system.network.info');
 
@@ -492,6 +519,87 @@ function buildRuntimeSystemPrompt(base: string | undefined, currentGoal: string,
   return base?.trim() ? `${base.trim()}\n\n${contract}` : contract;
 }
 
+/*
+ * A draft that declares it does not know how to proceed, while no
+ * investigation was attempted this run.
+ *
+ * TASK_BLOCKED is exempt on purpose: a declared blocker is a legitimate
+ * terminal state that the model reached deliberately, not an unexamined
+ * guess. Phrasings are restricted to first-person statements about the
+ * agent's own approach so that reporting a *tool's* uncertainty, or quoting
+ * the user, does not trigger an investigation pass.
+ */
+const UNKNOWN_PROCEDURE = new RegExp(
+  [
+    // "I am not sure how", "I'm still not certain which approach"
+    /I(?:'m| am)(?: still| really| honestly| currently| genuinely)? not (?:sure|certain) (?:how|what approach|which approach)/,
+    // "I do not know how", "I still don't know how"
+    /I(?: still| really| honestly| currently| genuinely)? d(?:on't|o not) know how/,
+    /I(?:'m| am)(?: still| really)? not familiar with/,
+    /(?:it(?:'s| is)|it remains) unclear how (?:to|I|we)/,
+    /(?:would|will) need to (?:research|investigate|look up|figure out)/,
+    /I have no idea how/,
+    /I cannot determine how/,
+    /unsure (?:how to|which approach)/,
+  ]
+    .map((part) => part.source)
+    .join('|'),
+  'i',
+);
+
+function looksLikeUnknownProcedure(content: string): boolean {
+  if (hasCompletionMarker(content, 'TASK_BLOCKED')) return false;
+
+  return UNKNOWN_PROCEDURE.test(content);
+}
+
+/*
+ * Names only the routes that actually exist in this run's tool list. Telling a
+ * model to search the web when web.search was never registered produces a
+ * fabricated search, which is worse than the guess it replaces.
+ */
+function investigationNudge(currentGoal: string, availableTools: readonly string[]): string {
+  const routes: string[] = [];
+
+  if (availableTools.includes('skills.find')) {
+    routes.push(
+      '- skills.find, then skills.read on the best match — an installed workflow skill may already describe this procedure.',
+    );
+  }
+  if (availableTools.includes('code.failure.recall')) {
+    routes.push(
+      '- code.failure.recall — a previous run may have hit this exact problem and recorded the correction.',
+    );
+  }
+  if (availableTools.includes('web.search')) {
+    routes.push(
+      '- web.search, then web.fetch on the most relevant result — for external APIs, libraries and public facts only, never to inspect this workspace.',
+    );
+  }
+  if (availableTools.includes('code.architecture.context') || availableTools.includes('code.symbol.search')) {
+    routes.push(
+      '- code.architecture.context / code.symbol.search — when the unknown is how this repository already solves it.',
+    );
+  }
+
+  return [
+    'UNRESOLVED-APPROACH CHECK:',
+    `The current user request is: ${JSON.stringify(currentGoal)}`,
+    'Your draft states that you do not know how to proceed, but no investigation was performed.',
+    'Not knowing is a reason to look, not a reason to stop or to guess.',
+    '',
+    routes.length
+      ? ['Investigate first. Available routes:', ...routes].join('\n')
+      : 'No research tools are registered in this run, so investigation is not possible here.',
+    '',
+    'Then state the approach you will take and the evidence that supports it.',
+    'If investigation genuinely cannot resolve it, return TASK_BLOCKED: naming the specific unknown that blocks you.',
+    'Do not present speculation as an answer.',
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
 function alignmentNudge(currentGoal: string, reason: string): string {
   return [
     'TASK-ALIGNMENT CHECK:',
@@ -523,6 +631,9 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   const maxHistoryMessages = options.maxHistoryMessages ?? DEFAULT_MAX_HISTORY_MESSAGES;
   const alignmentEnabled = options.taskAlignment?.enabled ?? true;
   const maxAlignmentNudges = options.taskAlignment?.maxNudges ?? DEFAULT_MAX_ALIGNMENT_NUDGES;
+  const unresolvedApproachEnabled = options.unresolvedApproach?.enabled ?? true;
+  const maxInvestigationNudges =
+    options.unresolvedApproach?.maxNudges ?? DEFAULT_MAX_INVESTIGATION_NUDGES;
   const completionSignalRequired = options.completionSignalRequired ?? false;
   const maxContextTokens = Math.max(
     4096,
@@ -533,6 +644,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   const mutationRequiredByGoal = requireMutationForMutationIntent && goalImpliesMutation(options.prompt);
 
   const tools = executor.listTools();
+  const toolNames = tools.map((tool) => tool.name);
   const hasValidationTools = tools.some((tool) => isValidationTool(tool.name));
 
   // A model whose tool calling is not verified is advisory-class. Refuse it
@@ -590,6 +702,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   let unproductiveTurns = 0;
   let evidenceNudges = 0;
   let alignmentNudges = 0;
+  let investigationNudges = 0;
   let completionNudges = 0;
   const succeededTools = new Set<string>();
   let error: string | undefined;
@@ -804,6 +917,30 @@ ${toolsForTurn.map((tool) => `- ${tool.name}`).join('\n')}`,
           messages.push({ role: 'user', content: nudge });
           continue;
         }
+      }
+
+      /*
+       * Uncertainty-triggered investigation.
+       *
+       * This is the only corrective in the loop that fires without an observed
+       * failure. It converts a declared unknown into one bounded investigation
+       * pass, after which the model must either name an evidence-backed
+       * approach or declare TASK_BLOCKED with the specific unknown.
+       */
+      if (
+        unresolvedApproachEnabled &&
+        investigationNudges < maxInvestigationNudges &&
+        looksLikeUnknownProcedure(content)
+      ) {
+        investigationNudges += 1;
+        retries += 1;
+        messages.push({ role: 'user', content: investigationNudge(currentGoal, toolNames) });
+        onEvent?.({
+          type: 'reasoning_mode',
+          turn: turns,
+          message: 'Unresolved approach declared: requiring investigation before an answer.',
+        });
+        continue;
       }
 
       // An exhausted corrective budget does not turn an empty provider response

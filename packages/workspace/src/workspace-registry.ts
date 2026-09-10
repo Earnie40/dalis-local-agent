@@ -1,7 +1,7 @@
 import { existsSync, statSync } from 'node:fs';
 import { readdir } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { createId, getPool } from '@dacai-local-agent/shared';
+import { createId, getPool, queryDatabaseRead } from '@dacai-local-agent/shared';
 import type { WorkspaceDescriptor, WorkspaceInput, WorkspaceRegistry } from './types';
 import type { WorkspaceCapabilities } from '@dacai-local-agent/security';
 
@@ -87,14 +87,14 @@ export async function detectProject(rootPath: string): Promise<{ gitDetected: bo
 
 export class PostgresWorkspaceRegistry implements WorkspaceRegistry {
   async list(): Promise<WorkspaceDescriptor[]> {
-    const { rows } = await getPool().query<WorkspaceRow>(
+    const { rows } = await queryDatabaseRead<WorkspaceRow>(
       'SELECT * FROM workspaces ORDER BY updated_at DESC',
     );
     return rows.map(toDescriptor);
   }
 
   async get(id: string): Promise<WorkspaceDescriptor | undefined> {
-    const { rows } = await getPool().query<WorkspaceRow>('SELECT * FROM workspaces WHERE id = $1', [id]);
+    const { rows } = await queryDatabaseRead<WorkspaceRow>('SELECT * FROM workspaces WHERE id = $1', [id]);
     return rows[0] ? toDescriptor(rows[0]) : undefined;
   }
 

@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { lookup } from 'node:dns/promises';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { approvedDownloadTool, webFetchTool, webSearchTool } from '../packages/tools/src/web-tools';
+import { approvedDownloadTool, unwrapDuckDuckGoResultUrl, webFetchTool, webSearchTool } from '../packages/tools/src/web-tools';
 import { PermissionedToolExecutor } from '../packages/tools/src/permissioned-executor';
 import { ToolRegistry } from '../packages/tools/src/tool-registry';
 
@@ -72,6 +72,15 @@ describe('web.fetch', () => {
     expect((fetchImpl.mock.calls[0][1] as RequestInit).method).toBe('GET');
   });
 
+  it('unwraps a DuckDuckGo /l/?uddg= wrapper before fetching the public page', async () => {
+    fetchImpl.mockResolvedValue(okResponse('<h1>tribute</h1>'));
+    const wrapped = 'https://duckduckgo.com/l/?uddg=' + encodeURIComponent('https://example.com/tribute');
+    const result = (await webFetchTool.execute({ url: wrapped }, {})) as { url: string; body: string };
+    expect(result.url).toBe('https://example.com/tribute');
+    expect(result.body).toContain('<h1>tribute</h1>');
+    expect(String(fetchImpl.mock.calls[0][0])).toBe('https://example.com/tribute');
+  });
+
   it('supports metadata-only HEAD without reading a response body', async () => {
     const response = okResponse('must not be returned');
     const textSpy = vi.spyOn(response, 'text');
@@ -115,9 +124,29 @@ describe('web.search', () => {
           '<a class="result__snippet">first snippet</a>',
       ),
     );
-    const result = (await webSearchTool.execute({ query: 'alpha' }, {})) as { results: Array<{ title: string }> };
+    const result = (await webSearchTool.execute({ query: 'alpha' }, {})) as { results: Array<{ title: string; url: string }> };
     expect(Array.isArray(result.results)).toBe(true);
+    expect(result.results[0]).toMatchObject({ title: 'Alpha', url: 'https://example.com/a' });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('unwraps DuckDuckGo /l/?uddg= wrappers into the public destination', async () => {
+    const wrapped = 'https://duckduckgo.com/l/?uddg=' + encodeURIComponent('https://langsfordfuneralhome.com/tributes/example');
+    fetchImpl.mockResolvedValue(
+      okResponse(
+        `<div class="result__a" href="${wrapped}">Tribute</a>` +
+          '<a class="result__snippet">obituary snippet</a>',
+      ),
+    );
+    const result = (await webSearchTool.execute({ query: 'tribute' }, {})) as { results: Array<{ url: string; title: string }> };
+    expect(result.results[0]?.url).toBe('https://langsfordfuneralhome.com/tributes/example');
+    expect(result.results[0]?.title).toBe('Tribute');
+  });
+
+  it('drops non-https DuckDuckGo destinations instead of handing them to web.fetch', () => {
+    expect(unwrapDuckDuckGoResultUrl('http://example.com/a')).toBeUndefined();
+    expect(unwrapDuckDuckGoResultUrl('https://duckduckgo.com/l/?uddg=' + encodeURIComponent('http://example.com/a'))).toBeUndefined();
+    expect(unwrapDuckDuckGoResultUrl('https://example.com/a')).toBe('https://example.com/a');
   });
 
   it('rejects an empty or over-long query', async () => {

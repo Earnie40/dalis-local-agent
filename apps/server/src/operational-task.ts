@@ -15,6 +15,14 @@
  * and would not generalize to the next operational request.
  */
 
+import {
+  isPersonalResearchRequest,
+  isRepositoryWorkRequest,
+  isShortFollowUp,
+  personalLlmConstraintsInstructions,
+  PERSONAL_WEB_TOOLS,
+} from './personal-llm-task';
+
 export type ExecutionEnvironment = 'wsl' | 'powershell' | 'bash' | 'cmd';
 
 /** Named runtimes, most specific first. A bare mention in an instruction to the
@@ -340,7 +348,7 @@ export interface AgentEvidenceRequirement {
 }
 
 export interface AgentTaskProfile {
-  kind: 'repository' | 'operational';
+  kind: 'repository' | 'operational' | 'personal';
   executionEnvironment?: ExecutionEnvironment;
   /** Undefined when no selected tool could produce the required kind of evidence. */
   evidenceRequirement?: AgentEvidenceRequirement;
@@ -361,6 +369,10 @@ export function evidenceRequirementFor(input: {
   availableTools: string[];
 }): AgentEvidenceRequirement | undefined {
   const available = new Set(input.availableTools);
+  if (input.kind === 'personal') {
+    const tools = PERSONAL_WEB_TOOLS.filter((tool) => available.has(tool));
+    return tools.length ? { tools: [...tools], maxNudges: 2 } : undefined;
+  }
   if (input.kind === 'repository') {
     const tools = REPOSITORY_EVIDENCE_TOOLS.filter((tool) => available.has(tool));
     return { tools: tools.length ? tools : [...REPOSITORY_EVIDENCE_TOOLS], maxNudges: 2 };
@@ -378,14 +390,42 @@ export function evidenceRequirementFor(input: {
  * must use, what counts as evidence, and the directive that tells the model so.
  * `availableTools` must be the tools actually selected for the run.
  */
+export function classifyAgentTaskKind(
+  prompt: string,
+  history?: string,
+  options?: { forceRepository?: boolean },
+): AgentTaskProfile['kind'] {
+  if (isOperationalRequest(prompt, history)) return 'operational';
+  if (options?.forceRepository) return 'repository';
+  // The current turn is authoritative. Prior coding history must not drag a
+  // new personal/research question back onto filesystem.list.
+  if (isRepositoryWorkRequest(prompt)) return 'repository';
+  if (isPersonalResearchRequest(prompt)) return 'personal';
+  if (isShortFollowUp(prompt) && isRepositoryWorkRequest(history)) return 'repository';
+  return 'personal';
+}
+
 export function resolveAgentTaskProfile(input: {
   prompt: string;
   history?: string;
   availableTools: string[];
+  forceRepository?: boolean;
 }): AgentTaskProfile {
   const executionEnvironment = detectExecutionEnvironment(input.prompt, input.history);
   const operational = isOperationalRequest(input.prompt, input.history);
-  const kind = operational ? 'operational' : 'repository';
+  const kind = classifyAgentTaskKind(input.prompt, input.history, {
+    forceRepository: input.forceRepository,
+  });
+  const directive = kind === 'personal'
+    ? personalLlmConstraintsInstructions({
+        research: isPersonalResearchRequest(input.prompt, input.history),
+        availableTools: input.availableTools,
+      })
+    : operationalConstraintsInstructions({
+        operational,
+        executionEnvironment,
+        availableTools: input.availableTools,
+      });
   return {
     kind,
     executionEnvironment,
@@ -394,11 +434,7 @@ export function resolveAgentTaskProfile(input: {
       executionEnvironment,
       availableTools: input.availableTools,
     }),
-    directive: operationalConstraintsInstructions({
-      operational,
-      executionEnvironment,
-      availableTools: input.availableTools,
-    }),
+    directive,
   };
 }
 

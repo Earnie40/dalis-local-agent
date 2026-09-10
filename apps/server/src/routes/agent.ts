@@ -51,7 +51,8 @@ import { LoopTraceRecorder } from '@dacai-local-agent/training-traces';
 import { PermissionAuditStore, UsageStore } from '@dacai-local-agent/shared';
 import { createId } from '@dacai-local-agent/shared';
 import { CARRIED_HEADERS, sseFrame } from './chat';
-import { ApprovalRegistry } from '../approvals';
+import { ApprovalRegistry, approvalRequestPayload } from '../approvals';
+import { derivePromptGrant } from '../approval-triggers';
 import { buildFailureRecovery } from '../failure-recovery';
 import {
   initializeAcceptanceCriteria,
@@ -86,17 +87,19 @@ import { EnvironmentRecoveryExecutor } from '../environment-recovery-executor';
 import { CompletionManifestExecutor } from '../completion-manifest';
 import { ResourceAwareExecutionExecutor } from '../resource-aware-execution-executor';
 import { ExternalApiDiscoveryExecutor } from '../external-api-discovery-executor';
-import { selectAgentTools } from '../agent-tool-selection';
+import { selectAgentTools, selectPersonalAgentTools } from '../agent-tool-selection';
 import { AgentActivityEmitter, listAgentActivity } from '../agent-activity';
 import { dispatchWithMediaRecovery } from '../media-dispatch';
 import { beginSessionActivity, touchSessionActivity } from '../session-preflight';
 import { AgentArtifactError, readAgentArtifact } from '../agent-artifacts';
 import { phaseForAuditTool, repositoryAuditInstructions, resolveAgentRunMode, type RepositoryAuditPhase } from '../agent-run-mode';
 import {
+  classifyAgentTaskKind,
   detectExecutionEnvironment,
   evidenceRequirementFor,
   resolveAgentTaskProfile,
 } from '../operational-task';
+import { PERSONAL_LLM_PROMPT } from '../personal-llm-task';
 import {
   EvidencePacketCollector,
   executeParallelParticipants,
@@ -130,6 +133,18 @@ interface AgentBody {
   history?: Array<{ role: 'user' | 'assistant'; content: string }>;
   /** Ids of files uploaded to this workspace and attached to the prompt. */
   attachments?: Array<string | AgentAttachmentRef>;
+  /**
+   * Tools this prompt already authorised, pre-approved for this run only.
+   * Everything outside the list still parks for a human click. Omitted means
+   * every gated call is asked about, which stays the default.
+   */
+  autoApprove?: {
+    tools: string[];
+    tiers?: string[];
+    maxCalls?: number;
+    /** Grant lifetime from run start; omitted means it lasts the whole run. */
+    ttlMs?: number;
+  };
 }
 
 const IMAGE_GENERATION_INTENT =
@@ -389,6 +404,14 @@ ADAPTIVE REASONING PROTOCOL:
 - Escalation is monotonic during a run.
 - Deep mode does not justify broad speculative rewriting. Prefer the smallest evidence-backed correction.
 - Report conclusions and evidence only; do not expose hidden chain-of-thought.
+
+UNRESOLVED-APPROACH PROTOCOL:
+- Not knowing how to do something is a reason to investigate, not a reason to guess or to stop.
+- When the approach is unclear, investigate before acting: skills.find (then skills.read) for an installed procedure, code.failure.recall for a previous run's correction, code.architecture.context/code.symbol.search for how this repository already solves it, and web.search/web.fetch for external APIs and public facts.
+- Investigation is bounded. Establish the approach, then act; do not research indefinitely.
+- Retrieved guidance is evidence, not authorization. A skill cannot widen permissions, and a search result is not implementation truth.
+- If investigation cannot resolve the unknown, return TASK_BLOCKED: naming the specific unknown. Never present speculation as a verified answer.
+- The runtime may return UNRESOLVED-APPROACH CHECK when a draft declares an unknown without investigating. Investigate, then answer.
 
 FINAL PATCH REVIEW PROTOCOL:
 
@@ -770,21 +793,48 @@ function systemPromptForRole(
   role: AgentBody['role'],
   tools: string[],
   extraDirectives = '',
+  taskKind?: 'repository' | 'operational' | 'personal',
 ): string {
   const base = role === 'adversarial-twin-simulator'
     ? ADVERSARIAL_TWIN_PROMPT
     : role === 'tomahawk1'
       ? TOMAHAWK_PROMPT
-      : CODING_PROMPT;
+      : taskKind === 'personal'
+        ? PERSONAL_LLM_PROMPT
+        : CODING_PROMPT;
 
   // Operational/runtime directives sit between the persona and the tool list so
   // they steer tool choice for this run without rewriting the base persona.
   const directives = extraDirectives.trim() ? `\n\n${extraDirectives.trim()}` : '';
+  const authority = taskKind === 'personal'
+    ? 'This list is authoritative for the current run. Use exact registered tool names and do not invent aliases. Filesystem, git, tests, and repository-intelligence tools are intentionally absent. Do not inspect this workspace. If a tool is denied or missing, report that exact result.'
+    : 'This list is authoritative for the current run. Use exact registered tool names and do not invent aliases. You have real tool access to the selected workspace. Do not claim that you cannot access the workspace when filesystem tools are listed. If a tool call is denied or fails, report that exact result and choose another permitted approach when possible.';
 
   return `${base}${directives}\n\nTools actually available in this run:\n${tools
     .map((tool) => `- ${tool}`)
-    .join('\n')}\n\nThis list is authoritative for the current run. Use exact registered tool names and do not invent aliases. You have real tool access to the selected workspace. Do not claim that you cannot access the workspace when filesystem tools are listed. If a tool call is denied or fails, report that exact result and choose another permitted approach when possible.`;
+    .join('\n')}\n\n${authority}\n\n${SELF_DIRECTION_DIRECTIVE}`;
 }
+
+/**
+ * What to do when the obvious path is not available.
+ *
+ * The failure this addresses is a run that stops at the first obstacle and
+ * reports the obstacle: no such tool, not configured, not installed, don't
+ * know. The operator asked for an outcome, and "I could not" is only an
+ * acceptable answer once the reachable routes to it have actually been tried.
+ * Every clause below is a route the run already has the means to take.
+ */
+const SELF_DIRECTION_DIRECTIVE = [
+  'WHEN YOU CANNOT DO SOMETHING DIRECTLY:',
+  'Do not stop at the first obstacle and report it. Work the problem in this order, and say which step you reached.',
+  '1. Re-read the goal and check whether a different available tool already achieves it.',
+  '2. If something is missing, unconfigured, or unknown, inspect the real state before concluding — read the file, run the check, list the directory. Do not infer a failure you have not observed.',
+  '3. If it is genuinely absent knowledge, search the public web and read the result. Prefer primary sources: official docs, the project\'s own repository, the actual error text.',
+  '4. If a capability is missing, consider building it from what you have — a script, a command, a small tool — rather than declaring it impossible.',
+  '5. If an approval is required, ask for that one specific action and continue with everything that does not depend on it.',
+  'Report what you tried and what you observed. An unverified guess presented as a result is worse than an accurate "blocked, here is exactly where".',
+  'Never claim a tool, file, or capability is unavailable without having attempted it in this run.',
+].join('\n');
 
 /**
  * Registering a workspace with a capability IS the human authorization for
@@ -794,8 +844,16 @@ function systemPromptForRole(
  * making prompts or model output an authorization bypass.
  */
 function policyFor(capabilities: { write: boolean; shell: boolean }): PermissionPolicy {
+  // Registering a workspace with write/shell is the authorization for ordinary
+  // work in it. Asking again per edit, per test run, per commit did not add a
+  // decision — the operator had already made it, and being asked hundreds of
+  // times teaches them to approve without reading, which is worse than not
+  // asking. Mutation therefore runs; `high-impact` still stops, and that tier
+  // now means what it says: the command classifier reserves it for genuinely
+  // destructive, credential-sensitive, or externally-facing operations rather
+  // than for anything containing a pipe.
   return capabilities.write || capabilities.shell
-    ? { autoApprove: ['safe'], requireApproval: ['mutation', 'high-impact'], deny: [] }
+    ? { autoApprove: ['safe', 'mutation'], requireApproval: ['high-impact'], deny: [] }
     : DEFAULT_PERMISSION_POLICY;
 }
 
@@ -843,6 +901,25 @@ export function registerAgentRoutes(
     '/api/approvals/run/:runId/approve-all',
     async (request) => ({ ok: true, approved: approvals.approveAll(request.params.runId) }),
   );
+
+  /**
+   * Narrow the standing "approve everything" click to just the tools the task
+   * needs. Replaces any grant already on the run, so this can only redefine the
+   * scope; a body naming no usable tool clears it and returns ok:false.
+   */
+  server.post<{
+    Params: { runId: string };
+    Body: { tools?: string[]; tiers?: string[]; maxCalls?: number; ttlMs?: number };
+  }>('/api/approvals/run/:runId/grant', async (request) => {
+    const { tools, tiers, maxCalls, ttlMs } = request.body ?? {};
+    const granted = approvals.grantRun(request.params.runId, {
+      tools: tools ?? [],
+      tiers,
+      maxCalls,
+      expiresAt: typeof ttlMs === 'number' && ttlMs > 0 ? Date.now() + ttlMs : undefined,
+    });
+    return { ok: granted, tools: approvals.grantedTools(request.params.runId) };
+  });
 
   server.get('/api/audit', async () => ({ entries: await auditStore.recent(100) }));
 
@@ -1167,8 +1244,13 @@ export function registerAgentRoutes(
           ? WSL_TOOLS
           : READ_ONLY_WSL_TOOLS
         : []),
-      ...(body.role === 'coding' || !body.role ? SKILL_TOOLS : []),
-      ...(body.role === 'coding' || !body.role ? codexServerTools : []),
+      // Skills and the codex server are workflow knowledge, not authority: they
+      // read `.dacai/skills` and cannot widen what the permission engine or the
+      // workspace capabilities already allow. Gating them by role only meant an
+      // adversarial, tomahawk, or personal run reasoned without the guidance
+      // this repository wrote down for it, so every role now sees them.
+      ...SKILL_TOOLS,
+      ...codexServerTools,
       ...((wantsGitMutation || [...advancedRequested].some((name) => name.startsWith('git.worktree.'))) && workspace.capabilities.shell
         ? WORKTREE_TOOLS
         : []),
@@ -1210,13 +1292,29 @@ export function registerAgentRoutes(
         : []),
     ];
     const forcedMediaTool = imageGenerationRun ? 'image.generate' : videoGenerationRun ? 'video.generate' : undefined;
+    const classifiedKind = classifyAgentTaskKind(effectivePrompt, historyText, {
+      forceRepository: body.runMode === 'repository_audit',
+    });
+    const personalRun = classifiedKind === 'personal'
+      && !imageGenerationRun
+      && !videoGenerationRun
+      && body.role !== 'adversarial-twin-simulator'
+      && body.role !== 'tomahawk1'
+      && body.runMode !== 'repository_audit';
+    // One agent, one toolset. A personal-classified run used to be narrowed to
+    // three public-web tools, which meant "look at this file and tell me what
+    // you think" answered that it had no filesystem access — the classifier's
+    // guess about intent silently became a capability limit. Intent still
+    // steers the persona and the evidence requirements below; it no longer
+    // decides what the agent is able to do. The permission engine and the
+    // workspace's own capabilities remain the only limits.
     const selected = selectAgentTools(
       enabled,
       forcedMediaTool && body.tools ? [...new Set([...body.tools, forcedMediaTool])] : body.tools,
     );
     for (const tool of selected) tools.register(tool);
     const resolvedRunMode = resolveAgentRunMode({
-      requestedMode: body.runMode,
+      requestedMode: personalRun && body.runMode === 'coding' ? 'interactive' : body.runMode,
       prompt: effectivePrompt,
       role: body.role,
       config: deps.config,
@@ -1225,13 +1323,14 @@ export function registerAgentRoutes(
     });
 
     // One decision for the run: repository work needs repository evidence,
-    // operational work needs live-system output from the tools actually
-    // selected above. Operational intent is judged across recent history so a
+    // operational work needs live-system output, personal/general-LLM work
+    // needs public-web evidence. Intent is judged across recent history so a
     // terse follow-up does not reset the request back to repository mode.
     const taskProfile = resolveAgentTaskProfile({
       prompt: effectivePrompt,
       history: historyText,
       availableTools: selected.map((tool) => tool.name),
+      forceRepository: body.runMode === 'repository_audit',
     });
     const operationalDirective = taskProfile.directive;
 
@@ -1262,14 +1361,16 @@ export function registerAgentRoutes(
       onEvent: (event) => write('activity', event),
     });
 
-    for (
-      const tool of createFinalReviewTools({
-        threadId: runId,
-        workspaceRoot: workspace.rootPath,
-        objective: effectivePrompt,
-      })
-    ) {
-      tools.register(tool);
+    if (!personalRun) {
+      for (
+        const tool of createFinalReviewTools({
+          threadId: runId,
+          workspaceRoot: workspace.rootPath,
+          objective: effectivePrompt,
+        })
+      ) {
+        tools.register(tool);
+      }
     }
     const stateTracker =
       recoveredRun
@@ -1282,16 +1383,20 @@ export function registerAgentRoutes(
           );
 
     await stateTracker.initialize();
-    await initializeAcceptanceCriteria(
-      runId,
-      effectivePrompt,
-    );
+    if (!personalRun) {
+      await initializeAcceptanceCriteria(
+        runId,
+        effectivePrompt,
+      );
+    }
 
-    const curatedContext = await buildCuratedAgentContext({
-      prompt: effectivePrompt,
-      threadId: runId,
-      characterBudget: Number(process.env.DACAI_AGENT_CONTEXT_BUDGET ?? 24000),
-    });
+    const curatedContext = personalRun
+      ? { text: '', entries: 0, totalCharacters: 0, sources: [] as string[] }
+      : await buildCuratedAgentContext({
+          prompt: effectivePrompt,
+          threadId: runId,
+          characterBudget: Number(process.env.DACAI_AGENT_CONTEXT_BUDGET ?? 24000),
+        });
     const threadId = body.threadId?.trim() || runId;
 
     write('start', {
@@ -1321,8 +1426,7 @@ export function registerAgentRoutes(
       threadId,
       tools: [
         ...selected.map((tool) => tool.name),
-        'code.review.prepare',
-        'code.review.record',
+        ...(personalRun ? [] : ['code.review.prepare', 'code.review.record']),
       ],
       contextSources: curatedContext.sources,
       contextEntries: curatedContext.entries,
@@ -1373,6 +1477,51 @@ export function registerAgentRoutes(
     // outstanding request for this run is denied the moment it disconnects.
     reply.raw.on('close', () => approvals.cancelRun(runId));
 
+    // Tools the prompt already asked for skip the redundant per-call click, but
+    // only those: the grant names them explicitly, dies with the run, and is
+    // announced here so the journal shows what was pre-authorised and why.
+    // No explicit grant from the client: fall back to what the instruction
+    // itself authorized. "Run the tests and commit" is an approval the operator
+    // already gave, and re-asking mid-run replays a decision instead of adding
+    // one. Nothing matched means nothing granted, so the gate stands.
+    if (!body.autoApprove) {
+      const derived = derivePromptGrant(effectivePrompt, selected.map((tool) => tool.name));
+      if (derived && approvals.grantRun(runId, { tools: derived.tools })) {
+        await activity.emit({
+          type: 'system',
+          status: 'info',
+          title: 'Pre-approved from your instruction',
+          message: `${derived.tools.join(', ')} run without a per-call click because this request asked for them. Anything else still stops for approval.`,
+          metadata: { tools: derived.tools, triggers: derived.reasons },
+        });
+      }
+    }
+
+    if (body.autoApprove) {
+      const granted = approvals.grantRun(runId, {
+        tools: body.autoApprove.tools,
+        tiers: body.autoApprove.tiers,
+        maxCalls: body.autoApprove.maxCalls,
+        expiresAt:
+          typeof body.autoApprove.ttlMs === 'number' && body.autoApprove.ttlMs > 0
+            ? Date.now() + body.autoApprove.ttlMs
+            : undefined,
+      });
+      await activity.emit({
+        type: 'system',
+        status: granted ? 'info' : 'blocked',
+        title: granted ? 'Pre-approved tools for this run' : 'Pre-approval ignored',
+        message: granted
+          ? `${approvals.grantedTools(runId).join(', ')} run without a per-call click for this run only. Every other tool still asks.`
+          : 'The request named no usable tool, so every gated call still needs approval.',
+        metadata: {
+          tools: approvals.grantedTools(runId),
+          tiers: body.autoApprove.tiers,
+          maxCalls: body.autoApprove.maxCalls,
+        },
+      });
+    }
+
         const rawPermissionedExecutor =
       new PermissionedToolExecutor({
       registry: tools,
@@ -1420,13 +1569,7 @@ export function registerAgentRoutes(
             onRequested: (approval) => {
               approvalId = approval.id;
               // The UI shows the exact command and blocks until answered.
-              write('approval_request', {
-                id: approval.id,
-                tool: approval.toolName,
-                tier: approval.tier,
-                reason: approval.reason,
-                input: approval.input,
-              });
+              write('approval_request', approvalRequestPayload(approval));
               void activity.emit({
                 type: 'warning',
                 status: 'blocked',
@@ -1463,6 +1606,17 @@ export function registerAgentRoutes(
 
     const permissionedExecutor = new PrecisionMediaExecutor(rawPermissionedExecutor, { workspace, registry: deps.registry, context: historyText });
 
+    // Personal/general-LLM runs must not inherit the coding wrapper stack.
+    // Those wrappers inject agent.delegate, task-graph, repo-explorer routing,
+    // and other inspect-first tools even after filesystem tools were stripped.
+    const personalExecutor = personalRun
+      ? new AdaptiveReasoningExecutor(permissionedExecutor, {
+          taskKind: 'personal',
+          threadId: runId,
+          objective: effectivePrompt,
+        })
+      : undefined;
+
     const impactAwareExecutor =
       new ImpactAwareExecutor(
         permissionedExecutor,
@@ -1485,6 +1639,7 @@ export function registerAgentRoutes(
       new AdaptiveReasoningExecutor(
         validationRoutingExecutor,
         {
+          taskKind: taskProfile.kind,
           threadId: runId,
           objective: effectivePrompt,
         },
@@ -1638,6 +1793,7 @@ export function registerAgentRoutes(
       );
 
     const executor =
+      personalExecutor ??
       new ExternalApiDiscoveryExecutor(
         preExternalApiDiscoveryExecutor,
         {
@@ -1840,7 +1996,7 @@ export function registerAgentRoutes(
             validatedMutationGeneration: completed ? 1 : 0,
           },
         };
-      } else if (isParallel) {
+      } else if (isParallel && taskProfile.kind !== 'personal') {
         const resolvedByAlias = new Map(resolvedParticipants.map(({ alias, resolved: participant }) => [alias, participant]));
         const readOnlyExecutor = new ReadOnlyToolExecutor(executor);
         const participantTools = readOnlyExecutor.listTools().map((tool) => tool.name);
@@ -1981,7 +2137,7 @@ export function registerAgentRoutes(
             workspaceId: workspace.id,
             goal: writerGoal,
             history: conversationHistory,
-            systemPrompt: [systemPromptForRole(role, selected.map((tool) => tool.name), operationalDirective), resolvedRunMode.mode === 'repository_audit' ? repositoryAuditInstructions() : ''].filter(Boolean).join('\n\n'),
+            systemPrompt: [systemPromptForRole(role, selected.map((tool) => tool.name), operationalDirective, taskProfile.kind), resolvedRunMode.mode === 'repository_audit' ? repositoryAuditInstructions() : ''].filter(Boolean).join('\n\n'),
             taskProfile,
             executor,
             coder: participantResolved,
@@ -2113,7 +2269,7 @@ export function registerAgentRoutes(
           workingState: combinedWorkingState,
           error: workerResults.length ? undefined : 'All parallel participants failed before producing a result.',
         };
-      } else if (role === 'coding' && resolvedRunMode.mode === 'coding' && !imageGenerationRun) {
+      } else if (role === 'coding' && resolvedRunMode.mode === 'coding' && !imageGenerationRun && taskProfile.kind !== 'personal') {
         const planner = await deps.registry.resolveAlias('planner', { signal: controller.signal }).catch(() => undefined);
         const reviewer = await deps.registry.resolveAlias('reviewer', { signal: controller.signal }).catch(() => undefined);
 
@@ -2122,7 +2278,7 @@ export function registerAgentRoutes(
           workspaceId: workspace.id,
           goal: effectivePrompt,
           history: conversationHistory,
-          systemPrompt: systemPromptForRole(role, selected.map((tool) => tool.name), operationalDirective),
+          systemPrompt: systemPromptForRole(role, selected.map((tool) => tool.name), operationalDirective, taskProfile.kind),
           taskProfile,
           executor,
           coder: resolved,
@@ -2163,7 +2319,7 @@ export function registerAgentRoutes(
           promptImages,
           history: conversationHistory,
           systemPrompt: [
-            systemPromptForRole(role, selected.map((tool) => tool.name), operationalDirective),
+            systemPromptForRole(role, selected.map((tool) => tool.name), operationalDirective, taskProfile.kind),
             imageGenerationRun
               ? requestedEditOmitsReplacement(effectivePrompt)
                 ? 'IMAGE REQUEST: The user asked to change an area but did not name the replacement. If that area is of possible concern, do not call image.generate: alert the user with the anatomically or structurally correct fill implied by the depicted subject, and emit TASK_WAITING_FOR_USER: asking them to confirm or name the replacement. Otherwise fill only the requested area with what is anatomically or structurally correct for what the image depicts (person, place, or thing); do not invent unrequested regions; then call image.generate with that filled instruction and a new workspace-relative PNG outputPath. Do not inspect or search the repository first. After the tool succeeds, report the artifact path and stop.'
@@ -2183,10 +2339,10 @@ export function registerAgentRoutes(
           completionSignalRequired: imageGenerationRun || resolvedRunMode.mode === 'repository_audit' || resolvedRunMode.mode === 'deep_research',
           // Operational goals act on the live system; no repository mutation
           // is owed for them, so the mutation-before-completion gate is off.
-          requireMutationForMutationIntent: taskProfile.kind !== 'operational',
-          requireValidationAfterMutation: !imageGenerationRun,
+          requireMutationForMutationIntent: taskProfile.kind !== 'operational' && taskProfile.kind !== 'personal',
+          requireValidationAfterMutation: !imageGenerationRun && taskProfile.kind !== 'personal',
           failureRecovery:
-          body.role === 'coding'
+          body.role === 'coding' || taskProfile.kind === 'personal'
             ? (failure) =>
                 buildFailureRecovery({
                   ...failure,
@@ -2197,7 +2353,7 @@ export function registerAgentRoutes(
         // files, diagnostics). They are the wrong gate for a live-system task,
         // whose completion is judged by the evidence requirement below.
         completionGuard:
-          body.role === 'coding' && taskProfile.kind !== 'operational'
+          body.role === 'coding' && taskProfile.kind !== 'operational' && taskProfile.kind !== 'personal'
             ? () =>
                 checkAcceptanceCompletion(
                   runId,
@@ -2213,6 +2369,8 @@ export function registerAgentRoutes(
                   maxNudges: 2,
                 }
               : taskProfile.evidenceRequirement,
+          // Personal/general-LLM runs receive empty curated context and no repository contextProvider.
+          initialContext: curatedContext.text,
           signal: controller.signal,
           onEvent: onLoopEvent,
         });

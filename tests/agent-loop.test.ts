@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   AgentCapabilityError,
   runAgentLoop,
+  selectToolsForTurn,
   toolCallSignature,
   truncateToolOutput,
   type LoopToolResult,
@@ -135,6 +136,40 @@ describe('agent loop', () => {
     expect(result.turns).toBe(1);
     expect(result.toolCalls).toBe(0);
     expect(result.completionState).toBe('GOAL_COMPLETE');
+  });
+
+  it('keeps public-web tools on a personal question without research keywords', () => {
+    const tools: ToolSchema[] = ['web.search', 'web.fetch', 'download.approved'].map((name) => ({
+      name, description: name, inputSchema: { type: 'object' },
+    }));
+    const selected = selectToolsForTurn(tools, {
+      goal: 'Who is the current mayor?',
+      turn: 1,
+      reasoningMode: 'fast',
+      knownPaths: [],
+      changedFiles: [],
+      succeededTools: [],
+      recentFailures: [],
+      validationResults: [],
+    });
+    expect(selected.map((tool) => tool.name)).toEqual(['web.search', 'web.fetch', 'download.approved']);
+  });
+
+  it('does not invent filesystem tools when they were never registered', () => {
+    const tools: ToolSchema[] = ['web.search', 'web.fetch'].map((name) => ({
+      name, description: name, inputSchema: { type: 'object' },
+    }));
+    const selected = selectToolsForTurn(tools, {
+      goal: 'Find out public records about a farm.',
+      turn: 1,
+      reasoningMode: 'fast',
+      knownPaths: [],
+      changedFiles: [],
+      succeededTools: [],
+      recentFailures: [],
+      validationResults: [],
+    }, ['web.search', 'web.fetch']);
+    expect(selected.map((tool) => tool.name)).toEqual(['web.search', 'web.fetch']);
   });
 
   it('preserves server-authorized engineering tools through per-turn selection', async () => {
@@ -955,5 +990,157 @@ describe('empty final responses', () => {
     expect(result.stopReason).toBe('no-progress');
     expect(result.completionState).toBe('FAILED');
     expect(result.answer).toContain('no result was produced');
+  });
+});
+
+describe('unresolved-approach investigation', () => {
+  const RESEARCH_TOOLS: ToolSchema[] = [
+    { name: 'skills.find', description: 'find skills', inputSchema: { type: 'object' } },
+    { name: 'web.search', description: 'search', inputSchema: { type: 'object' } },
+  ];
+
+  it('turns a declared unknown into one investigation pass instead of accepting the guess', async () => {
+    const provider = scriptedProvider([
+      { content: 'I am not sure how to wire the face-swap lane, so it probably uses the media manager.' },
+      { toolCalls: [call('skills.find', { query: 'face swap' })] },
+      { content: 'The face-swap-video skill documents the lane. Use video.faceSwap per pair.' },
+    ]);
+
+    const result = await runAgentLoop({
+      provider,
+      model: 'm',
+      capabilities: VERIFIED,
+      executor: executor(() => ({ output: 'SKILL face-swap-video', success: true }), RESEARCH_TOOLS),
+      prompt: 'How does the face-swap lane work?',
+    });
+
+    expect(result.answer).toContain('face-swap-video');
+    expect(result.retries).toBeGreaterThanOrEqual(1);
+
+    // The corrective names only routes that exist, and demands evidence.
+    const nudge = provider.requests
+      .flatMap((request) => request.messages)
+      .find((message) => typeof message.content === 'string' && message.content.includes('UNRESOLVED-APPROACH CHECK'));
+
+    expect(nudge).toBeDefined();
+    expect(String(nudge?.content)).toContain('skills.find');
+    expect(String(nudge?.content)).toContain('web.search');
+    expect(String(nudge?.content)).toContain('Not knowing is a reason to look');
+  });
+
+  it('never advertises a research route that is not registered in this run', async () => {
+    const provider = scriptedProvider([
+      { content: 'I do not know how to reach the pod.' },
+      { content: 'TASK_BLOCKED: the RunPod balance is negative.' },
+    ]);
+
+    await runAgentLoop({
+      provider,
+      model: 'm',
+      capabilities: VERIFIED,
+      executor: executor(() => ({ output: 'x', success: true }), [
+        { name: 'skills.find', description: 'find skills', inputSchema: { type: 'object' } },
+      ]),
+      prompt: 'Reach the pod.',
+    });
+
+    const nudge = provider.requests
+      .flatMap((request) => request.messages)
+      .find((message) => typeof message.content === 'string' && message.content.includes('UNRESOLVED-APPROACH CHECK'));
+
+    expect(String(nudge?.content)).toContain('skills.find');
+    expect(String(nudge?.content)).not.toContain('web.search');
+  });
+
+  it('says so honestly when no research tool is available rather than demanding a search', async () => {
+    const provider = scriptedProvider([
+      { content: 'I am not sure how to proceed here.' },
+      { content: 'TASK_BLOCKED: no way to investigate.' },
+    ]);
+
+    await runAgentLoop({
+      provider,
+      model: 'm',
+      capabilities: VERIFIED,
+      executor: executor(() => ({ output: 'x', success: true }), [ECHO_TOOL]),
+      prompt: 'go',
+    });
+
+    const nudge = provider.requests
+      .flatMap((request) => request.messages)
+      .find((message) => typeof message.content === 'string' && message.content.includes('UNRESOLVED-APPROACH CHECK'));
+
+    expect(String(nudge?.content)).toContain('No research tools are registered');
+  });
+
+  it('leaves a declared TASK_BLOCKED alone — a real blocker is not an unexamined guess', async () => {
+    const provider = scriptedProvider([
+      { content: 'TASK_BLOCKED: I do not know how to proceed because the API key is absent.' },
+    ]);
+
+    const result = await runAgentLoop({
+      provider,
+      model: 'm',
+      capabilities: VERIFIED,
+      executor: executor(() => ({ output: 'x', success: true }), RESEARCH_TOOLS),
+      prompt: 'go',
+    });
+
+    expect(result.retries).toBe(0);
+    expect(
+      provider.requests
+        .flatMap((request) => request.messages)
+        .some((message) => typeof message.content === 'string' && message.content.includes('UNRESOLVED-APPROACH CHECK')),
+    ).toBe(false);
+  });
+
+  it('does not fire on a confident answer that merely discusses uncertainty', async () => {
+    const provider = scriptedProvider([
+      { content: 'The retry policy is bounded to two attempts; callers are unsure which branch runs, so it logs both.' },
+    ]);
+
+    const result = await runAgentLoop({
+      provider,
+      model: 'm',
+      capabilities: VERIFIED,
+      executor: executor(() => ({ output: 'x', success: true }), RESEARCH_TOOLS),
+      prompt: 'Explain the retry policy.',
+    });
+
+    expect(result.retries).toBe(0);
+  });
+
+  it('is bounded: a model that keeps declaring an unknown is not nudged forever', async () => {
+    const provider = scriptedProvider([{ content: 'I still do not know how to do this.' }]);
+
+    const result = await runAgentLoop({
+      provider,
+      model: 'm',
+      capabilities: VERIFIED,
+      executor: executor(() => ({ output: 'x', success: true }), RESEARCH_TOOLS),
+      prompt: 'go',
+    });
+
+    const nudges = provider.requests
+      .flatMap((request) => request.messages)
+      .filter((message) => typeof message.content === 'string' && message.content.includes('UNRESOLVED-APPROACH CHECK'));
+
+    expect(nudges.length).toBe(1);
+    expect(result.answer).toContain('do not know how');
+  });
+
+  it('can be disabled by the caller', async () => {
+    const provider = scriptedProvider([{ content: 'I am not sure how to do this.' }]);
+
+    const result = await runAgentLoop({
+      provider,
+      model: 'm',
+      capabilities: VERIFIED,
+      executor: executor(() => ({ output: 'x', success: true }), RESEARCH_TOOLS),
+      prompt: 'go',
+      unresolvedApproach: { enabled: false },
+    });
+
+    expect(result.retries).toBe(0);
   });
 });

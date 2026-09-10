@@ -10,11 +10,22 @@ import type { PermissionDecision } from '@dacai-local-agent/security';
  * unknown id resolves nothing. Approval is only ever granted by an explicit
  * decision arriving for a live request.
  *
- * The single exception is single-operator mode (DACAI_AUTO_APPROVE_ALL). Where
- * the only user is also the only approver, the click adds no safety — it just
+ * There are two exceptions, both opt-in and off by default.
+ *
+ * The blunt one is single-operator mode (DACAI_AUTO_APPROVE_ALL). Where the
+ * only user is also the only approver, the click adds no safety — it just
  * expires while the operator is still reading the prompt — so the gate resolves
- * immediately instead. It stays opt-in and off by default, because it removes
- * the human check every other path here preserves.
+ * immediately instead. It removes the human check on every call, everywhere.
+ *
+ * The narrow one is a scoped grant (`grantRun`). A prompt that already spells
+ * out the work — "run the tests and commit" — has authorised those specific
+ * tools at submission time, and re-asking per call is the same click the
+ * operator already gave. So a run may pre-authorise an explicit list of tools
+ * and nothing else: every tool outside the list, and every tool above the
+ * granted tiers, still parks for a human. The grant is bounded three ways — by
+ * tool name, optionally by call count, optionally by wall clock — and dies with
+ * the run. Anything malformed matches nothing, so a bad grant fails closed
+ * rather than open.
  */
 
 export interface PendingApproval {
@@ -26,6 +37,32 @@ export interface PendingApproval {
   input: Record<string, unknown>;
   requestedAt: string;
   runId: string;
+}
+
+/**
+ * The client payload for a pending approval.
+ *
+ * `runId` is not decoration: without it the UI cannot offer to settle the rest
+ * of the run in one decision, so the operator is left approving every call by
+ * hand. Building it from the approval itself — rather than assembling the
+ * fields at each call site — is what keeps that field from going missing again.
+ */
+export function approvalRequestPayload(approval: PendingApproval): {
+  id: string;
+  runId: string;
+  tool: string;
+  tier: string;
+  reason: string;
+  input: Record<string, unknown>;
+} {
+  return {
+    id: approval.id,
+    runId: approval.runId,
+    tool: approval.toolName,
+    tier: approval.tier,
+    reason: approval.reason,
+    input: approval.input,
+  };
 }
 
 interface Waiter {
@@ -45,6 +82,63 @@ export interface ApprovalRequestInput {
 }
 
 const DEFAULT_TIMEOUT_MS = 120_000;
+
+/**
+ * A run-scoped pre-authorisation for the specific tools a prompt asked for.
+ *
+ * Every field narrows; none widens. There is deliberately no wildcard — a grant
+ * that cannot name the tools it covers is a grant nobody reasoned about, and
+ * `approveAll` already exists for the case where the operator means "all of it".
+ */
+export interface ApprovalGrant {
+  /** Exact tool names covered. Empty (or malformed) matches nothing. */
+  tools: string[];
+  /** Tiers this grant may auto-approve. Omitted means any tier these tools are
+   *  gated at; supplying it is how a caller keeps, say, high-impact manual. */
+  tiers?: string[];
+  /** Stop auto-approving after this many calls. Omitted means no call cap. */
+  maxCalls?: number;
+  /** Epoch ms after which the grant no longer applies. */
+  expiresAt?: number;
+}
+
+interface GrantState {
+  tools: ReadonlySet<string>;
+  tiers?: ReadonlySet<string>;
+  maxCalls?: number;
+  expiresAt?: number;
+  used: number;
+}
+
+/** Drops anything unusable so a malformed grant can only ever narrow. */
+function normalizeGrant(grant: ApprovalGrant): GrantState | undefined {
+  const tools = Array.isArray(grant.tools)
+    ? grant.tools.filter((name): name is string => typeof name === 'string' && name.length > 0)
+    : [];
+  if (tools.length === 0) return undefined;
+
+  const tiers = Array.isArray(grant.tiers)
+    ? grant.tiers.filter((tier): tier is string => typeof tier === 'string' && tier.length > 0)
+    : undefined;
+
+  const maxCalls =
+    typeof grant.maxCalls === 'number' && Number.isFinite(grant.maxCalls) && grant.maxCalls > 0
+      ? Math.floor(grant.maxCalls)
+      : undefined;
+
+  const expiresAt =
+    typeof grant.expiresAt === 'number' && Number.isFinite(grant.expiresAt)
+      ? grant.expiresAt
+      : undefined;
+
+  return {
+    tools: new Set(tools),
+    tiers: tiers && tiers.length > 0 ? new Set(tiers) : undefined,
+    maxCalls,
+    expiresAt,
+    used: 0,
+  };
+}
 
 export interface ApprovalRegistryOptions {
   /** Resolve every approval-gated call immediately. Single-operator use only. */
@@ -72,6 +166,7 @@ export function approvalOptionsFromEnv(
 export class ApprovalRegistry {
   private readonly waiters = new Map<string, Waiter>();
   private readonly approveAllRuns = new Set<string>();
+  private readonly grants = new Map<string, GrantState>();
   private readonly autoApproveAll: boolean;
   private readonly defaultTimeoutMs: number;
 
@@ -112,6 +207,13 @@ export class ApprovalRegistry {
 
     if (this.approveAllRuns.has(input.runId)) return Promise.resolve(true);
 
+    // A scoped grant is announced the same way single-operator mode is, so the
+    // activity journal still shows what ran and on whose authority.
+    if (this.consumeGrant(input.runId, input.toolName, input.decision.tier)) {
+      input.onRequested?.(approval);
+      return Promise.resolve(true);
+    }
+
     return new Promise<boolean>((resolve) => {
       const settle = (approved: boolean) => {
         const waiter = this.waiters.get(id);
@@ -148,9 +250,60 @@ export class ApprovalRegistry {
     return approved;
   }
 
-  /** Remove the run-scoped approval grant when the run ends. */
+  /**
+   * Pre-authorise the named tools for one run — the tools a prompt already
+   * asked for. Returns false when the grant carries no usable tool name, in
+   * which case nothing is registered and every call still needs a human.
+   *
+   * Replaces any previous grant for the run rather than merging, so a second
+   * call can only redefine the scope, never silently widen an existing one.
+   */
+  grantRun(runId: string, grant: ApprovalGrant): boolean {
+    const normalized = normalizeGrant(grant);
+    if (!normalized) {
+      this.grants.delete(runId);
+      return false;
+    }
+    this.grants.set(runId, normalized);
+    return true;
+  }
+
+  /** The tools currently pre-authorised for a run, for display and audit. */
+  grantedTools(runId: string): string[] {
+    const grant = this.grants.get(runId);
+    return grant ? [...grant.tools] : [];
+  }
+
+  /**
+   * True when a live grant covers this exact call, counting it against the
+   * grant's budget. Expiry and exhaustion drop the grant instead of lingering.
+   */
+  private consumeGrant(runId: string, toolName: string, tier: string): boolean {
+    const grant = this.grants.get(runId);
+    if (!grant) return false;
+
+    if (grant.expiresAt !== undefined && Date.now() >= grant.expiresAt) {
+      this.grants.delete(runId);
+      return false;
+    }
+    if (!grant.tools.has(toolName)) return false;
+    if (grant.tiers && !grant.tiers.has(tier)) return false;
+    if (grant.maxCalls !== undefined && grant.used >= grant.maxCalls) {
+      this.grants.delete(runId);
+      return false;
+    }
+
+    grant.used += 1;
+    if (grant.maxCalls !== undefined && grant.used >= grant.maxCalls) {
+      this.grants.delete(runId);
+    }
+    return true;
+  }
+
+  /** Remove the run-scoped approval grants when the run ends. */
   clearRun(runId: string): void {
     this.approveAllRuns.delete(runId);
+    this.grants.delete(runId);
   }
 
   /** Denies every outstanding request for a run — used when the client leaves. */

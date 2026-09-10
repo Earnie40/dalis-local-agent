@@ -1,3 +1,5 @@
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   agentConversationHistory,
@@ -32,6 +34,17 @@ describe('agent UI state', () => {
       { alias: 'claude', providerInstanceId: 'cloud', model: 'opus', enabled: true, agentCapability: 'declared' },
     ];
     expect(selectableAgentModels(aliases, {}).map((entry) => entry.alias)).toEqual(['coder', 'claude']);
+  });
+
+  it('defaults the agent panel to interactive personal-LLM mode with web tools first', async () => {
+    const source = await readFile(join(process.cwd(), 'apps/web/src/AgentPanel.tsx'), 'utf8');
+    expect(source).toContain("useState<'interactive' | 'coding' | 'repository_audit' | 'deep_research'>('interactive')");
+    expect(source).not.toContain("useState<'interactive' | 'coding' | 'repository_audit' | 'deep_research'>('coding')");
+    expect(source).toMatch(/useState<string\[\]>\(\[\s*'web\.search',\s*'web\.fetch',\s*'download\.approved',\s*\]\)/);
+    expect(source).toContain("if (active?.capabilities.network) names.push('web.search', 'web.fetch', 'download.approved')");
+    expect(source.indexOf("if (active?.capabilities.network) names.push('web.search'")).toBeLessThan(
+      source.indexOf("names.push('filesystem.list'"),
+    );
   });
 
   it('carries only visible conversation turns into a follow-up run', () => {

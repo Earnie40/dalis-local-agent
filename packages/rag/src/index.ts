@@ -250,14 +250,31 @@ function vectorLiteral(values: number[]): string {
   return `[${values.join(',')}]`;
 }
 
+/** How long a single embedding call may take before it is treated as offline. */
+const EMBEDDING_TIMEOUT_MS = Number(process.env.RAG_EMBEDDING_TIMEOUT_MS) > 0
+  ? Number(process.env.RAG_EMBEDDING_TIMEOUT_MS)
+  : 3_000;
+
 export class OllamaEmbeddingClient {
   private readonly baseUrl = (process.env.OLLAMA_LOCAL_BASE_URL ?? 'http://127.0.0.1:11434').replace(/\/+$/, '');
   private readonly model = process.env.RAG_EMBEDDING_MODEL ?? 'nomic-embed-text';
 
+  /**
+   * Embedding enrichment is optional, so it must fail rather than hang.
+   *
+   * A refused connection errors immediately and every caller already treats
+   * that as "no context available". A process that is listening but never
+   * answering — an Ollama that is up with no model loaded, say — produces no
+   * error at all, and an un-timed fetch waits on it forever. That silently
+   * blocks context building, and with it the whole run, on a service the run
+   * does not actually need. The deadline converts that into the ordinary
+   * failure the callers already handle.
+   */
   async embed(input: string): Promise<number[]> {
     const response = await fetch(`${this.baseUrl}/api/embeddings`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: this.model, prompt: input }),
+      signal: AbortSignal.timeout(EMBEDDING_TIMEOUT_MS),
     });
     if (!response.ok) throw new Error(`Ollama embedding request failed with HTTP ${response.status}.`);
     const payload = (await response.json()) as { embedding?: number[]; error?: string };

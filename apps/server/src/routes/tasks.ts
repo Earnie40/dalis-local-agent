@@ -24,6 +24,8 @@ import {
 } from '@dacai-local-agent/tools';
 import { repositoryAuditInstructions, resolveAgentRunMode } from '../agent-run-mode';
 import { resolveTaskModel } from '../task-model-routing';
+import { classifyAgentTaskKind, resolveAgentTaskProfile } from '../operational-task';
+import { PERSONAL_LLM_PROMPT, isPersonalAllowedTool } from '../personal-llm-task';
 
 /**
  * The delegated-task surface.
@@ -165,15 +167,19 @@ export function registerTaskRoutes(
 
       await runner.run(task, async (signal) => {
         const tools = new ToolRegistry();
-        const available = [
-          ...(effective.write ? FILESYSTEM_TOOLS : READ_ONLY_FILESYSTEM_TOOLS),
-          ...(effective.shell ? SHELL_TOOLS : READ_ONLY_SHELL_TOOLS),
-          ...(effective.network ? WEB_TOOLS : []),
-          ...(resolvedRunMode.mode === 'repository_audit' ? REPOSITORY_INTELLIGENCE_TOOLS : []),
-        ];
+        const personalTask = classifyAgentTaskKind(task.objective) === 'personal'
+          && resolvedRunMode.mode !== 'repository_audit';
+        const available = personalTask
+          ? (effective.network ? WEB_TOOLS.filter((tool) => isPersonalAllowedTool(tool.name)) : [])
+          : [
+              ...(effective.write ? FILESYSTEM_TOOLS : READ_ONLY_FILESYSTEM_TOOLS),
+              ...(effective.shell ? SHELL_TOOLS : READ_ONLY_SHELL_TOOLS),
+              ...(effective.network ? WEB_TOOLS : []),
+              ...(resolvedRunMode.mode === 'repository_audit' ? REPOSITORY_INTELLIGENCE_TOOLS : []),
+            ];
         for (const tool of available) {
           const auditReadOnlyTool = resolvedRunMode.mode === 'repository_audit' && tool.name.startsWith('code.');
-          if (auditReadOnlyTool || !role.tools || role.tools.includes(tool.name)) tools.register(tool);
+          if (personalTask || auditReadOnlyTool || !role.tools || role.tools.includes(tool.name)) tools.register(tool);
         }
 
         const executor = new PermissionedToolExecutor({
@@ -201,13 +207,21 @@ export function registerTaskRoutes(
           // high-impact work fails closed rather than waiting for a click.
         });
 
+        const taskProfile = resolveAgentTaskProfile({
+          prompt: task.objective,
+          availableTools: tools.list().map((tool) => tool.name),
+          forceRepository: resolvedRunMode.mode === 'repository_audit',
+        });
         // Build augmented system prompt with context
         let systemPrompt = [
-          role.systemPrompt,
+          personalTask ? PERSONAL_LLM_PROMPT : role.systemPrompt,
+          personalTask ? taskProfile.directive : '',
           resolvedRunMode.mode === 'repository_audit' ? repositoryAuditInstructions() : '',
         ].filter(Boolean).join('\n\n');
         try {
-          const builtContext = await contextManager.buildContext({
+          const builtContext = personalTask
+            ? { sections: [], truncated: false, reasoning: '', totalTokens: 0 }
+            : await contextManager.buildContext({
             goal: task.objective,
             scope: { workspaceId: workspace.id },
             options: {
@@ -249,7 +263,10 @@ export function registerTaskRoutes(
           runMode: resolvedRunMode.mode,
           synthesisReserveTurns: resolvedRunMode.budget.synthesisReserveTurns,
           completionSignalRequired: resolvedRunMode.mode === 'repository_audit' || resolvedRunMode.mode === 'deep_research',
-          evidenceRequirement: role.requiresEvidenceFrom
+          requireMutationForMutationIntent: !personalTask,
+          evidenceRequirement: personalTask
+            ? taskProfile.evidenceRequirement
+            : role.requiresEvidenceFrom
             ? { tools: resolvedRunMode.mode === 'repository_audit' ? ['code.architecture.context', 'code.symbol.search', 'filesystem.read'] : [...role.requiresEvidenceFrom], maxNudges: 1 }
             : undefined,
           signal,
@@ -386,12 +403,19 @@ export function registerTaskRoutes(
           .catch((error) => server.log.error({ err: String(error), taskId: task.id }, 'task execution failed'))
           .finally(() => {
             inFlight -= 1;
-            void drainQueue();
+            requestQueueDrain();
           });
       }
     } finally {
       draining = false;
     }
+  }
+
+  /** A transient database outage must not become an unhandled process error. */
+  function requestQueueDrain(): void {
+    void drainQueue().catch((error) => {
+      server.log.error({ err: String(error) }, 'task queue drain failed; the next tick will retry');
+    });
   }
 
   /** Turns every due schedule into a queued task. */
@@ -459,7 +483,7 @@ export function registerTaskRoutes(
 
     // The row is durable before the response returns; the drain loop picks it
     // up from the database, so nothing depends on this request surviving.
-    void drainQueue();
+    requestQueueDrain();
 
     return { task, queued: runner.queuedCount, active: inFlight };
   });
@@ -543,7 +567,7 @@ export function registerTaskRoutes(
       scheduleId: schedule.id,
     });
     await schedules.recordRun(schedule.id, task.id);
-    void drainQueue();
+    requestQueueDrain();
     return { task };
   });
 
@@ -567,7 +591,7 @@ export function registerTaskRoutes(
   const ticker = setInterval(() => {
     void runner.reconcile().catch(() => undefined);
     void tickSchedules().catch((error) => server.log.error({ err: String(error) }, 'schedule tick failed'));
-    void drainQueue().catch(() => undefined);
+    requestQueueDrain();
   }, TICK_INTERVAL_MS);
   ticker.unref?.();
   server.addHook('onClose', async () => clearInterval(ticker));

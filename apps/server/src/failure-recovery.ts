@@ -82,10 +82,24 @@ export function classifyToolFailure(
   if (
     /duplicate call/.test(text)
   ) {
+    const personalWeb = input.tool === 'web.search' || input.tool === 'web.fetch';
     return {
       category: 'duplicate-call',
+      correctiveAction: personalWeb
+        ? 'Use the prior search/fetch result already in context. Change the query or fetch a different public URL. Do not inspect this repository.'
+        : 'Use the prior result already in context. Change the investigation strategy instead of repeating the same call.',
+    };
+  }
+
+  if (
+    (/zero matches|0 matches|no matches|nothing found|no results/.test(text) &&
+      (input.tool === 'web.search' || input.tool === 'web.fetch')) ||
+    (input.tool.startsWith('web.') && /private and metadata hosts|only https urls|url must be valid/i.test(text))
+  ) {
+    return {
+      category: 'public-web-empty',
       correctiveAction:
-        'Use the prior result already in context. Change the investigation strategy instead of repeating the same call.',
+        'Public lookup returned nothing useful. Change the search query or fetch a different public HTTPS page. Do NOT use filesystem.list, filesystem.search, README.md, AGENTS.md, or this repository as a substitute.',
     };
   }
 

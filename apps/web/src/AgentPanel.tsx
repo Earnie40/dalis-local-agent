@@ -118,16 +118,17 @@ function matchesActivityFilter(event: AgentActivityEvent, filter: ActivityFilter
 }
 
 /**
- * Agent mode. Unlike chat, this runs the tool loop: the model inspects the
- * workspace with real filesystem/git/test tools, every call passes the
- * permission engine, and each step is shown as it happens.
+ * Agent mode. Unlike chat, this runs the tool loop. Ordinary/personal questions
+ * use public-web tools. Coding requests inspect the workspace with filesystem,
+ * git, and tests. Every call passes the permission engine, and each step is
+ * shown as it happens.
  */
 export function AgentPanel() {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [workspaceId, setWorkspaceId] = useState(() => savedPreference(AGENT_WORKSPACE_KEY, ''));
   const alias = 'agent';
   const [role, setRole] = useState<'coding' | 'adversarial-twin-simulator' | 'tomahawk1'>('coding');
-  const [runMode, setRunMode] = useState<'interactive' | 'coding' | 'repository_audit' | 'deep_research'>('coding');
+  const [runMode, setRunMode] = useState<'interactive' | 'coding' | 'repository_audit' | 'deep_research'>('interactive');
   const [prompt, setPrompt] = useState('');
   const [events, setEvents] = useState<AgentEvent[]>([]);
   const [activityEvents, setActivityEvents] = useState<AgentActivityEvent[]>([]);
@@ -135,10 +136,12 @@ export function AgentPanel() {
   const [sessionId, setSessionId] = useState<string>();
   const [attachments, setAttachments] = useState<Upload[]>([]);
   const [selectedTools, setSelectedTools] = useState<string[]>([
-    'filesystem.list', 'filesystem.read', 'filesystem.search', 'filesystem.stat', 'git.run', 'tests.run', 'system.network.info',
-    'web.fetch', 'web.search',
+    'web.search', 'web.fetch', 'download.approved',
   ]);
   const [toolSelectionCustomized, setToolSelectionCustomized] = useState(false);
+  // Deliberately not restored from a saved session: pre-approval has to be
+  // chosen for the run in front of you, so a reload always returns to asking.
+  const [preApprove, setPreApprove] = useState<'ask' | 'mutation' | 'selected'>('ask');
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | undefined>();
   const [showNew, setShowNew] = useState(false);
@@ -199,6 +202,43 @@ export function AgentPanel() {
     });
   }, []);
 
+  const active = workspaces.find((w) => w.id === workspaceId);
+  const availableTools = useMemo(() => {
+    const names: string[] = [];
+    if (active?.capabilities.network) names.push('web.search', 'web.fetch', 'download.approved');
+    names.push('filesystem.list', 'filesystem.read', 'filesystem.search', 'filesystem.stat', 'git.run', 'system.network.info');
+    if (active?.capabilities.write) names.push('filesystem.edit', 'filesystem.write');
+    if (active?.capabilities.shell) names.push('tests.run', 'shell.run', 'engineering.capabilities.inspect');
+    if (active?.capabilities.write) names.push('image.generate');
+    if (active?.capabilities.read && active?.capabilities.write) names.push('video.generate');
+    names.push('mcp.list', 'engineering.artifact.inspect');
+    if (active?.capabilities.shell) names.push('code.diagnostics', 'workspace.open-file', 'terminal.open');
+    if (active?.capabilities.write && active?.capabilities.shell) names.push(
+      'cad.execute', 'bim.execute', 'scene.render',
+    );
+    names.push(
+      'code.symbol.search',
+      'code.symbol.references',
+      'code.symbol.callers',
+      'code.symbol.callees',
+      'code.symbol.impact',
+      'code.path.trace',
+      'code.architecture.context',
+      'code.failure.recall',
+      'code.working-state.get',
+      'code.validation.status',
+      'code.review.prepare',
+      'code.review.record',
+    );
+    if (role === 'adversarial-twin-simulator') names.push(
+      'security.simulation.api-input',
+      'security.simulation.prompt-injection',
+      'security.simulation.tenant-isolation',
+      'security.simulation.network-boundary',
+    );
+    return names;
+  }, [active, role]);
+
   const run = useCallback(async () => {
     // File content is no longer spliced into the prompt: the server reads the
     // stored upload and appends it, so the transcript keeps what was typed.
@@ -244,6 +284,21 @@ export function AgentPanel() {
         sessionId: activeSessionId,
         history: agentConversationHistory(events),
         runMode,
+        // The grant always names the tools it covers. With a custom selection
+        // that is the chosen list; on automatic selection it is the set this
+        // workspace's capabilities already allow, which is what the run can
+        // reach anyway. Either way it is an explicit list, scoped to this run.
+        autoApprove:
+          preApprove === 'ask'
+            ? undefined
+            : (() => {
+                const tools = toolSelectionCustomized ? selectedTools : availableTools;
+                if (!tools.length) return undefined;
+                return {
+                  tools,
+                  tiers: preApprove === 'mutation' ? ['mutation'] : undefined,
+                };
+              })(),
         attachments: attachments.length
           ? attachments.map((upload) => ({
               id: upload.id,
@@ -275,7 +330,7 @@ export function AgentPanel() {
       setRunning(false);
       setAttachments([]);
     }
-  }, [activityEvents, alias, appendActivity, attachments, events, prompt, role, runMode, running, selectedTools, sessionId, toolSelectionCustomized, workspaceId]);
+  }, [activityEvents, alias, appendActivity, attachments, availableTools, events, preApprove, prompt, role, runMode, running, selectedTools, sessionId, toolSelectionCustomized, workspaceId]);
 
   const addWorkspace = useCallback(async () => {
     try {
@@ -322,41 +377,23 @@ export function AgentPanel() {
     }
   }, [events]);
 
-  const active = workspaces.find((w) => w.id === workspaceId);
-  const availableTools = useMemo(() => {
-    const names = ['filesystem.list', 'filesystem.read', 'filesystem.search', 'filesystem.stat', 'git.run', 'system.network.info'];
-    if (active?.capabilities.write) names.push('filesystem.edit', 'filesystem.write');
-    if (active?.capabilities.shell) names.push('tests.run', 'shell.run', 'engineering.capabilities.inspect');
-    if (active?.capabilities.network) names.push('web.fetch', 'web.search', 'download.approved');
-    if (active?.capabilities.write) names.push('image.generate');
-    if (active?.capabilities.read && active?.capabilities.write) names.push('video.generate');
-    names.push('mcp.list', 'engineering.artifact.inspect');
-    if (active?.capabilities.shell) names.push('code.diagnostics', 'workspace.open-file', 'terminal.open');
-    if (active?.capabilities.write && active?.capabilities.shell) names.push(
-      'cad.execute', 'bim.execute', 'scene.render',
-    );
-    names.push(
-      'code.symbol.search',
-      'code.symbol.references',
-      'code.symbol.callers',
-      'code.symbol.callees',
-      'code.symbol.impact',
-      'code.path.trace',
-      'code.architecture.context',
-      'code.failure.recall',
-      'code.working-state.get',
-      'code.validation.status',
-      'code.review.prepare',
-      'code.review.record',
-    );
-    if (role === 'adversarial-twin-simulator') names.push(
-      'security.simulation.api-input',
-      'security.simulation.prompt-injection',
-      'security.simulation.tenant-isolation',
-      'security.simulation.network-boundary',
-    );
-    return names;
-  }, [active, role]);
+  /**
+   * Stop asking about one tool for the rest of this run, and settle the request
+   * that prompted it. Narrower than approveAll — every other tool keeps its
+   * gate — and it dies with the run like any other grant.
+   */
+  const allowToolForRun = useCallback(async (runId: string, tool: string, approvalId: string) => {
+    setAnswered((current) => ({ ...current, [approvalId]: true }));
+    try {
+      // Grant first: if the grant fails, the single approval below still lets
+      // this call through rather than stranding the run on a failed request.
+      await api.grantTools(runId, { tools: [tool] });
+      const result = await api.approve(approvalId, true);
+      setAnswered((current) => ({ ...current, [approvalId]: result.approved }));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, []);
 
   useEffect(() => {
     setSelectedTools((current) => current.filter((tool) => availableTools.includes(tool)));
@@ -450,7 +487,7 @@ export function AgentPanel() {
         <div className="field">
           <label htmlFor="agent-role">Role</label>
           <select id="agent-role" value={role} onChange={(e) => setRole(e.target.value as typeof role)}>
-            <option value="coding">Coding agent</option>
+            <option value="coding">DACAIS agent</option>
             <option value="adversarial-twin-simulator">Adversarial Twin Simulator</option>
             <option value="tomahawk1">Tomahawk1 defensive analyst</option>
           </select>
@@ -482,7 +519,7 @@ export function AgentPanel() {
           <label htmlFor="agent-alias">Agent</label>
           <div className="agent-identity" id="agent-alias">
             <strong>DACAIS Agent</strong>
-            <span>One agent for chat, coding, vision, media, and tools</span>
+            <span>Personal LLM, coding, vision, media, and tools</span>
           </div>
           <p className="muted small">
             {imageGenerationRequest
@@ -569,6 +606,24 @@ export function AgentPanel() {
             <option value="deep_research">Deep research · 100 turns</option>
           </select>
         </div>
+
+        <div className="field">
+          <label htmlFor="agent-pre-approve">Approvals</label>
+          <select
+            id="agent-pre-approve"
+            value={preApprove}
+            onChange={(e) => setPreApprove(e.target.value as typeof preApprove)}
+          >
+            <option value="ask">Ask before every tool call</option>
+            <option value="mutation">Run without asking · mutations only</option>
+            <option value="selected">Run without asking · all tiers</option>
+          </select>
+          <small className="muted">
+            {preApprove === 'ask'
+              ? 'Every tool call waits for a click.'
+              : `${(toolSelectionCustomized ? selectedTools : availableTools).length} tool${(toolSelectionCustomized ? selectedTools : availableTools).length === 1 ? '' : 's'} ${toolSelectionCustomized ? 'you selected' : 'this workspace allows'} run without asking${preApprove === 'mutation' ? ', for mutations only — high-impact calls still ask' : ''}. This run only; a new run asks again.`}
+          </small>
+        </div>
       </details>
 
       <div className="agent-workspace">
@@ -577,14 +632,16 @@ export function AgentPanel() {
             <div className="empty">
               <h2>Agent mode</h2>
               <p className="muted">
-                The model inspects your workspace with real tools. Every call passes the permission
-                engine first, and each step appears here as it happens.
+                DACAIS is your local personal LLM for you and people you personally allow on a
+                local machine. Ordinary questions and public research use web tools. Coding
+                requests inspect this workspace. Every call passes the permission engine first,
+                and each step appears here as it happens.
               </p>
             </div>
           )}
 
           {events.map((event, index) => (
-            <AgentStep key={index} event={event} workspaceId={workspaceId} answered={answered} onDecide={decide} onApproveAll={approveAll} />
+            <AgentStep key={index} event={event} workspaceId={workspaceId} answered={answered} onDecide={decide} onApproveAll={approveAll} onAllowTool={allowToolForRun} />
           ))}
         </div>
 
@@ -743,12 +800,14 @@ function AgentStep({
   answered,
   onDecide,
   onApproveAll,
+  onAllowTool,
 }: {
   event: AgentEvent;
   workspaceId: string;
   answered: Record<string, boolean>;
   onDecide: (id: string, approved: boolean) => void;
   onApproveAll?: (runId: string) => void;
+  onAllowTool?: (runId: string, tool: string, approvalId: string) => void;
 }) {
   // The run is paused here: nothing executes until this is answered, and it
   // denies itself on timeout or if the page is closed.
@@ -766,6 +825,15 @@ function AgentStep({
             <button className="primary" onClick={() => onDecide(event.id!, true)}>
               Approve once
             </button>
+            {event.runId && event.tool && (
+              <button
+                className="primary"
+                title={`${event.tool} stops asking for the rest of this run. Every other tool still asks.`}
+                onClick={() => onAllowTool?.(event.runId!, event.tool!, event.id!)}
+              >
+                Always allow {event.tool} this run
+              </button>
+            )}
             {event.runId && (
               <button className="primary" onClick={() => onApproveAll?.(event.runId!)}>
                 Approve all for this run

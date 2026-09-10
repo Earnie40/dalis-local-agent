@@ -91,9 +91,43 @@ server.addHook('onRequest', async (request, reply) => {
     reply.header('Vary', 'Origin');
     reply.header('Access-Control-Allow-Headers', 'content-type');
     reply.header('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS');
+    // Without this the browser re-preflights every polled request, which on a
+    // 5 s status poll doubles the request count for no added safety. The value
+    // is what the allow-list above is worth: it is static for the process.
+    reply.header('Access-Control-Max-Age', '600');
   }
   if (request.method === 'OPTIONS') reply.code(204).send();
 });
+
+/**
+ * Accept a bodyless JSON request.
+ *
+ * Several endpoints take no body at all — approve-all, cancel, run-now,
+ * reconnect, and every DELETE — but the browser still labels them
+ * `application/json`. Fastify's stock parser rejects that combination outright
+ * (FST_ERR_CTP_EMPTY_JSON_BODY), so each of those returned 400 the moment it
+ * was actually called. Dropping the header client-side only trades the error
+ * for a 415, so the empty case is handled here instead: no body parses to an
+ * empty object, and malformed JSON still fails as a 400.
+ */
+server.addContentTypeParser(
+  'application/json',
+  { parseAs: 'string' },
+  (_request, body, done) => {
+    const raw = typeof body === 'string' ? body.trim() : '';
+    if (!raw) {
+      done(null, {});
+      return;
+    }
+    try {
+      done(null, JSON.parse(raw));
+    } catch {
+      const error = new Error('Request body is not valid JSON.') as Error & { statusCode?: number };
+      error.statusCode = 400;
+      done(error, undefined);
+    }
+  },
+);
 
 const runpodService = new RunpodService();
 const registry = new ProviderRegistry(config, new PostgresCapabilityStore());
@@ -224,22 +258,44 @@ server.get('/api/providers', async () => {
 server.get('/api/models', async () => {
   const models = await registry.listModels();
   const inventory = groupModels(models);
-  const aliases = await Promise.all(Object.entries(config.models).map(async ([alias, model]) => {
-    const agentCapability = await registry.getKnownToolCallingStatus(model.providerInstanceId, model.model);
-    return {
-      alias,
-      providerInstanceId: model.providerInstanceId,
-      model: model.model,
-      enabled: model.enabled,
-      agentCapability,
-      agentLoopCapable: agentCapability === 'verified',
-      classification: agentCapability === 'verified'
-        ? 'agent-capable'
-        : agentCapability === 'unsupported'
-          ? 'advisory-class'
-          : 'unverified',
-    };
-  }));
+  /*
+   * Each capability lookup queries PostgreSQL. Resolving every alias at once
+   * asks the pool for a burst of cold connections, and PostgreSQL on Windows
+   * spawns a backend process per connection, so that stampede overruns the
+   * accept path and individual connects time out. A bounded window keeps the
+   * pooled connections warm and reused instead.
+   */
+  const entries = Object.entries(config.models);
+  const CAPABILITY_LOOKUP_WINDOW = 4;
+  const aliases: Array<{
+    alias: string;
+    providerInstanceId: string;
+    model: string;
+    enabled: boolean;
+    agentCapability: Awaited<ReturnType<typeof registry.getKnownToolCallingStatus>>;
+    agentLoopCapable: boolean;
+    classification: string;
+  }> = [];
+
+  for (let index = 0; index < entries.length; index += CAPABILITY_LOOKUP_WINDOW) {
+    const window = entries.slice(index, index + CAPABILITY_LOOKUP_WINDOW);
+    aliases.push(...await Promise.all(window.map(async ([alias, model]) => {
+      const agentCapability = await registry.getKnownToolCallingStatus(model.providerInstanceId, model.model);
+      return {
+        alias,
+        providerInstanceId: model.providerInstanceId,
+        model: model.model,
+        enabled: model.enabled,
+        agentCapability,
+        agentLoopCapable: agentCapability === 'verified',
+        classification: agentCapability === 'verified'
+          ? 'agent-capable'
+          : agentCapability === 'unsupported'
+            ? 'advisory-class'
+            : 'unverified',
+      };
+    })));
+  }
 
   return {
     tagCount: inventory.tagCount,
@@ -286,7 +342,6 @@ server.post<{ Params: { alias: string } }>('/api/models/:alias/reprobe', async (
 
 registerChatRoutes(server, { config, registry });
 registerAgentRoutes(server, { config, registry, approvals, media: runpodMediaManager });
-registerTaskRoutes(server, { config, registry });
 registerSecurityRoutes(server, { config, approvals });
 registerDefensiveRoutes(server, { config, approvals });
 registerRagRoutes(server);
@@ -310,6 +365,11 @@ const start = async () => {
     await verifyConnection(config.databaseUrl);
     const { applied, alreadyCurrent } = await runMigrations();
     server.log.info({ applied, alreadyCurrent: alreadyCurrent.length }, 'PostgreSQL schema is current');
+
+    // Task registration starts reconciliation immediately. Register it only
+    // after migrations so its queries cannot race the startup connection or
+    // read a schema that is still being upgraded.
+    registerTaskRoutes(server, { config, registry });
 
     for (const warning of warnings) server.log.warn(warning);
 

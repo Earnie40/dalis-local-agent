@@ -9,6 +9,8 @@ import { ContextManager } from '@dacai-local-agent/context';
 import { PostgresWorkspaceRegistry } from '@dacai-local-agent/workspace';
 import { loadUploadsForPrompt, renderUploadsForPrompt } from '../workspace-uploads';
 import { beginSessionActivity, touchSessionActivity } from '../session-preflight';
+import { classifyAgentTaskKind } from '../operational-task';
+import { PERSONAL_CHAT_PROMPT } from '../personal-llm-task';
 
 interface ChatBody {
   conversationId?: string;
@@ -129,38 +131,47 @@ export function registerChatRoutes(
     }
 
     const history = await conversations.messages(conversation.id);
-    
-    // Build unified context using the context manager
-    let systemPrompt: string | undefined;
-    try {
-      const builtContext = await contextManager.buildContext({
-        goal: body.message,
-        scope: { workspaceId: body.workspaceId },
-        conversationHistory: history.map((m) => ({
-          role: m.role,
-          content: m.content,
-        })),
-        options: {
-          enableRag: process.env.RAG_ENABLED === 'true',
-          enableMemory: true,
-          maxContextTokens: 26000,
-        },
-      });
-      
-      if (builtContext.sections.length > 0) {
-        systemPrompt = contextManager.formatContextString(builtContext);
-        if (builtContext.truncated) {
-          server.log.debug({
-            reasoning: builtContext.reasoning,
-            totalTokens: builtContext.totalTokens,
-          }, 'Context was truncated to fit token limit');
+    const priorUserText = history
+      .filter((message) => message.role === 'user' && message.content !== body.message)
+      .map((message) => message.content)
+      .join('\n');
+
+    // Ordinary/personal chat must not be stuffed with repository RAG. Coding
+    // questions still receive workspace context when retrieval is enabled.
+    // Short follow-ups inherit the prior turn; a new personal question does not.
+    const chatKind = classifyAgentTaskKind(body.message, priorUserText);
+    let systemPrompt: string | undefined = chatKind === 'personal' ? PERSONAL_CHAT_PROMPT : undefined;
+    if (chatKind !== 'personal') {
+      try {
+        const builtContext = await contextManager.buildContext({
+          goal: body.message,
+          scope: { workspaceId: body.workspaceId },
+          conversationHistory: history.map((m) => ({
+            role: m.role,
+            content: m.content,
+          })),
+          options: {
+            enableRag: process.env.RAG_ENABLED === 'true',
+            enableMemory: true,
+            maxContextTokens: 26000,
+          },
+        });
+
+        if (builtContext.sections.length > 0) {
+          systemPrompt = contextManager.formatContextString(builtContext);
+          if (builtContext.truncated) {
+            server.log.debug({
+              reasoning: builtContext.reasoning,
+              totalTokens: builtContext.totalTokens,
+            }, 'Context was truncated to fit token limit');
+          }
         }
+      } catch (error) {
+        server.log.warn(
+          { error: error instanceof Error ? error.message : String(error) },
+          'Context retrieval failed, proceeding without augmented context',
+        );
       }
-    } catch (error) {
-      server.log.warn(
-        { error: error instanceof Error ? error.message : String(error) },
-        'Context retrieval failed, proceeding without augmented context',
-      );
     }
     const assistantMessage = await conversations.appendMessage({
       conversationId: conversation.id,

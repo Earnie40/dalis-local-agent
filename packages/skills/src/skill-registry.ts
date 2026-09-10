@@ -134,6 +134,7 @@ export class SkillRegistry {
       }
 
       // Intent shortcuts make generic coding prompts reliably select the core skill.
+      if (skill.tags.includes('personal') && /\b(who is|find out|look up|research|family|public records?|news about)\b/i.test(query)) score += 10;
       if (skill.tags.includes('coding') && /\b(implement|change|fix|refactor|add|edit|code)\b/i.test(query)) score += 5;
       if (skill.tags.includes('debug') && /\b(error|fail|bug|debug|broken|exception)\b/i.test(query)) score += 8;
       if (skill.tags.includes('ci') && /\b(ci|check|workflow|github actions|pipeline)\b/i.test(query)) score += 10;

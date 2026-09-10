@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { sseFrame } from '../apps/server/src/routes/chat';
 import { deriveTitle } from '../packages/shared/src/db/conversation-store';
+import { classifyAgentTaskKind } from '../apps/server/src/operational-task';
+import { PERSONAL_CHAT_PROMPT } from '../apps/server/src/personal-llm-task';
 
 /**
  * The client parses these frames by splitting on a blank line, so the exact
@@ -73,5 +75,17 @@ describe('conversation titles', () => {
 
   it('falls back when the message is blank', () => {
     expect(deriveTitle('   \n  ')).toBe('New conversation');
+  });
+});
+
+describe('personal chat routing', () => {
+  it('does not treat a family or public-research question as repository work', () => {
+    expect(classifyAgentTaskKind('Find out everything about the family farm and the bar owner')).toBe('personal');
+    expect(PERSONAL_CHAT_PROMPT).not.toMatch(/inspect before you answer/i);
+    expect(PERSONAL_CHAT_PROMPT).toMatch(/Do not invent, list, or cite files from the DacaiLocalAgent codebase/i);
+  });
+
+  it('still treats an explicit coding question as repository work', () => {
+    expect(classifyAgentTaskKind('fix the failing unit test in agent-run-mode.ts')).toBe('repository');
   });
 });

@@ -4,7 +4,6 @@ import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createImageGenerationTools,
-  imageEditRequiresAnatomyPipeline,
   imageGenerationConfigured,
   imageGenerationRequiresNetwork,
 } from '../packages/tools/src/image-generation-tools';
@@ -29,6 +28,7 @@ describe('photoreal image generation tool', () => {
     const fetchMock = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       const request = JSON.parse(String(init?.body)) as Record<string, unknown>;
       expect(request).toMatchObject({ prompt: 'photoreal portrait', width: 768, height: 1024, batch_size: 1 });
+      expect(request.prompt).not.toContain('Correction:');
       expect(init?.redirect).toBe('error');
       return new Response(JSON.stringify({
         images: [PNG.toString('base64')],
@@ -42,7 +42,7 @@ describe('photoreal image generation tool', () => {
     const root = await workspace();
 
     const result = await tool.execute({
-      prompt: 'photoreal portrait', outputPath: 'output/person.png', width: 768, height: 1024,
+      prompt: 'photoreal portrait', correction: 'retry metadata stays separate', outputPath: 'output/person.png', width: 768, height: 1024,
     }, { workspaceRoot: root }) as Record<string, unknown>;
 
     expect(result).toMatchObject({
@@ -128,6 +128,39 @@ describe('photoreal image generation tool', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it('uses a reference board to generate one new multi-person scene without changing outer generation semantics', async () => {
+    const prompt = 'Create both attached adults making pizza together on a date.';
+    const outerIntent = intentFixture(prompt, { geometry: true, generate: true });
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      expect(String(url)).toBe('http://127.0.0.1:18090/v1/anatomy-edit');
+      const request = JSON.parse(String(init?.body)) as Record<string, any>;
+      expect(request.sourceMediaBase64).toBe(PNG.toString('base64'));
+      expect(request.prompt).toBe(prompt);
+      expect(request.intent).toEqual(outerIntent);
+      expect(request.referenceSheet).toBe(true);
+      return new Response(JSON.stringify({
+        imageBase64: PNG.toString('base64'), model: 'Qwen/Qwen-Image-Edit-2511', seed: 23,
+      }), { status: 200 });
+    });
+    const tool = createImageGenerationTools({
+      env: { DACAI_IMAGE_BACKEND: 'dacais-media' },
+      fetch: fetchMock as typeof fetch,
+    })[0];
+    const root = await workspace();
+    await writeFile(join(root, 'references.png'), PNG);
+
+    const result = await tool.execute({
+      prompt,
+      referenceSheetPath: 'references.png',
+      intent: outerIntent,
+      outputPath: 'date.png',
+      seed: 23,
+    }, { workspaceRoot: root }) as Record<string, unknown>;
+
+    expect(result).toMatchObject({ path: 'date.png', model: 'Qwen/Qwen-Image-Edit-2511', seed: 23 });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it('routes prompt-only human anatomy generation away from SDXL', async () => {
     const fetchMock = vi.fn(async (url: string | URL | Request) => {
       expect(String(url)).toBe('http://127.0.0.1:18090/v1/anatomy-generate');
@@ -164,13 +197,58 @@ describe('photoreal image generation tool', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it('detects anatomy-sensitive instructions without stealing ordinary semantic edits', () => {
-    expect(imageEditRequiresAnatomyPipeline('fix her hands and make the full-body pose natural')).toBe(true);
-    expect(imageEditRequiresAnatomyPipeline('make both people walk side by side')).toBe(true);
-    expect(imageEditRequiresAnatomyPipeline('accurate adult vulva and perineal anatomy')).toBe(true);
-    expect(imageEditRequiresAnatomyPipeline('male medical reference showing the glans and foreskin')).toBe(true);
-    expect(imageEditRequiresAnatomyPipeline('make her hair blonde')).toBe(false);
-    expect(imageEditRequiresAnatomyPipeline('replace the cloudy sky')).toBe(false);
+  it('keeps preservation-only anatomy words on the localized instruction-edit path', async () => {
+    const prompt = 'Edit only the shirt color; preserve identity, face, body, skin, anatomy, pose, clothing cut, camera angle, and style.';
+    const intent = intentFixture(prompt);
+    intent.protectedAttributes = ['identity', 'face', 'body', 'skin', 'anatomy', 'pose', 'clothing cut', 'camera angle', 'style'];
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      expect(String(url)).toBe('http://127.0.0.1:18090/v1/instruct-edit');
+      const request = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      expect(request).toMatchObject({ prompt, intent, correction: 'Restore only the original shirt stitching.' });
+      expect(request).not.toHaveProperty('maskDisabled');
+      return new Response(JSON.stringify({
+        imageBase64: PNG.toString('base64'), model: 'instruction-editor', regionLocked: true, regions: ['requested target'],
+      }), { status: 200 });
+    });
+    const tool = createImageGenerationTools({ env: { DACAI_IMAGE_BACKEND: 'dacais-media' }, fetch: fetchMock as typeof fetch })[0];
+    const root = await workspace();
+    await writeFile(join(root, 'source.png'), PNG);
+
+    await expect(tool.execute({
+      prompt, intent, correction: 'Restore only the original shirt stitching.',
+      sourcePath: 'source.png', outputPath: 'localized.png',
+    }, { workspaceRoot: root })).resolves.toMatchObject({
+      path: 'localized.png', mode: 'instruction', regionLocked: true, regions: ['requested target'],
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('passes provider-permitted mature image requests verbatim without an application negative prompt', async () => {
+    const prompt = 'Fine-art nude figure study of a consenting adult model, natural skin texture and soft studio lighting.';
+    const intent = intentFixture(prompt, { generate: true });
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      expect(String(url)).toBe('http://127.0.0.1:18090/v1/generate-backdrop');
+      expect(JSON.parse(String(init?.body))).toMatchObject({ prompt, negativePrompt: '', intent });
+      return new Response(JSON.stringify({ imageBase64: PNG.toString('base64'), model: 'provider-model' }), { status: 200 });
+    });
+    const tool = createImageGenerationTools({ env: { DACAI_IMAGE_BACKEND: 'dacais-media' }, fetch: fetchMock as typeof fetch })[0];
+
+    await expect(tool.execute({ prompt, intent, outputPath: 'mature.png' }, { workspaceRoot: await workspace() }))
+      .resolves.toMatchObject({ path: 'mature.png', model: 'provider-model' });
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('sends the reported supermodel request unchanged', async () => {
+    const prompt = 'generate a picture of a supermodel';
+    const fetchMock = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      expect(JSON.parse(String(init?.body))).toMatchObject({ prompt, negativePrompt: '' });
+      return new Response(JSON.stringify({ imageBase64: PNG.toString('base64') }), { status: 200 });
+    });
+    const tool = createImageGenerationTools({ env: { DACAI_IMAGE_BACKEND: 'dacais-media' }, fetch: fetchMock as typeof fetch })[0];
+
+    await expect(tool.execute({ prompt, outputPath: 'supermodel.png' }, { workspaceRoot: await workspace() }))
+      .resolves.toMatchObject({ path: 'supermodel.png' });
+    expect(fetchMock).toHaveBeenCalledOnce();
   });
 
   it('uses explicitly configured img2img /v1/edit-image API', async () => {
@@ -213,17 +291,31 @@ describe('photoreal image generation tool', () => {
     expect(String(fetchMock.mock.calls[1][0])).toContain('/v1/edit-image');
   });
 
+  it.each([404, 501])('never widens a localized edit to img2img after HTTP %s', async (status) => {
+    const prompt = 'change only the shirt color';
+    const intent = intentFixture(prompt);
+    const fetchMock = vi.fn(async () => new Response('instruction editor unavailable', { status }));
+    const tool = createImageGenerationTools({ env: { DACAI_IMAGE_BACKEND: 'dacais-media' }, fetch: fetchMock as typeof fetch })[0];
+    const root = await workspace();
+    await writeFile(join(root, 'source.png'), PNG);
+
+    await expect(tool.execute({ prompt, intent, sourcePath: 'source.png', outputPath: 'edit.png' }, { workspaceRoot: root }))
+      .rejects.toThrow(`HTTP ${status}`);
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
   it('does not switch methods for a bad request or an explicitly selected editor', async () => {
     for (const input of [
       { status: 400, mode: undefined },
       { status: 501, mode: 'instructpix2pix' },
     ]) {
-      const fetchMock = vi.fn(async () => new Response('editor unavailable', { status: input.status }));
+      const message = input.status === 400 ? 'provider safety control rejected request' : 'editor unavailable';
+      const fetchMock = vi.fn(async () => new Response(message, { status: input.status }));
       const tool = createImageGenerationTools({ env: { DACAI_IMAGE_BACKEND: 'dacais-media' }, fetch: fetchMock as typeof fetch })[0];
       const root = await workspace();
       await writeFile(join(root, 'source.png'), PNG);
       await expect(tool.execute({ prompt: 'change only the shirt color', sourcePath: 'source.png', outputPath: 'edit.png', mode: input.mode }, { workspaceRoot: root }))
-        .rejects.toThrow(`HTTP ${input.status}`);
+        .rejects.toThrow(input.status === 400 ? `HTTP 400: ${message}` : `HTTP ${input.status}`);
       expect(fetchMock).toHaveBeenCalledTimes(1);
     }
   });

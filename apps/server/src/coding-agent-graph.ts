@@ -26,7 +26,7 @@ export interface CodingGraphEvent {
   detail?: Record<string, unknown>;
 }
 
-export type GraphTaskKind = 'repository' | 'operational';
+export type GraphTaskKind = 'repository' | 'operational' | 'personal';
 
 /**
  * What the run is about and what proves it. The graph defaults to repository
@@ -144,6 +144,12 @@ export function fallbackPlan(goal: string, kind: GraphTaskKind = 'repository'): 
         'PENDING — inspect the actual command output for errors or missing capabilities',
         'PENDING — verify the requested outcome from observed output and finish only when it is established',
       ]
+    : kind === 'personal'
+      ? [
+          'PENDING — answer from conversation and public-web tools; do not inspect this repository',
+          'PENDING — search and fetch public sources for external facts the user asked about',
+          'PENDING — report confirmed public facts versus not-found, then finish',
+        ]
     : [
         'PENDING — inspect repository instructions and relevant implementation',
         'PENDING — execute the requested repository work with exact observed paths',
@@ -153,7 +159,7 @@ export function fallbackPlan(goal: string, kind: GraphTaskKind = 'repository'): 
   return [...steps, `GOAL — ${goal.slice(0, 1800)}`].join('\n');
 }
 
-const PLAN_ACTION = /^(?:analyze|check|compare|determine|edit|identify|inspect|locate|make|read|review|run|search|test|update|use|validate|verify)\b/i;
+const PLAN_ACTION = /^(?:analyze|answer|check|compare|determine|edit|fetch|identify|inspect|locate|make|read|report|review|run|search|test|update|use|validate|verify)\b/i;
 const PLAN_COMPLETION_CLAIM = /\b(?:final\s+summary|evidence\s+used|change\s+made|git\s+diff\s+confirmed|tests?\s+(?:passed|succeeded)|validation\s+(?:passed|succeeded)|(?:has|have|was|were)\s+(?:updated|changed|modified|validated|verified|completed|confirmed)|updated\s+(?:the\s+)?readme)\b/i;
 const PLAN_REPOSITORY_CLAIM = /\b(?:is|are|was|were|has|have|had|contains?|found|shows?|indicates?|reports?|confirmed|completed|passed|succeeded|changed|modified|updated|validated|verified)\b/i;
 
@@ -262,15 +268,23 @@ export class DurableCodingAgentGraph {
       input.onGraphEvent?.({ type: 'phase', phase, message, detail });
     };
 
+    const taskKind: GraphTaskKind = input.taskProfile?.kind ?? 'repository';
+    const operational = taskKind === 'operational';
+    const personal = taskKind === 'personal';
+
     const bootstrap = RunnableLambda.from(async (state: CodingGraphState) => {
-      emitPhase('bootstrap', 'Loading curated repository, RAG and memory context.');
-      const built = await input.contextManager.buildContext({
+      emitPhase('bootstrap', personal
+        ? 'Skipping repository RAG for a personal/general-LLM task.'
+        : 'Loading curated repository, RAG and memory context.');
+      const built = personal
+        ? { sections: [], totalTokens: 0, truncated: false, reasoning: 'personal-llm' }
+        : await input.contextManager.buildContext({
         goal: state.goal,
         scope: { workspaceId: state.workspaceId },
         planContext: state.plan || undefined,
         options: { maxContextTokens: input.maxContextTokens },
       });
-      const initialContext = input.contextManager.formatContextString(built);
+      const initialContext = personal ? '' : input.contextManager.formatContextString(built);
       input.onGraphEvent?.({
         type: 'checkpoint',
         phase: 'bootstrap',
@@ -278,9 +292,6 @@ export class DurableCodingAgentGraph {
       });
       return { phase: 'plan' as const, initialContext };
     });
-
-    const taskKind: GraphTaskKind = input.taskProfile?.kind ?? 'repository';
-    const operational = taskKind === 'operational';
 
     const plan = RunnableLambda.from(async (state: CodingGraphState) => {
       emitPhase('plan', 'Building a compact execution checklist.');
@@ -290,14 +301,18 @@ export class DurableCodingAgentGraph {
           input.planner,
           [
             'You are the planning pass for a coding agent.',
-            operational
-              ? 'This goal is a live system/network operation, not repository work: plan steps that execute on the running machine through the required runtime and read real output. Do not plan repository listing, searching, or source inspection unless the goal itself asks for it.'
-              : '',
+            personal
+              ? 'This goal is a personal/general-LLM or public-research task, not repository work: plan web.search/web.fetch steps. Do not plan filesystem.list, README, AGENTS.md, or source inspection.'
+              : operational
+                ? 'This goal is a live system/network operation, not repository work: plan steps that execute on the running machine through the required runtime and read real output. Do not plan repository listing, searching, or source inspection unless the goal itself asks for it.'
+                : '',
             'Return only 3-12 concise checklist lines in the exact form: PENDING — <future action>.',
             'Do not emit headings, Final Summary, results, evidence, repository facts, COMPLETE, or BLOCKED.',
-            operational
-              ? 'The plan is intent only: the executor must run the operation and observe its output before any completion claim.'
-              : 'The plan is intent only: the executor must inspect, mutate, and validate before any completion claim.',
+            personal
+              ? 'The plan is intent only: the executor must use public-web tools when facts are required; never inspect this repository as a substitute.'
+              : operational
+                ? 'The plan is intent only: the executor must run the operation and observe its output before any completion claim.'
+                : 'The plan is intent only: the executor must inspect, mutate, and validate before any completion claim.',
           ].filter(Boolean).join('\n'),
           `GOAL:\n${state.goal}\n\nCURATED CONTEXT:\n${state.initialContext.slice(0, 14000)}`,
           input.signal,
@@ -315,11 +330,16 @@ export class DurableCodingAgentGraph {
         'execute',
         state.cycle > 0
           ? 'Re-entering execution after reviewer feedback.'
-          : operational ? 'Executing live-system task.' : 'Executing repository task.',
+          : personal
+            ? 'Executing personal/general-LLM task.'
+            : operational
+              ? 'Executing live-system task.'
+              : 'Executing repository task.',
       );
       const reviewFeedback = state.review && !state.reviewPassed ? `\n\nREVIEW FEEDBACK TO CORRECT:\n${state.review}` : '';
 
       const contextProvider = async (snapshot: AgentLoopContextSnapshot): Promise<string> => {
+        if (personal) return '';
         const built = await input.contextManager.buildContext({
           goal: snapshot.goal,
           scope: { workspaceId: input.workspaceId },
@@ -366,10 +386,9 @@ export class DurableCodingAgentGraph {
         synthesisReserveTurns: input.synthesisReserveTurns,
         completionSignalRequired: true,
         // A repository goal that says "fix"/"add" must produce a file mutation.
-        // An operational goal with the same verbs ("install", "add a route")
-        // acts on the live system, where no repository mutation is expected.
-        requireMutationForMutationIntent: !operational,
-        requireValidationAfterMutation: true,
+        // An operational or personal goal with the same verbs is not repository work.
+        requireMutationForMutationIntent: !operational && !personal,
+        requireValidationAfterMutation: !personal,
         reasoningMode: state.cycle > 0 ? 'deep' : input.reasoningMode ?? 'auto',
         initialPlan: state.plan,
         initialContext: state.initialContext,
@@ -435,6 +454,8 @@ export class DurableCodingAgentGraph {
             'OBSERVED TOOL RESULTS are the runtime\'s own record of what each tool returned; they are evidence even when the executor answer does not repeat them.',
             operational
               ? 'This goal is a live-system operation, not repository work: no changed files or validation runs are expected. A successful observed result from the required runtime tool whose output answers the goal supports REVIEW_PASS. Do not ask for a command to be re-run when its successful output is already observed.'
+              : personal
+                ? 'This goal is a personal/general-LLM task, not repository work: no changed files or validation runs are expected. Observed web.search/web.fetch output that answers the questions supports REVIEW_PASS. A repository listing is REVIEW_FIX.'
               : '',
           ].filter(Boolean).join('\n'),
           [

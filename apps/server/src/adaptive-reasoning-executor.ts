@@ -18,6 +18,7 @@ export type AdaptiveReasoningMode =
 interface AdaptiveReasoningOptions {
   threadId: string;
   objective: string;
+  taskKind?: 'repository' | 'operational' | 'personal';
 }
 
 interface ReasoningSignal {
@@ -198,7 +199,18 @@ function classifySignals(
 
 function guidance(
   mode: AdaptiveReasoningMode,
+  taskKind?: AdaptiveReasoningOptions['taskKind'],
 ): string {
+  if (taskKind === 'personal') {
+    return [
+      `ACTIVE REASONING MODE: ${mode.toUpperCase()}`,
+      'This is a personal/general-LLM task, not repository work.',
+      'Use web.search and web.fetch for external facts.',
+      'Do not list, search, or read this workspace.',
+      'Prefer the shortest public-web tool path.',
+    ].join('\n');
+  }
+
   switch (mode) {
     case 'fast':
       return [
@@ -452,6 +464,7 @@ implements ToolExecutor {
         'ADAPTIVE_REASONING_STATE',
         guidance(
           this.mode,
+          this.options.taskKind,
         ),
         reasonText,
       ]

@@ -6,12 +6,32 @@ import type { ToolDefinition } from './types';
 const MAX_RESPONSE_CHARS = 50_000;
 const MAX_DOWNLOAD_BYTES = 10_000_000;
 
+/**
+ * DuckDuckGo HTML results wrap destinations in /l/?uddg=<encoded>.
+ * web.fetch cannot open those wrappers; recover the public HTTPS target.
+ */
+export function unwrapDuckDuckGoResultUrl(href: string): string | undefined {
+  try {
+    const absolute = href.startsWith('//') ? `https:${href}` : href;
+    const url = new URL(absolute, 'https://duckduckgo.com');
+    const wrapped = url.searchParams.get('uddg');
+    const target = wrapped ? new URL(wrapped) : url;
+    return target.protocol === 'https:' ? target.toString() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function stripTags(value: string): string {
+  return value.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+}
+
 export const webFetchTool: ToolDefinition = {
   name: 'web.fetch',
   description:
     'PUBLIC INTERNET READ ONLY: GET or HEAD a specific public HTTPS page and return capped text or metadata for agent research. ' +
-    'Do not use this for local files, workspace source code, localhost, private networks, or repository identifiers; ' +
-    'use filesystem.read/filesystem.search for workspace content. Blocks private/localhost/metadata destinations and redirects.',
+    'Use this after web.search to open the cited public page. Do not use this for local files, workspace source code, localhost, private networks, or repository identifiers. ' +
+    'If filesystem.read is in the tool list, use it for workspace content; if it is not, do not inspect the repository. Blocks private/localhost/metadata destinations and redirects.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -25,7 +45,9 @@ export const webFetchTool: ToolDefinition = {
   requiresNetwork: true,
   timeoutMs: 20_000,
   async execute(input, ctx) {
-    const url = await assertPublicHttps(String(input.url ?? ''));
+    const raw = String(input.url ?? '');
+    const unwrapped = unwrapDuckDuckGoResultUrl(raw) ?? raw;
+    const url = await assertPublicHttps(unwrapped);
     const requestedMethod = String(input.method ?? 'GET').toUpperCase();
     if (requestedMethod !== 'GET' && requestedMethod !== 'HEAD') {
       throw new Error('web.fetch only permits read-only GET and HEAD requests.');
@@ -52,8 +74,9 @@ export const webSearchTool: ToolDefinition = {
   name: 'web.search',
   description:
     'PUBLIC INTERNET ONLY: search external public web pages through DuckDuckGo and return titles, URLs, and snippets. ' +
-    'Do not use this to search the active repository, local files, class/function names, SQL table names, or workspace text; ' +
-    'use filesystem.search for those.',
+    'Use this for people, businesses, news, public records, and other facts outside this workspace. ' +
+    'Do not use this to search the active repository, local files, class/function names, SQL table names, or workspace text. ' +
+    'If filesystem.search is in the tool list, use it for workspace content; if it is not, do not inspect the repository.',
   inputSchema: {
     type: 'object',
     properties: { query: { type: 'string', minLength: 1, maxLength: 300 } },
@@ -72,7 +95,11 @@ export const webSearchTool: ToolDefinition = {
     const html = await response.text();
     const results = [...html.matchAll(/result__a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?result__snippet[^>]*>([\s\S]*?)<\/a>/gi)]
       .slice(0, 8)
-      .map((match) => ({ url: match[1], title: match[2].replace(/<[^>]+>/g, '').trim(), snippet: match[3].replace(/<[^>]+>/g, '').trim() }));
+      .flatMap((match) => {
+        const url = unwrapDuckDuckGoResultUrl(match[1]);
+        if (!url) return [];
+        return [{ url, title: stripTags(match[2]), snippet: stripTags(match[3]) }];
+      });
     return { query, results };
   },
 };

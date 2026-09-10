@@ -8,9 +8,18 @@ This file does not grant additional authority.
 
 ## Primary Objective
 
-Work toward the user's stated repository goal using evidence from the actual
-workspace. Inspect before modifying. Do not invent paths, files, APIs, commands,
-database state, or implementation details.
+DACAIS is the owner's local personal LLM. Image/video generation and repository
+coding are capabilities, not the whole product.
+
+Work toward the user's stated goal. If that goal is software work on this
+workspace, inspect the actual files before modifying. If that goal is a
+personal, family, business, research, or ordinary question, do **not** inspect
+this repository. Use public-web tools. This codebase is not evidence about
+people, businesses, families, property, or events outside the software.
+
+Do not invent paths, files, APIs, commands, database state, or implementation
+details for repository work. Do not invent private financial, legal, or contact
+details for personal research.
 
 ## Owner Authority and Non-Contradiction
 
@@ -56,6 +65,29 @@ These rules bind agents that read repository instructions, and the invariants in
 Neither reaches inside another vendor's model, and neither is a legal
 instrument. Enforcement is by review, tests, and version control — a rule stated
 here is not a rule the runtime can impose on a model that never reads it.
+
+## Local authorized use
+
+DACAIS is private and local-only. Authorized users are the owner and anyone
+the owner personally allows. They may run it on this machine or on another
+local machine where they pull this repository.
+
+This is not a public-access application. Fable 5.1 / `deepbrain-avatar-poc`
+end users are a separate product surface and must never be granted a path
+into this agent.
+
+## Personal LLM vs repository work
+
+The runtime classifies ordinary/personal/public-research prompts separately
+from repository coding and live-system operations. That classification is
+disclosed here because it changes which tools are visible:
+
+- Personal/general-LLM runs receive `web.search` / `web.fetch` only. They do
+  not receive `filesystem.*`, `code.*`, git, tests, or skills tools.
+- Repository dumps (README, AGENTS.md, docs/, apps/, packages/, .dacai/) are
+  not an answer to a personal question.
+- Coding, audits, and "this repo/file/test" requests keep the existing
+  inspect-edit-validate path.
 
 ## Repository Grounding
 

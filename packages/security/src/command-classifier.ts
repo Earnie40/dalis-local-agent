@@ -100,125 +100,6 @@ export function tokenize(
 }
 
 /**
- * Detect shell syntax whose behavior cannot safely be described by classifying
- * one executable/subcommand pair.
- *
- * Detection is quote-aware:
- *
- * - control characters inside single-quoted data are ignored
- * - ordinary quoted JSON does not become a command chain
- * - command/environment expansion remains elevated because it can hide the
- *   effective executable, arguments, or target
- */
-function containsComplexShellSyntax(
-  command: string,
-): boolean {
-  let quote:
-    | '"'
-    | "'"
-    | undefined;
-
-  let escaped = false;
-
-  for (
-    let index = 0;
-    index < command.length;
-    index += 1
-  ) {
-    const char =
-      command[index];
-
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-
-    if (
-      char === '\\' &&
-      quote === '"'
-    ) {
-      escaped = true;
-      continue;
-    }
-
-    if (quote === "'") {
-      if (char === "'") {
-        quote = undefined;
-      }
-
-      continue;
-    }
-
-    if (quote === '"') {
-      if (char === '"') {
-        quote = undefined;
-        continue;
-      }
-
-      /*
-       * Command substitution remains active inside double quotes in common
-       * shells.
-       */
-      if (
-        char === '`' ||
-        char === '$'
-      ) {
-        return true;
-      }
-
-      continue;
-    }
-
-    if (
-      char === '"' ||
-      char === "'"
-    ) {
-      quote = char;
-      continue;
-    }
-
-    /*
-     * Shell chaining, redirection, grouping, command substitution, and
-     * environment expansion.
-     */
-    if (
-      char === ';' ||
-      char === '&' ||
-      char === '|' ||
-      char === '<' ||
-      char === '>' ||
-      char === '`' ||
-      char === '$' ||
-      char === '(' ||
-      char === ')' ||
-      char === '{' ||
-      char === '}'
-    ) {
-      return true;
-    }
-
-    /*
-     * cmd.exe environment-variable expansion can similarly hide effective
-     * arguments.
-     */
-    if (
-      char === '%' &&
-      command.indexOf(
-        '%',
-        index + 1,
-      ) !== -1
-    ) {
-      return true;
-    }
-  }
-
-  /*
-   * Unterminated quoting is ambiguous rather than safe.
-   */
-  return quote !== undefined;
-}
-
-/**
  * Commands whose non-mutating behavior can be confidently determined from a
  * fixed subcommand.
  *
@@ -254,11 +135,38 @@ const SAFE_OPERATIONS:
 };
 
 /**
+ * Search executables that only read the tree — unless asked to do more.
+ *
+ * `find` and `fd` are observational in their ordinary form, but both accept
+ * options that run another command or delete matches. They are classified by
+ * their arguments rather than excluded outright, so an ordinary search stops
+ * demanding approval while an executing form still escalates.
+ */
+const SEARCH_EXECUTABLES = new Set(['find', 'fd', 'fdfind']);
+
+/** Options that turn a search into execution or deletion. */
+const SEARCH_EXECUTION_FLAGS = new Set([
+  '-exec',
+  '-execdir',
+  '-ok',
+  '-okdir',
+  '-delete',
+  '-fprint',
+  '-fprintf',
+  '-fls',
+  '-x',
+  '--exec',
+  '-X',
+  '--exec-batch',
+]);
+
+function searchCommandExecutes(args: readonly string[]): boolean {
+  return args.some((arg) => SEARCH_EXECUTION_FLAGS.has(arg.toLowerCase()));
+}
+
+/**
  * Whole executables considered observational when their arguments stay within
  * the workspace and do not contain command/control syntax.
- *
- * `find` and `fd` are deliberately omitted because variants/options exist that
- * can execute another command.
  */
 const SAFE_EXECUTABLES =
   new Set([
@@ -1027,6 +935,132 @@ function containsGitInspectionEscalation(
  * Unknown or ambiguous behavior always escalates to high-impact. A caller must
  * never treat failure to recognize danger as proof that a command is safe.
  */
+/**
+ * Syntax that genuinely hides what a command will do — command substitution,
+ * process/arithmetic grouping, and environment expansion. Unlike a plain pipe,
+ * these can smuggle a second command past token analysis, so a command that
+ * uses any of them still escalates to high-impact and asks.
+ *
+ * A plain pipeline (`a | b`), sequence (`a ; b`, `a && b`), or redirection
+ * (`2>/dev/null`, `> out.txt`) is deliberately NOT here: those hide nothing:
+ * each stage is a visible command that gets classified on its own.
+ */
+function containsObscuringSyntax(command: string): boolean {
+  let quote: '"' | "'" | undefined;
+  let escaped = false;
+
+  for (let index = 0; index < command.length; index += 1) {
+    const char = command[index];
+
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === '\\' && quote === '"') {
+      escaped = true;
+      continue;
+    }
+    if (quote === "'") {
+      if (char === "'") quote = undefined;
+      continue;
+    }
+    if (quote === '"') {
+      if (char === '"') {
+        quote = undefined;
+        continue;
+      }
+      // Substitution stays live inside double quotes.
+      if (char === '`' || char === '$') return true;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+    // Command substitution and grouping.
+    if (char === '`' || char === '$' || char === '(' || char === ')' || char === '{' || char === '}') {
+      return true;
+    }
+    // cmd.exe %VAR% expansion (paired %).
+    if (char === '%' && command.indexOf('%', index + 1) !== -1) return true;
+  }
+
+  // Unterminated quoting is ambiguous rather than safe.
+  return quote !== undefined;
+}
+
+/**
+ * Splits a command on top-level pipeline and sequence operators (`|`, `;`,
+ * `&&`, `||`) and drops redirection clauses (`>`, `>>`, `<`, `2>`, `&>`, and a
+ * bare `/dev/null` target), so each stage can be classified on its own merits.
+ * Quote-aware, so an operator inside quotes is left intact. Returns a single
+ * element for a command that only carried a redirection.
+ */
+function splitPipelineSegments(command: string): string[] {
+  const segments: string[] = [];
+  let current = '';
+  let quote: '"' | "'" | undefined;
+  let escaped = false;
+
+  const push = () => {
+    const trimmed = current.trim();
+    if (trimmed) segments.push(trimmed);
+    current = '';
+  };
+
+  for (let index = 0; index < command.length; index += 1) {
+    const char = command[index];
+    const next = command[index + 1];
+
+    if (escaped) {
+      current += char;
+      escaped = false;
+      continue;
+    }
+    if (char === '\\' && quote === '"') {
+      current += char;
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      current += char;
+      if (char === quote) quote = undefined;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      current += char;
+      continue;
+    }
+
+    // Sequence / pipe operators split segments.
+    if (char === '|' || char === ';' || char === '&') {
+      if ((char === '|' || char === '&') && next === char) index += 1; // || &&
+      push();
+      continue;
+    }
+    // Redirection: skip the operator and its whitespace + target token.
+    if (char === '<' || char === '>') {
+      if (next === '>' || next === '&') index += 1;
+      // Consume the following target (e.g. /dev/null, out.txt, &1).
+      let j = index + 1;
+      while (j < command.length && /\s/.test(command[j])) j += 1;
+      while (j < command.length && !/[\s|;&<>]/.test(command[j])) j += 1;
+      index = j - 1;
+      continue;
+    }
+    // A stray fd number immediately before a redirection (the "2" in "2>").
+    if (/[0-9]/.test(char) && (next === '>' || next === '<')) {
+      continue;
+    }
+
+    current += char;
+  }
+  push();
+
+  return segments.length ? segments : [command.trim()];
+}
+
 export function classifyCommand(
   command: string,
   options: ClassifyCommandOptions = {},
@@ -1054,32 +1088,33 @@ export function classifyCommand(
     };
   }
 
-  if (
-    containsComplexShellSyntax(
-      trimmed,
-    )
-  ) {
-    const tokens =
-      tokenize(trimmed);
-
+  // Genuinely intent-hiding syntax still escalates outright.
+  if (containsObscuringSyntax(trimmed)) {
+    const tokens = tokenize(trimmed);
     return {
-      tier:
-        'high-impact',
-
-      executable:
-        normalizeExecutable(
-          tokens[0] ??
-            '',
-        ),
-
+      tier: 'high-impact',
+      executable: normalizeExecutable(tokens[0] ?? ''),
       reason:
-        'Command contains shell chaining, redirection, grouping, substitution, expansion, or ambiguous quoting.',
-
-      layer:
-        'argument-analysis',
-
+        'Command uses command substitution, grouping, or environment expansion that can hide a second operation.',
+      layer: 'argument-analysis',
       runtime,
     };
+  }
+
+  // A plain pipeline / sequence / redirection is classified by its stages, not
+  // by the mere presence of an operator. The whole command takes the highest
+  // tier any stage earns, so `find … | grep` stays safe while `… | rm -rf`
+  // still escalates on the dangerous stage.
+  const segments = splitPipelineSegments(trimmed);
+  if (segments.length > 1 || segments[0] !== trimmed) {
+    let worst: CommandClassification | undefined;
+    for (const segment of segments) {
+      const classified = classifyCommand(segment, options);
+      if (!worst || TIER_ORDER[classified.tier] > TIER_ORDER[worst.tier]) {
+        worst = classified;
+      }
+    }
+    if (worst) return worst;
   }
 
   const tokens =
@@ -1251,6 +1286,20 @@ export function classifyCommand(
   }
 
   /*
+   * A tree search reads only, until an option tells it to run or delete.
+   */
+  else if (SEARCH_EXECUTABLES.has(executable)) {
+    if (searchCommandExecutes(args)) {
+      tier = 'high-impact';
+      reason = `"${executable}" was given an option that executes a command or deletes matches.`;
+      layer = 'argument-analysis';
+    } else {
+      tier = 'safe';
+      reason = `"${executable}" is classified as observational.`;
+    }
+  }
+
+  /*
    * Known project mutation.
    */
   else if (
@@ -1317,9 +1366,12 @@ export function classifyCommand(
    */
   if (
     tier === 'safe' &&
-    SAFE_EXECUTABLES.has(
+    (SAFE_EXECUTABLES.has(
       executable,
-    ) &&
+    ) ||
+      SEARCH_EXECUTABLES.has(
+        executable,
+      )) &&
     containsExternalPathReference(
       args,
     )

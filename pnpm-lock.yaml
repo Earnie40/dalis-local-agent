@@ -487,6 +487,9 @@ importers:
       '@dacai-local-agent/context':
         specifier: workspace:*
         version: link:../context
+      '@dacai-local-agent/domain-knowledge':
+        specifier: workspace:*
+        version: link:../domain-knowledge
       '@dacai-local-agent/memory':
         specifier: workspace:*
         version: link:../memory

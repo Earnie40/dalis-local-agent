@@ -59,6 +59,12 @@ describe('coding graph task profiles', () => {
     expect(plan).toContain('PENDING — validate mutations with diagnostics/tests');
   });
 
+  it('a personal fallback plan does not begin with repository inspection', () => {
+    const plan = fallbackPlan('research public facts about a person and a business', 'personal');
+    expect(plan.split('\n')[0]).toMatch(/do not inspect this repository/i);
+    expect(plan).not.toMatch(/inspect repository|validate mutations/);
+  });
+
   it('an invalid planner draft for an operational goal falls back to the operational checklist', () => {
     const plan = normalizeExecutionPlan('Final Summary: the command was run and succeeded.', 'use WSL and run uname -a', 'operational');
     expect(plan.split('\n')[0]).toMatch(/^PENDING — run the requested operation/);

@@ -18,24 +18,6 @@ interface ImageGenerationServices {
 const DEFAULT_SERVICES: ImageGenerationServices = { env: process.env, fetch: globalThis.fetch };
 const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
 const TRANSIENT_MEDIA_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
-const ANATOMY_MEDIA_INTENT =
-  /\b(?:anatom(?:y|ical(?:ly)?)|full[- ]body|whole[- ]body|body\s+pose|pose|posture|skeleton|skeletal|limbs?|arms?|legs?|hands?|fingers?|thumbs?|feet|foot|toes?|joints?|pelvis|hips?|buttocks?|gluteal|perine(?:um|al)|pubic|genitals?|penis|penile|glans|foreskin|prepuce|scrotum|scrotal|testicles?|testes|vulva|vulvar|labia(?:l)?|clitoris|clitoral|vagina|vaginal|walk(?:ing)?|run(?:ning)?|danc(?:e|ing)|kneel(?:ing)?|crouch(?:ing)?|squat(?:ting)?|stand(?:ing)?|sit(?:ting)?|gestures?)\b/i;
-const HUMAN_ANATOMY_CONTEXT =
-  /\b(?:educational|medical|clinical|scientific|anatomical|character[- ]design|digital[- ]human|simulation|reference)\b[\s\S]{0,100}\b(?:adult|human|person|people|body|male|female|man|woman)\b|\b(?:adult|human|person|people|body|male|female|man|woman)\b[\s\S]{0,100}\b(?:educational|medical|clinical|scientific|anatomical|character[- ]design|digital[- ]human|simulation|reference)\b/i;
-
-/**
- * Semantic SDXL editors are weak at edits that must reason about a human body's
- * topology. Keep this classifier deterministic so every caller selects the
- * same dedicated, non-SDXL editing lane for those requests.
- */
-export function mediaRequiresAnatomyPipeline(prompt: string): boolean {
-  const normalized = prompt.trim();
-  return ANATOMY_MEDIA_INTENT.test(normalized) || HUMAN_ANATOMY_CONTEXT.test(normalized);
-}
-
-export function imageEditRequiresAnatomyPipeline(prompt: string): boolean {
-  return mediaRequiresAnatomyPipeline(prompt);
-}
 
 function wait(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -179,7 +161,8 @@ async function dacaisMediaImage(
   input: {
     prompt: string; negativePrompt: string; width: number; height: number; steps: number;
     guidance: number; seed: number; strength: number; source?: { data: Buffer; mimeType: string };
-    mode?: string; editConcepts?: string[]; reverseConcepts?: string[]; intent?: MediaIntent; correction?: string;
+    referenceSheet?: boolean; mode?: string; editConcepts?: string[]; reverseConcepts?: string[];
+    intent?: MediaIntent; correction?: string;
   },
   signal?: AbortSignal,
 ): Promise<{ image: Buffer; model?: string; seed?: number; mode?: string; regionLocked?: boolean; regions?: string[] }> {
@@ -192,8 +175,10 @@ async function dacaisMediaImage(
     editMode === 'anatomy' ||
     (editMode === 'auto' && input.intent?.requiresBodyGeometry === true)
   );
-  if (editMode === 'img2img' && input.intent && (input.intent.editScope === 'localized' || input.intent.protectedAttributes.length)) {
-    throw new Error('img2img cannot guarantee the protected content in this precision edit; select a compatible instruction editor.');
+  const precisionEdit = input.intent?.operation === 'edit'
+    && (input.intent.editScope === 'localized' || input.intent.protectedAttributes.length > 0);
+  if (edit && editMode === 'img2img' && precisionEdit) {
+    throw new Error('Full-frame img2img cannot satisfy a localized edit or preservation constraints; use auto or an instruction editor.');
   }
   const preferInstruct = edit && editMode !== 'img2img' && !anatomyRequest;
 
@@ -202,7 +187,7 @@ async function dacaisMediaImage(
       jobId: `agent-${randomUUID()}`,
       prompt: input.prompt,
       intent: input.intent,
-    correction: input.correction,
+      correction: input.correction,
       negativePrompt: input.negativePrompt,
       mode: 'anatomy',
       width: input.width,
@@ -213,6 +198,7 @@ async function dacaisMediaImage(
       strength: input.strength,
       sourceMediaBase64: input.source?.data.toString('base64'),
       sourceMimeType: input.source?.mimeType,
+      referenceSheet: input.referenceSheet,
     });
     let anatomyResponse: Response | undefined;
     let anatomyFailure: Error | undefined;
@@ -272,6 +258,7 @@ async function dacaisMediaImage(
         seed: input.seed === -1 ? undefined : input.seed,
         sourceMediaBase64: input.source?.data.toString('base64'),
         sourceMimeType: input.source?.mimeType,
+        referenceSheet: input.referenceSheet,
       })
     : null;
 
@@ -289,6 +276,7 @@ async function dacaisMediaImage(
     strength: input.strength,
     sourceMediaBase64: input.source?.data.toString('base64'),
     sourceMimeType: input.source?.mimeType,
+    referenceSheet: input.referenceSheet,
   });
 
   let response: Response | undefined;
@@ -314,13 +302,13 @@ async function dacaisMediaImage(
       // Auto mode is capability negotiation. If the optional instruction editor
       // is absent, retain the same prompt/intent and use the baseline image-edit
       // route. An explicitly selected editor still fails instead of switching.
-      if (preferInstruct && editMode === 'auto' && [404, 501].includes(response.status)) break;
+      if (preferInstruct && editMode === 'auto' && !precisionEdit && [404, 501].includes(response.status)) break;
       if (!TRANSIENT_MEDIA_STATUSES.has(response.status)) throw lastFailure;
     }
     if (attempt < 2) await (services.sleep ?? wait)(500 * (attempt + 1));
   }
 
-  if (!response?.ok && preferInstruct && editMode === 'auto' && response && [404, 501].includes(response.status)) {
+  if (!response?.ok && preferInstruct && editMode === 'auto' && !precisionEdit && response && [404, 501].includes(response.status)) {
     usedInstructionEditor = false;
     const fallbackRoute = '/v1/edit-image';
     const fallbackRequest = { ...request, body: standardPayload } satisfies RequestInit;
@@ -341,13 +329,25 @@ async function dacaisMediaImage(
   }
 
   if (!response?.ok) throw lastFailure ?? new Error('DACAIS media image backend did not respond.');
-  const body = await response.json() as { imageBase64?: unknown; model?: unknown; seed?: unknown };
+  const body = await response.json() as {
+    imageBase64?: unknown; model?: unknown; seed?: unknown;
+    regionLocked?: unknown; regions?: unknown;
+  };
   return {
     image: decodePng(body.imageBase64),
     mode: usedInstructionEditor ? editMode === 'auto' ? 'instruction' : editMode : edit ? 'img2img' : 'txt2img',
     model: typeof body.model === 'string' ? body.model : undefined,
     seed: typeof body.seed === 'number' ? body.seed : undefined,
+    regionLocked: typeof body.regionLocked === 'boolean' ? body.regionLocked : undefined,
+    regions: Array.isArray(body.regions) ? body.regions.filter((value): value is string => typeof value === 'string') : undefined,
   };
+}
+
+function exactPrompt(value: unknown): string {
+  if (typeof value !== 'string' || !value.trim() || value.length > 4000) {
+    throw new Error('prompt must be 1–4000 characters.');
+  }
+  return value;
 }
 
 function openAiSize(width: number, height: number): '1024x1024' | '1536x1024' | '1024x1536' {
@@ -408,6 +408,7 @@ export function createImageGenerationTools(services: ImageGenerationServices = D
         intent: { type: 'object', description: 'Validated structured media intent, including grounded regions and protected attributes.' },
         negativePrompt: { type: 'string', maxLength: 2000 },
         sourcePath: { type: 'string', minLength: 1, maxLength: 600, description: 'Optional workspace-relative PNG, JPEG, or WebP to modify.' },
+        referenceSheetPath: { type: 'string', minLength: 1, maxLength: 600, description: 'Internal workspace-relative PNG reference board used to condition a new image without changing generation semantics.' },
         outputPath: { type: 'string', minLength: 1, maxLength: 600, pattern: '\\.png$' },
         width: { type: 'integer', minimum: 256, maximum: 1536, default: 1024 },
         height: { type: 'integer', minimum: 256, maximum: 1536, default: 1024 },
@@ -436,11 +437,14 @@ export function createImageGenerationTools(services: ImageGenerationServices = D
       if (intent && (intent.kind !== 'image' || intent.operation !== (input.sourcePath ? 'edit' : 'generate'))) throw new Error('Image intent does not match the requested operation.');
       if (input.correction !== undefined && (typeof input.correction !== 'string' || input.correction.length > 2000)) throw new Error('correction must be at most 2000 characters.');
       if (input.negativePrompt !== undefined && (typeof input.negativePrompt !== 'string' || input.negativePrompt.length > 2000)) throw new Error('negativePrompt must be at most 2000 characters.');
+      const editSource = await sourceImage(ctx, input.sourcePath);
+      const referenceSheet = await sourceImage(ctx, input.referenceSheetPath);
+      if (editSource && referenceSheet) throw new Error('Use sourcePath or referenceSheetPath, not both.');
       const request = {
         intent,
         correction: input.correction as string | undefined,
-        prompt: requiredText(input.prompt, 'prompt', 4000),
-        negativePrompt: typeof input.negativePrompt === 'string' ? input.negativePrompt.trim() : '',
+        prompt: exactPrompt(input.prompt),
+        negativePrompt: typeof input.negativePrompt === 'string' ? input.negativePrompt : '',
         width: integer(input.width ?? intent?.constraints.width, 1024, 256, 1536, 'width'),
         height: integer(input.height ?? intent?.constraints.height, 1024, 256, 1536, 'height'),
         steps: integer(input.steps, 28, 1, 100, 'steps'),
@@ -448,7 +452,8 @@ export function createImageGenerationTools(services: ImageGenerationServices = D
         seed: integer(input.seed, -1, -1, 2147483647, 'seed'),
         quality: ['low', 'medium', 'high'].includes(String(input.quality ?? 'high')) ? String(input.quality ?? 'high') : 'high',
         strength: decimal(input.strength, 0.65, 0.05, 1, 'strength'),
-        source: await sourceImage(ctx, input.sourcePath),
+        source: editSource ?? referenceSheet,
+        referenceSheet: Boolean(referenceSheet),
         mode: typeof input.mode === 'string' ? input.mode.trim().toLowerCase() : undefined,
         editConcepts: Array.isArray(input.editConcepts) ? input.editConcepts.map(String) : undefined,
         reverseConcepts: Array.isArray(input.reverseConcepts) ? input.reverseConcepts.map(String) : undefined,
@@ -459,12 +464,11 @@ export function createImageGenerationTools(services: ImageGenerationServices = D
       }
       if (backend === 'openai' && (request.negativePrompt || input.strength !== undefined)) throw new Error('The configured OpenAI generation method does not support negativePrompt or strength controls.');
       if (backend === 'openai' && openAiSize(request.width, request.height) !== `${request.width}x${request.height}`) throw new Error('The configured OpenAI image model does not support the requested dimensions.');
-      const providerRequest = { ...request, prompt: request.correction ? `${request.prompt}\nCorrection: ${request.correction}` : request.prompt };
       const generated = backend === 'automatic1111'
-        ? await automatic1111Image(services, providerRequest, ctx.signal)
+        ? await automatic1111Image(services, request, ctx.signal)
         : backend === 'dacais-media'
           ? await dacaisMediaImage(services, request, ctx.signal)
-          : await openAiImage(services, providerRequest, ctx.signal);
+          : await openAiImage(services, request, ctx.signal);
 
       const dimensions = inspectPng(generated.image);
       if (dimensions.width !== request.width || dimensions.height !== request.height) throw new Error(`Generated image dimensions ${dimensions.width}x${dimensions.height} do not match requested ${request.width}x${request.height}.`);

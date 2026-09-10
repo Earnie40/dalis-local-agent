@@ -1,6 +1,14 @@
 import { readFile, stat } from 'node:fs/promises';
 import { extname, isAbsolute, relative, resolve, sep } from 'node:path';
 import type { ToolDefinition, ToolExecutionContext } from './types';
+import {
+  lookupAnatomicalLandmark,
+  lookupAnimalLandmark,
+  lookupSpatialEntity,
+  validateAnatomicalSpatialPlacement,
+  type AnatomicalGender,
+  type NormalizedBoundingBox,
+} from '@dacai-local-agent/domain-knowledge';
 
 const MAX_IMAGE_BYTES = 10_000_000;
 const ALLOWED = new Set(['.png', '.jpg', '.jpeg', '.webp']);
@@ -82,4 +90,106 @@ export const visionInspectTool: ToolDefinition = {
   },
 };
 
-export const VISION_TOOLS: ToolDefinition[] = [visionInspectTool];
+export const anatomyLocateTool: ToolDefinition = {
+  name: 'anatomy.locate',
+  description:
+    'Locate and identify human female and male anatomical landmarks, comparative animal structures, ' +
+    'and spatial objects/places. Returns exact canonical normalized bounding coordinates (0..1), body systems, ' +
+    'directional spatial relationships, and female vs male sexual dimorphism details.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      query: { type: 'string', minLength: 1, maxLength: 500 },
+      gender: { type: 'string', enum: ['female', 'male', 'neutral'] },
+      view: { type: 'string', enum: ['anterior', 'posterior', 'lateral'] },
+      box: {
+        type: 'object',
+        properties: {
+          left: { type: 'number', minimum: 0, maximum: 1 },
+          top: { type: 'number', minimum: 0, maximum: 1 },
+          right: { type: 'number', minimum: 0, maximum: 1 },
+          bottom: { type: 'number', minimum: 0, maximum: 1 },
+        },
+        required: ['left', 'top', 'right', 'bottom'],
+        additionalProperties: false,
+      },
+    },
+    required: ['query'],
+    additionalProperties: false,
+  },
+  permissionTier: 'safe',
+  requiresRead: false,
+  requiresNetwork: false,
+  // Resolves entirely from the in-memory landmark tables, so this bound only
+  // exists to satisfy the executor's contract — it is never approached.
+  timeoutMs: 10_000,
+  async execute(input) {
+    const query = String(input.query ?? '').trim();
+    const gender = input.gender as AnatomicalGender | undefined;
+    const view = (input.view as 'anterior' | 'posterior' | 'lateral' | undefined) ?? 'anterior';
+
+    const humanResult = lookupAnatomicalLandmark(query, gender);
+    if (humanResult.found && humanResult.landmark) {
+      const landmark = humanResult.landmark;
+      let spatialValidation;
+      if (input.box && typeof input.box === 'object') {
+        const box = input.box as NormalizedBoundingBox;
+        spatialValidation = validateAnatomicalSpatialPlacement(landmark.id, box, view);
+      }
+      return {
+        type: 'human_anatomy',
+        landmarkId: landmark.id,
+        name: landmark.name,
+        system: landmark.system,
+        genderSpecificity: landmark.genderSpecificity,
+        primaryRegion: landmark.primaryRegion,
+        subRegion: landmark.subRegion,
+        canonicalCoordinates: landmark.canonicalCoordinates[view] ?? landmark.canonicalCoordinates.anterior,
+        allViewCoordinates: landmark.canonicalCoordinates,
+        relativePlacement: landmark.relativePlacement,
+        adjacentStructures: landmark.adjacentStructures,
+        description: landmark.description,
+        dimorphicFeatures: landmark.dimorphicFeatures,
+        spatialValidation,
+      };
+    }
+
+    const animalResult = lookupAnimalLandmark(query);
+    if (animalResult.found && animalResult.comparativeAnimal) {
+      const animal = animalResult.comparativeAnimal;
+      return {
+        type: 'comparative_animal_anatomy',
+        landmarkId: animal.id,
+        name: animal.name,
+        taxon: animal.taxon,
+        bodyPlan: animal.bodyPlan,
+        region: animal.region,
+        canonicalCoordinates: animal.canonicalCoordinates,
+        homologueToHuman: animal.homologueToHuman,
+        relativePlacement: animal.relativePlacement,
+        description: animal.description,
+      };
+    }
+
+    const spatialResult = lookupSpatialEntity(query);
+    if (spatialResult) {
+      return {
+        type: spatialResult.category,
+        entityId: spatialResult.id,
+        name: spatialResult.name,
+        subCategory: spatialResult.subCategory,
+        keyComponents: spatialResult.keyComponents,
+        spatialStructure: spatialResult.spatialStructure,
+        visualProperties: spatialResult.visualProperties,
+      };
+    }
+
+    return {
+      found: false,
+      query,
+      message: `No anatomical, animal, or spatial entity found matching "${query}".`,
+    };
+  },
+};
+
+export const VISION_TOOLS: ToolDefinition[] = [visionInspectTool, anatomyLocateTool];

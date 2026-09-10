@@ -37,6 +37,10 @@ describe('owner authority invariants', () => {
     expect(agents).toMatch(/do not reinterpret an instruction into a weaker one/i);
     expect(agents).toMatch(/no gate that cannot pass/i);
     expect(agents).toMatch(/disclose every behavioral constraint/i);
+    expect(agents).toMatch(/local personal LLM/i);
+    expect(agents).toMatch(/do \*\*not\*\* inspect\s+this repository/i);
+    expect(agents).toMatch(/private and local-only/i);
+    expect(agents).toMatch(/must never be granted a path/i);
   });
 
   it('keeps a rejected media artifact instead of deleting it', async () => {

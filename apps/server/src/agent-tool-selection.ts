@@ -1,4 +1,5 @@
 import { isMutationTool } from '@dacai-local-agent/agent-core';
+import { isPersonalAllowedTool } from './personal-llm-task';
 
 interface NamedTool {
   name: string;
@@ -20,4 +21,18 @@ export function selectAgentTools<T extends NamedTool>(
     requested.add('shell.run');
   }
   return enabled.filter((tool) => requested.has(tool.name));
+}
+
+/**
+ * The public-web subset a personal/general question can be answered from.
+ *
+ * This is no longer a capability limit — a run is not narrowed to it, because
+ * a classifier's guess about intent is not a good reason to tell the operator
+ * their agent cannot read a file. It remains available for describing what a
+ * personal answer *should* be able to cite.
+ */
+export function selectPersonalAgentTools<T extends NamedTool>(
+  enabled: readonly T[],
+): T[] {
+  return enabled.filter((tool) => isPersonalAllowedTool(tool.name));
 }

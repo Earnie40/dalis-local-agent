@@ -1,4 +1,4 @@
-import { getPool } from '@dacai-local-agent/shared';
+import { getPool, isTransientDatabaseConnectionError } from '@dacai-local-agent/shared';
 
 import type {
   CapabilityStatus,
@@ -22,6 +22,25 @@ export const CAPABILITY_TTL_MS =
   60 *
   60 *
   1000;
+
+const DATABASE_READ_ATTEMPTS = 3;
+
+/** Retry only read-only work after a transport-level PostgreSQL disconnect. */
+async function retryTransientDatabaseRead<T>(read: () => Promise<T>): Promise<T> {
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= DATABASE_READ_ATTEMPTS; attempt += 1) {
+    try {
+      return await read();
+    } catch (error) {
+      lastError = error;
+      if (!isTransientDatabaseConnectionError(error) || attempt === DATABASE_READ_ATTEMPTS) throw error;
+      await new Promise<void>((resolve) => setTimeout(resolve, attempt * 100));
+    }
+  }
+
+  throw lastError;
+}
 
 interface CapabilityRow {
   model_digest:
@@ -190,7 +209,7 @@ export class PostgresCapabilityStore
     const {
       rows,
     } =
-      await getPool().query<CapabilityRow>(
+      await retryTransientDatabaseRead(() => getPool().query<CapabilityRow>(
         `
         SELECT
           model_digest,
@@ -249,7 +268,7 @@ export class PostgresCapabilityStore
           model,
           PROBE_VERSION,
         ],
-      );
+      ));
 
     const row =
       rows[0];

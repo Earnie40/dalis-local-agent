@@ -91,6 +91,10 @@ export interface MediaVideoJob {
 }
 
 async function json<T>(path: string, init?: RequestInit): Promise<T> {
+  // The JSON content-type stays on every request, including bodyless ones:
+  // dropping it makes Fastify reject them as an unsupported media type. The
+  // server accepts an empty JSON body instead — see the content-type parser in
+  // apps/server/src/index.ts.
   const response = await fetch(`${API}${path}`, {
     ...init,
     headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
@@ -358,6 +362,15 @@ export const api = {
   approveAll: (runId: string) =>
     json<{ ok: boolean; approved: number }>(`/api/approvals/run/${encodeURIComponent(runId)}/approve-all`, {
       method: 'POST',
+    }),
+  /**
+   * Pre-approve specific tools for the rest of one run. Narrower than
+   * approveAll: only the named tools stop asking, everything else still does.
+   */
+  grantTools: (runId: string, grant: { tools: string[]; tiers?: string[]; maxCalls?: number; ttlMs?: number }) =>
+    json<{ ok: boolean; tools: string[] }>(`/api/approvals/run/${encodeURIComponent(runId)}/grant`, {
+      method: 'POST',
+      body: JSON.stringify(grant),
     }),
   listWorkspaces: () => json<{ workspaces: Workspace[] }>('/api/workspaces'),
   createWorkspace: (body: { displayName: string; rootPath: string; write: boolean; shell: boolean; network?: boolean }) =>
@@ -661,6 +674,17 @@ export async function streamAgent(
     history?: Array<{ role: 'user' | 'assistant'; content: string }>;
     runMode?: 'interactive' | 'coding' | 'repository_audit' | 'deep_research';
     attachments?: Array<string | AgentAttachmentRef>;
+    /**
+     * Tools this prompt already authorised, pre-approved for this run only.
+     * Anything outside `tools` still stops for a click, and so does any tier
+     * left out of `tiers`. Omit the field to be asked about every gated call.
+     */
+    autoApprove?: {
+      tools: string[];
+      tiers?: string[];
+      maxCalls?: number;
+      ttlMs?: number;
+    };
   },
   onEvent: (event: AgentEvent) => void,
   signal: AbortSignal,

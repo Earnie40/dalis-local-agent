@@ -237,7 +237,7 @@ describe('run task profile — evidence follows the task, tools follow the selec
     expect(profile.directive).toContain('EXECUTION ENVIRONMENT CONSTRAINT');
   });
 
-  it('a plain coding task is a repository profile with no directive', () => {
+  it('a plain coding task is a repository profile with no operational directive', () => {
     const profile = resolveAgentTaskProfile({
       prompt: 'refactor the service layer in the network module',
       availableTools: ['filesystem.list', 'filesystem.read', 'shell.run'],
@@ -245,7 +245,8 @@ describe('run task profile — evidence follows the task, tools follow the selec
     expect(profile.kind).toBe('repository');
     expect(profile.executionEnvironment).toBeUndefined();
     expect(profile.evidenceRequirement?.tools).toEqual(['filesystem.list', 'filesystem.read']);
-    expect(profile.directive).toBe('');
+    expect(profile.directive).not.toContain('OPERATIONAL EXECUTION DIRECTIVE');
+    expect(profile.directive).not.toContain('PERSONAL / GENERAL LLM DIRECTIVE');
   });
 
   it('only advertises live-system tools that were actually selected', () => {

@@ -8,6 +8,58 @@ import type { ToolDefinition } from '../packages/tools/src/types';
 
 const capabilities = { read: true, write: true, shell: true, network: true };
 
+/**
+ * A pipeline is classified by its stages, not by the presence of an operator.
+ * The old rule escalated anything containing `|`, `>` or `;`, which made an
+ * ordinary read-only search ask for approval — and trained the operator to
+ * click through prompts that carried no information.
+ */
+describe('pipeline classification', () => {
+  it('keeps a read-only search safe through a pipe and a discard redirect', () => {
+    const classification = classifyCommand(
+      `find . -name "metamask*" -print 2>/dev/null | grep -v 'lost+found'`,
+    );
+
+    expect(classification.tier).not.toBe('high-impact');
+    expect(classification.reason).not.toMatch(/shell chaining/i);
+  });
+
+  it('escalates a search that was told to execute or delete', () => {
+    for (const command of [
+      'find . -name "*.tmp" -delete',
+      'find . -name "*.ts" -exec rm {} ;',
+      'fd -x rm',
+    ]) {
+      expect(classifyCommand(command).tier).toBe('high-impact');
+    }
+  });
+
+  it('escalates a search that reaches outside the workspace', () => {
+    // The home directory is not the workspace, pipe or no pipe.
+    expect(classifyCommand('find ~/.config -name "metamask*"').tier).toBe('high-impact');
+  });
+
+  it('still escalates when any stage of the pipeline is dangerous', () => {
+    const classification = classifyCommand('find . -name "*.tmp" | xargs rm -rf');
+
+    expect(classification.tier).toBe('high-impact');
+  });
+
+  it('still escalates command substitution, which can hide a second command', () => {
+    for (const command of ['echo $(rm -rf /)', 'echo `rm -rf /`', 'cat "${HOME}/x"']) {
+      expect(classifyCommand(command).tier).toBe('high-impact');
+    }
+  });
+
+  it('does not split an operator that lives inside quotes', () => {
+    // The pipe is data here, not a stage boundary.
+    const classification = classifyCommand(`grep "a|b" file.txt`);
+
+    expect(classification.executable).toBe('grep');
+    expect(classification.tier).not.toBe('high-impact');
+  });
+});
+
 describe('runtime-aware command classification', () => {
   it('describes an unclassified Linux command in the WSL context, not as a missing host executable', () => {
     const classification = classifyCommand('uname -a', { runtime: 'wsl' });
