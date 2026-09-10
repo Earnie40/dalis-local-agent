@@ -293,6 +293,17 @@ export function App() {
     [activeId, refreshConversations, startNew],
   );
 
+  const removeAll = useCallback(async () => {
+    if (!window.confirm('Delete all conversations? This cannot be undone.')) return;
+    try {
+      await api.deleteAllConversations();
+      setConversations([]);
+      startNew();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, [startNew]);
+
   const canRetry = useMemo(
     () => !stream.active && messages.some((message) => message.role === 'assistant'),
     [messages, stream.active],
@@ -346,6 +357,13 @@ export function App() {
           </button>
         </div>
 
+        {/*
+          * Agent run history renders here through a portal from AgentPanel, so
+          * both modes keep their history in the same sidebar column instead of
+          * a horizontal strip across the top of the panel.
+          */}
+        {mode === 'agent' && <div className="sidebar-history" id="agent-history-slot" />}
+
         {mode === 'chat' && (
           <button className="primary" onClick={startNew}>
             + New conversation
@@ -381,6 +399,12 @@ export function App() {
             </div>
           ))}
         </nav>
+        )}
+
+        {mode === 'chat' && conversations.length > 0 && (
+          <button type="button" className="history-clear" onClick={() => void removeAll()}>
+            Clear all conversations
+          </button>
         )}
 
         {mode === 'chat' && (
@@ -496,6 +520,9 @@ export function App() {
           }}
         >
           <textarea
+            id="chat-prompt"
+            name="prompt"
+            aria-label="Message the local model"
             value={input}
             placeholder="Ask the local model…  (Enter to send, Shift+Enter for a new line)"
             rows={3}
@@ -537,6 +564,9 @@ export function App() {
             {workspaces.length > 0 && (
               <select
                 className="composer-workspace"
+                id="chat-composer-workspace"
+                name="composerWorkspaceId"
+                aria-label="Workspace that stores attached files"
                 value={workspaceId}
                 title="Workspace that stores attached files"
                 onChange={(event) => setWorkspaceId(event.target.value)}

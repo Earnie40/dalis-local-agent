@@ -4,7 +4,6 @@ import type {
   ToolDefinition,
   ToolExecutionContext,
 } from './types';
-import { systemNetworkInfoTool } from './system-info';
 
 const MAX_OUTPUT_CHARS = 20_000;
 
@@ -1049,7 +1048,6 @@ export const SHELL_TOOLS: ToolDefinition[] = [
   shellRunTool,
   gitTool,
   testTool,
-  systemNetworkInfoTool,
 ];
 
 /**
@@ -1059,5 +1057,4 @@ export const SHELL_TOOLS: ToolDefinition[] = [
  */
 export const READ_ONLY_SHELL_TOOLS: ToolDefinition[] = [
   gitTool,
-  systemNetworkInfoTool,
 ];

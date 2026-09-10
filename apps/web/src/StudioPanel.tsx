@@ -404,7 +404,7 @@ export function StudioPanel({ aliases }: StudioPanelProps) {
           <button type="button" onClick={reset}>Reset</button>
           <button type="button" onClick={exportHtml}>Export HTML</button>
           <label className="studio-auto-run">
-            <input type="checkbox" checked={autoRun} onChange={(event) => setAutoRun(event.target.checked)} />
+            <input name="autoRun" type="checkbox" checked={autoRun} onChange={(event) => setAutoRun(event.target.checked)} />
             Auto preview
           </label>
         </div>
@@ -434,6 +434,7 @@ export function StudioPanel({ aliases }: StudioPanelProps) {
             </div>
             <textarea
               ref={editorRef}
+              name="studioCode"
               className="studio-code-editor"
               aria-label={`${selected.name} editor`}
               data-testid="studio-editor"
@@ -457,7 +458,7 @@ export function StudioPanel({ aliases }: StudioPanelProps) {
                 <span className="muted small">{previewStatus}</span>
               </div>
               <div>
-                <select aria-label="Preview viewport" value={viewport} onChange={(event) => setViewport(event.target.value as typeof viewport)}>
+                <select name="viewport" aria-label="Preview viewport" value={viewport} onChange={(event) => setViewport(event.target.value as typeof viewport)}>
                   <option value="fluid">Fluid</option>
                   <option value="tablet">Tablet</option>
                   <option value="mobile">Mobile</option>
@@ -534,7 +535,7 @@ export function StudioPanel({ aliases }: StudioPanelProps) {
 
               <label className="studio-model-picker">
                 <span>Model</span>
-                <select value={alias} onChange={(event) => setAlias(event.target.value)}>
+                <select name="modelAlias" value={alias} onChange={(event) => setAlias(event.target.value)}>
                   {aliases.length === 0 && <option value="chat">chat</option>}
                   {aliases.map((entry) => (
                     <option value={entry.alias} key={entry.alias}>{entry.alias} — {entry.model}</option>
@@ -583,6 +584,9 @@ export function StudioPanel({ aliases }: StudioPanelProps) {
                 }}
               >
                 <textarea
+                  id="studio-prompt"
+                  name="prompt"
+                  aria-label="Describe a change to the preview"
                   value={chatInput}
                   maxLength={4_000}
                   rows={4}
@@ -612,6 +616,9 @@ export function StudioPanel({ aliases }: StudioPanelProps) {
                   {workspaces.length > 0 && (
                     <select
                       className="composer-workspace"
+                      id="studio-composer-workspace"
+                      name="composerWorkspaceId"
+                      aria-label="Workspace that stores attached files"
                       value={workspaceId}
                       title="Workspace that stores attached files"
                       onChange={(event) => setWorkspaceId(event.target.value)}

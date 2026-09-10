@@ -1,7 +1,7 @@
 import type { OutgoingHttpHeaders } from 'node:http';
 import type { FastifyInstance } from 'fastify';
 import type { AppConfig } from '@dacai-local-agent/shared';
-import { runAgentLoop, AgentCapabilityError, type CompletionMessage, type LoopToolResult } from '@dacai-local-agent/agent-core';
+import { runAgentLoop, reasoningAcceptance, AgentCapabilityError, type CompletionMessage, type LoopToolResult } from '@dacai-local-agent/agent-core';
 import { ContextManager } from '@dacai-local-agent/context';
 import { MemoryStore } from '@dacai-local-agent/memory';
 import type { ProviderRegistry } from '@dacai-local-agent/providers';
@@ -11,6 +11,7 @@ import {
   READ_ONLY_FILESYSTEM_TOOLS,
   READ_ONLY_SHELL_TOOLS,
   SHELL_TOOLS,
+  SYSTEM_TOOLS,
   ToolRegistry,
   createAdversarialSimulationTools,
   WEB_TOOLS,
@@ -87,8 +88,8 @@ import { EnvironmentRecoveryExecutor } from '../environment-recovery-executor';
 import { CompletionManifestExecutor } from '../completion-manifest';
 import { ResourceAwareExecutionExecutor } from '../resource-aware-execution-executor';
 import { ExternalApiDiscoveryExecutor } from '../external-api-discovery-executor';
-import { selectAgentTools, selectPersonalAgentTools } from '../agent-tool-selection';
-import { AgentActivityEmitter, listAgentActivity } from '../agent-activity';
+import { selectAgentTools } from '../agent-tool-selection';
+import { AgentActivityEmitter, listAgentActivity, sanitizeReasoningDiagnostic } from '../agent-activity';
 import { dispatchWithMediaRecovery } from '../media-dispatch';
 import { beginSessionActivity, touchSessionActivity } from '../session-preflight';
 import { AgentArtifactError, readAgentArtifact } from '../agent-artifacts';
@@ -957,6 +958,12 @@ export function registerAgentRoutes(
     return { run, events: await listAgentActivity(request.params.runId, 0) };
   });
 
+  /*
+   * Bulk clear. Deleting 100 rows one request at a time is 100 round trips and
+   * leaves history half-cleared if the operator navigates away mid-loop.
+   */
+  server.delete('/api/agent/runs', async () => ({ ok: true, removed: await agentRuns.removeAll() }));
+
   server.delete<{ Params: { runId: string } }>('/api/agent/runs/:runId', async (request, reply) => {
     const run = await agentRuns.get(request.params.runId);
     if (!run) return reply.code(404).send({ error: 'Unknown run.' });
@@ -1271,6 +1278,7 @@ export function registerAgentRoutes(
     const enabled = [
       ...(workspace.capabilities.write ? FILESYSTEM_TOOLS : READ_ONLY_FILESYSTEM_TOOLS),
       ...(workspace.capabilities.shell ? SHELL_TOOLS : READ_ONLY_SHELL_TOOLS),
+      ...SYSTEM_TOOLS,
       ...simulationTools,
       ...(workspace.capabilities.network ? WEB_TOOLS : []),
       ...MCP_TOOLS,
@@ -1393,7 +1401,12 @@ export function registerAgentRoutes(
     });
 
     const write = (event: string, data: unknown) => {
-      if (!reply.raw.writableEnded) reply.raw.write(sseFrame(event, data));
+      // Controller diagnostics retain public structured output for debugging,
+      // with the same sanitization used by durable activity records.
+      const payload = data && typeof data === 'object' && 'reasoningDiagnostic' in data
+        ? { ...data, reasoningDiagnostic: sanitizeReasoningDiagnostic(data.reasoningDiagnostic as Parameters<typeof sanitizeReasoningDiagnostic>[0]) }
+        : data;
+      if (!reply.raw.writableEnded) reply.raw.write(sseFrame(event, payload));
     };
     const activity = new AgentActivityEmitter({
       workspaceId: workspace.id,
@@ -1905,6 +1918,7 @@ export function registerAgentRoutes(
           denied: event.result?.denied,
           output: event.result?.output?.slice(0, 2000),
           message: event.message,
+          reasoningDiagnostic: event.reasoningDiagnostic,
         });
       };
 
@@ -2097,6 +2111,7 @@ export function registerAgentRoutes(
             model: participantResolved.model,
             capabilities: participantResolved.capabilities,
             executor: readOnlyExecutor,
+            originalGoal: effectivePrompt,
             prompt: promptWithAttachments,
             promptImages,
             history: conversationHistory,
@@ -2137,6 +2152,7 @@ export function registerAgentRoutes(
                 success: event.result?.success,
                 denied: event.result?.denied,
                 message: event.message,
+                reasoningDiagnostic: event.reasoningDiagnostic,
               });
             },
           });
@@ -2200,9 +2216,9 @@ export function registerAgentRoutes(
           const participantResult = await codingGraph.run({
             threadId: `${threadId}:${participant.alias}`,
             workspaceId: workspace.id,
-            goal: writerGoal,
+            goal: effectivePrompt,
             history: conversationHistory,
-            systemPrompt: [systemPromptForRole(role, selected.map((tool) => tool.name), operationalDirective, taskProfile.kind), resolvedRunMode.mode === 'repository_audit' ? repositoryAuditInstructions() : ''].filter(Boolean).join('\n\n'),
+            systemPrompt: [systemPromptForRole(role, selected.map((tool) => tool.name), operationalDirective, taskProfile.kind), resolvedRunMode.mode === 'repository_audit' ? repositoryAuditInstructions() : '', writerGoal].filter(Boolean).join('\n\n'),
             taskProfile,
             executor,
             coder: participantResolved,
@@ -2230,6 +2246,7 @@ export function registerAgentRoutes(
                 success: event.result?.success,
                 denied: event.result?.denied,
                 message: event.message,
+                reasoningDiagnostic: event.reasoningDiagnostic,
               });
             },
             onGraphEvent: (event) => {
@@ -2308,9 +2325,12 @@ export function registerAgentRoutes(
           validatedMutationGeneration: workerResults.reduce((total, participant) => total + participant.workingState.validatedMutationGeneration, 0),
         };
 
-        result = writerResult ?? {
+        const verifiedParticipant = workerResults.find(participant =>
+          (participant.completionState === 'GOAL_COMPLETE' || participant.completionState === 'VERIFICATION_COMPLETE') &&
+          reasoningAcceptance(participant.workingState.reasoning, effectivePrompt).ok);
+        result = writerResult ?? verifiedParticipant ?? {
           taskId: runId,
-          answer: parallelExecution.synthesis,
+          answer: 'TASK_BLOCKED: Parallel participants did not verify every original requested output. Their advisory results remain in the participant packets.',
           stopReason: controller.signal.aborted
             ? 'cancelled' as const
             : workerResults.length
@@ -2319,7 +2339,7 @@ export function registerAgentRoutes(
           completionState: controller.signal.aborted
             ? 'CANCELLED' as const
             : workerResults.length
-              ? 'GOAL_COMPLETE' as const
+              ? 'BLOCKED' as const
               : 'FAILED' as const,
           turns: workerResults.reduce((total, participant) => total + participant.turns, 0),
           toolCalls: workerResults.reduce((total, participant) => total + participant.toolCalls, 0),
@@ -2380,6 +2400,7 @@ export function registerAgentRoutes(
           model: resolved.model,
           capabilities: resolved.capabilities,
           executor,
+          originalGoal: effectivePrompt,
           prompt: promptWithAttachments,
           promptImages,
           history: conversationHistory,
@@ -2419,10 +2440,11 @@ export function registerAgentRoutes(
         // whose completion is judged by the evidence requirement below.
         completionGuard:
           body.role === 'coding' && taskProfile.kind !== 'operational' && taskProfile.kind !== 'personal'
-            ? () =>
+            ? (reasoning) =>
                 checkAcceptanceCompletion(
                   runId,
                   effectivePrompt,
+                  reasoning,
                 )
             : undefined,
 
@@ -2439,6 +2461,10 @@ export function registerAgentRoutes(
           signal: controller.signal,
           onEvent: onLoopEvent,
         });
+      }
+
+      if ('reasoning' in result.workingState && result.workingState.reasoning) {
+        await stateTracker.record({ type: 'reasoning_state', turn: result.turns, reasoningState: result.workingState.reasoning });
       }
 
       if (result.stopReason === 'cancelled') {

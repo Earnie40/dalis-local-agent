@@ -406,6 +406,8 @@ export const api = {
   getConversation: (id: string) =>
     json<{ conversation: Conversation; messages: Message[] }>(`/api/conversations/${id}`),
   deleteConversation: (id: string) => json<{ ok: boolean }>(`/api/conversations/${id}`, { method: 'DELETE' }),
+  deleteAllConversations: () =>
+    json<{ ok: boolean; removed: number }>('/api/conversations', { method: 'DELETE' }),
   listModels: () => json<{ aliases: ModelAlias[]; tagCount: number; baseCount: number }>('/api/models'),
   capabilities: (alias: string) => json<AliasCapabilities>(`/api/models/${alias}/capabilities`),
   mediaStatus: () => json<MediaInfrastructureStatus>('/api/infrastructure/media/status'),
@@ -440,6 +442,8 @@ export const api = {
     json<{ run: AgentRun; events: AgentActivityEvent[] }>(`/api/agent/runs/${encodeURIComponent(runId)}`),
   deleteAgentRun: (runId: string) =>
     json<{ ok: boolean }>(`/api/agent/runs/${encodeURIComponent(runId)}`, { method: 'DELETE' }),
+  deleteAllAgentRuns: () =>
+    json<{ ok: boolean; removed: number }>('/api/agent/runs', { method: 'DELETE' }),
 
   // Red-team engagements: authorized targets, categories, and time window.
   listEngagements: (customerId: string) =>

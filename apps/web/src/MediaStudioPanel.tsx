@@ -138,7 +138,7 @@ export function MediaStudioPanel({ aliases }: { aliases: ModelAlias[] }) {
         </div>
         <label className="media-workspace">
           Workspace
-          <select value={workspaceId} onChange={(event) => {
+          <select name="workspaceId" value={workspaceId} onChange={(event) => {
             setWorkspaceId(event.target.value);
             setUploads([]); setCharacters([]); setSceneReferences([]); setImageSource(''); setImageArtifact(undefined); setJob(undefined);
           }}>
@@ -157,7 +157,7 @@ export function MediaStudioPanel({ aliases }: { aliases: ModelAlias[] }) {
           <h2>1. Upload source media</h2>
           <p className="muted">PNG, JPEG, WebP, WAV, MP3, M4A, OGG, or WebM · 25 MB per file. Uploads are stored only in the selected workspace.</p>
           <label className="media-upload">
-            <input type="file" accept="image/png,image/jpeg,image/webp,audio/wav,audio/mpeg,audio/mp4,audio/ogg,audio/webm" multiple disabled={!workspace?.capabilities.write || uploading} onChange={(event) => { void uploadFiles(event.target.files); event.currentTarget.value = ''; }} />
+            <input name="mediaUploads" type="file" accept="image/png,image/jpeg,image/webp,audio/wav,audio/mpeg,audio/mp4,audio/ogg,audio/webm" multiple disabled={!workspace?.capabilities.write || uploading} onChange={(event) => { void uploadFiles(event.target.files); event.currentTarget.value = ''; }} />
             {uploading ? 'Uploading…' : 'Upload images or voice references'}
           </label>
           <div className="media-assets-list">
@@ -167,15 +167,15 @@ export function MediaStudioPanel({ aliases }: { aliases: ModelAlias[] }) {
 
         <article className="media-card">
           <h2>2. Generate or edit an image</h2>
-          <textarea value={imagePrompt} onChange={(event) => setImagePrompt(event.target.value)} placeholder="Describe the image, or how to edit the selected image…" rows={4} />
-          <input value={negativePrompt} onChange={(event) => setNegativePrompt(event.target.value)} placeholder="Optional negative prompt" />
+          <textarea name="imagePrompt" aria-label="Image prompt" value={imagePrompt} onChange={(event) => setImagePrompt(event.target.value)} placeholder="Describe the image, or how to edit the selected image…" rows={4} />
+          <input name="negativePrompt" aria-label="Negative prompt (optional)" value={negativePrompt} onChange={(event) => setNegativePrompt(event.target.value)} placeholder="Optional negative prompt" />
           <label>Image to edit (optional)
-            <select value={imageSource} onChange={(event) => setImageSource(event.target.value)}>
+            <select name="imageSource" value={imageSource} onChange={(event) => setImageSource(event.target.value)}>
               <option value="">Create a new image</option>
               {images.map((image) => <option key={image.path} value={image.path}>{image.path}</option>)}
             </select>
           </label>
-          <input value={imageOutput} onChange={(event) => setImageOutput(event.target.value)} placeholder="Optional output filename" />
+          <input name="imageOutput" aria-label="Output filename (optional)" value={imageOutput} onChange={(event) => setImageOutput(event.target.value)} placeholder="Optional output filename" />
           <button type="button" className="primary" disabled={!workspace?.capabilities.write || !imagePrompt.trim() || imageBusy} onClick={() => void generateImage()}>{imageBusy ? 'Creating image…' : imageSource ? 'Edit image' : 'Generate image'}</button>
           {imageArtifact && workspaceId && <img className="media-image-preview" src={agentArtifactUrl(workspaceId, imageArtifact.path)} alt="Generated media artifact" />}
         </article>
@@ -184,20 +184,20 @@ export function MediaStudioPanel({ aliases }: { aliases: ModelAlias[] }) {
       <article className="media-card media-video-card">
         <h2>3. Create a narrated AI video</h2>
         <p className="muted">For long videos, DACAIS plans and renders short narrated scenes, then joins them on the GPU volume. Each scene has one speaking supplied character; dialogue alternates characters.</p>
-        <textarea value={videoPrompt} onChange={(event) => setVideoPrompt(event.target.value)} placeholder="Example: Generate a presentation with the two supplied characters taking turns explaining a walk through a city park." rows={4} />
+        <textarea name="videoPrompt" aria-label="Storyboard prompt" value={videoPrompt} onChange={(event) => setVideoPrompt(event.target.value)} placeholder="Example: Generate a presentation with the two supplied characters taking turns explaining a walk through a city park." rows={4} />
         <div className="media-video-options">
           <label>Length
-            <select value={durationSeconds} onChange={(event) => setDurationSeconds(Number(event.target.value) as typeof durationSeconds)}>
+            <select name="durationSeconds" value={durationSeconds} onChange={(event) => setDurationSeconds(Number(event.target.value) as typeof durationSeconds)}>
               {DURATIONS.map(([seconds, label]) => <option key={seconds} value={seconds}>{label}</option>)}
             </select>
           </label>
           <label>Storyboard model
-            <select value={alias} onChange={(event) => setAlias(event.target.value)}>
+            <select name="storyboardAlias" value={alias} onChange={(event) => setAlias(event.target.value)}>
               {aliases.map((entry) => <option key={entry.alias} value={entry.alias}>{entry.alias} — {entry.model}</option>)}
             </select>
           </label>
           <label>Output filename
-            <input value={videoOutput} onChange={(event) => setVideoOutput(event.target.value)} placeholder="Optional .mp4 name" />
+            <input name="videoOutput" value={videoOutput} onChange={(event) => setVideoOutput(event.target.value)} placeholder="Optional .mp4 name" />
           </label>
         </div>
 

@@ -13,6 +13,7 @@ import { extractChangedPaths, isMutationTool } from '@dacai-local-agent/agent-co
  */
 interface EventLike {
   type: string;
+  reasoningState?: import('@dacai-local-agent/agent-core').ReasoningState;
   turn: number;
   content?: string;
   message?: string;
@@ -190,6 +191,9 @@ export class ResumedRunStateTracker {
       async () => {
         await this.mutate(
           (state) => {
+            if (event.type === 'reasoning_state' && event.reasoningState) {
+              state.validationState = { ...validationState(state), reasoning: event.reasoningState };
+            }
             state.inspectedFiles ??=
               [];
 

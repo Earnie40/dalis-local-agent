@@ -1,3 +1,4 @@
+import { reasoningAcceptance, requirementHasEvidence, type ReasoningState } from '@dacai-local-agent/agent-core';
 import {
   loadWorkingState,
   saveWorkingState,
@@ -40,7 +41,7 @@ function deriveCriteria(
 
   const source =
     explicit.length > 1
-      ? explicit.slice(0, 12)
+      ? explicit
       : [objective.trim()];
 
   return source.map((text, index) => ({
@@ -50,25 +51,6 @@ function deriveCriteria(
     status: 'pending',
     evidence: [],
   }));
-}
-
-function stateArray(
-  state: unknown,
-  camel: string,
-  snake: string,
-): unknown[] {
-  const record =
-    state && typeof state === 'object'
-      ? (state as Record<string, unknown>)
-      : undefined;
-
-  const value =
-    record?.[camel] ??
-    record?.[snake];
-
-  return Array.isArray(value)
-    ? value
-    : [];
 }
 
 function validationState(
@@ -152,6 +134,7 @@ export async function initializeAcceptanceCriteria(
 export async function checkAcceptanceCompletion(
   threadId: string,
   objective: string,
+  currentReasoning?: ReasoningState,
 ): Promise<AcceptanceCheck> {
   let state =
     await loadWorkingState(threadId);
@@ -196,148 +179,19 @@ export async function checkAcceptanceCompletion(
         : deriveCriteria(objective);
   }
 
-  const changedFiles =
-    stateArray(
-      state,
-      'changedFiles',
-      'changed_files',
-    ).filter(
-      (value): value is string =>
-        typeof value === 'string',
-    );
-
-  const inspectedFiles =
-    stateArray(
-      state,
-      'inspectedFiles',
-      'inspected_files',
-    );
-
-  const relevantSymbols =
-    stateArray(
-      state,
-      'relevantSymbols',
-      'relevant_symbols',
-    );
-
-  const diagnosticsValue =
-    validation['code.diagnostics'];
-
-  const diagnostics =
-    diagnosticsValue && typeof diagnosticsValue === 'object'
-      ? (diagnosticsValue as { success?: unknown })
-      : undefined;
-
-  const testsValue =
-    validation['tests.run'];
-
-  const tests =
-    testsValue && typeof testsValue === 'object'
-      ? (testsValue as { success?: unknown })
-      : undefined;
-
-  const validationPassed =
-    diagnostics?.success === true ||
-    tests?.success === true;
-
-  const reviewValue =
-    validation.review;
-
-  const review =
-    reviewValue && typeof reviewValue === 'object'
-      ? (reviewValue as { status?: unknown })
-      : undefined;
-
-  const reviewApproved =
-    review?.status ===
-    'approved';
-
-  const changedSource =
-    changedFiles.some((path) =>
-      /\.(?:ts|tsx|js|jsx|mjs|cjs|json|yaml|yml)$/i
-        .test(path),
-    );
-
-  const inspectionEstablished =
-    inspectedFiles.length > 0 ||
-    relevantSymbols.length > 0 ||
-    validationPassed;
-
-  const evidence: string[] = [];
-
-  if (changedFiles.length) {
-    evidence.push(
-      `Changed files recorded: ${changedFiles.join(', ')}`,
-    );
-  }
-
-  if (validationPassed) {
-    evidence.push(
-      'Successful diagnostics or test validation is recorded.',
-    );
-  }
-
-  if (reviewApproved) {
-    evidence.push(
-      'Independent final patch review is approved.',
-    );
-  }
-
-  if (
-    !changedFiles.length &&
-    inspectionEstablished
-  ) {
-    evidence.push(
-      'Repository inspection evidence is recorded.',
-    );
-  }
-
-  const blockers: string[] = [];
-
-  if (changedFiles.length) {
-    if (
-      changedSource &&
-      !validationPassed
-    ) {
-      blockers.push(
-        'Source/configuration files changed but no successful tests.run or code.diagnostics result is recorded.',
-      );
-    }
-
-    if (!reviewApproved) {
-      blockers.push(
-        'Files changed but the independent final review has not been approved.',
-      );
-    }
-  }
-  else if (!inspectionEstablished) {
-    blockers.push(
-      'No successful repository inspection or validation evidence is recorded.',
-    );
-  }
-
-  const proven =
-    blockers.length === 0;
-
-  const updatedCriteria: AcceptanceCriterion[] =
-    criteria.map(
-      (criterion) => ({
-        ...criterion,
-        status:
-          proven
-            ? 'proven'
-            : 'pending',
-        evidence:
-          proven
-            ? Array.from(
-                new Set([
-                  ...(criterion.evidence ?? []),
-                  ...evidence,
-                ]),
-              )
-            : criterion.evidence ?? [],
-      }),
-    );
+  // Owner-requested invariant: each original output has its own admissible
+  // evidence. A shared "inspection happened" flag cannot prove every criterion.
+  const reasoning = currentReasoning ?? validation.reasoning as ReasoningState | undefined;
+  const check = reasoningAcceptance(reasoning, objective);
+  const proven = check.ok;
+  const blockers = check.missing;
+  const updatedCriteria: AcceptanceCriterion[] = reasoning?.goal === objective
+    ? reasoning.requiredEvidence.map(requirement => {
+      const evidence = reasoning.evidence.filter(item => item.requirementId === requirement.id && item.accepted && !item.contradicted);
+      return { id: requirement.id, text: requirement.output, required: true,
+        status: requirementHasEvidence(reasoning, requirement) ? 'proven' : 'pending', evidence: evidence.map(item => item.id) };
+    })
+    : criteria.map(criterion => ({ ...criterion, status: 'pending', evidence: [] }));
 
   await persistValidationState(
     state,
@@ -345,6 +199,7 @@ export async function checkAcceptanceCompletion(
     {
       ...validation,
 
+      reasoning,
       acceptanceCriteria:
         updatedCriteria,
 

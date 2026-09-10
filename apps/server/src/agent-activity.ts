@@ -4,9 +4,10 @@ import { stripHiddenReasoning } from '@dacai-local-agent/training-traces';
 
 /**
  * Observable execution events for the agent activity UI. This intentionally
- * contains operational summaries only: it never carries hidden model reasoning
- * or raw prompts. Values are redacted at this boundary before persistence and
- * before they are sent over SSE.
+ * contains operational summaries and structured decision diagnostics. It never
+ * carries hidden model reasoning or raw prompts. Planner response content is
+ * retained for debugging after secret redaction and hidden-reasoning removal,
+ * before persistence or SSE delivery; it is not training material.
  */
 export type AgentActivityType =
   | 'planning'
@@ -56,6 +57,7 @@ export interface ActivityLoopEvent {
   turn: number;
   content?: string;
   message?: string;
+  reasoningDiagnostic?: import('@dacai-local-agent/agent-core').LoopEvent['reasoningDiagnostic'];
   toolCall?: { name: string; arguments?: Record<string, unknown> };
   result?: { success?: boolean; denied?: boolean; output?: string; error?: string };
   budget?: { mode?: string; turns: number; maxTurns: number; toolCalls: number; maxToolCalls: number; reserveTurns?: number };
@@ -190,12 +192,49 @@ function toolOutcome(toolName: string, success: boolean, blocked: boolean, outpu
   return `The action completed. I can now incorporate its observed result into the next decision.${output ? ` Tool output: ${output}` : ''}`;
 }
 
+/** Shared activity/SSE boundary for public structured-controller diagnostics. */
+export function sanitizeReasoningDiagnostic(diagnostic: ActivityLoopEvent['reasoningDiagnostic']): ActivityLoopEvent['reasoningDiagnostic'] {
+  if (!diagnostic) return undefined;
+  const scrub = (value: string | undefined) => value === undefined
+    ? undefined : sanitizeText(stripHiddenReasoning(value).content);
+  let rawOutput = scrub(diagnostic.rawOutput);
+  // Preserve the original response text when no keyed-secret redaction is
+  // needed. Malformed JSON remains available for diagnosing parse failures.
+  if (rawOutput) {
+    try {
+      const parsed = JSON.parse(rawOutput);
+      const redacted = redactDeep(parsed);
+      if (JSON.stringify(parsed) !== JSON.stringify(redacted)) rawOutput = JSON.stringify(redacted);
+    } catch { /* Syntax failures still receive text/environment-secret redaction. */ }
+  }
+  // Explicit projection also prevents an unexpected provider thinking field
+  // from reaching persistence or transport alongside public response content.
+  return {
+    phase: scrub(diagnostic.phase)!, stage: diagnostic.stage, attempt: diagnostic.attempt,
+    model: scrub(diagnostic.model)!, requestedModel: scrub(diagnostic.requestedModel),
+    providerInstanceId: scrub(diagnostic.providerInstanceId), rawOutput,
+    errors: diagnostic.errors?.map(value => scrub(value)!),
+    repairs: diagnostic.repairs?.map(value => scrub(value)!), message: scrub(diagnostic.message),
+  };
+}
+
 export function activityForLoopEvent(event: ActivityLoopEvent): ActivityInput | undefined {
   const toolName = event.toolCall?.name;
   const args = event.toolCall?.arguments;
   const filePath = stringArgument(args, ['path', 'outputPath', 'filePath', 'source', 'destination', 'to', 'from']);
   const command = stringArgument(args, ['command', 'cmd', 'script']);
 
+  if (event.type === 'reasoning_diagnostic' && event.reasoningDiagnostic) {
+    const diagnostic = sanitizeReasoningDiagnostic(event.reasoningDiagnostic)!;
+    const warning = ['parse', 'schema', 'semantic', 'retry', 'fallback'].includes(diagnostic.stage);
+    return {
+      type: diagnostic.stage === 'blocked' ? 'error' : warning ? 'warning' : 'planning',
+      status: diagnostic.stage === 'blocked' ? 'blocked' : diagnostic.stage === 'accepted' ? 'success' : 'info',
+      title: `Reasoning ${diagnostic.phase}: ${diagnostic.stage}`,
+      message: diagnostic.message ?? diagnostic.errors?.join('; ') ?? `${diagnostic.model}, attempt ${diagnostic.attempt}`,
+      metadata: { kind: 'reasoning_diagnostic', ...diagnostic },
+    };
+  }
   if (event.type === 'model_request') {
     return { type: 'model', status: 'running', title: 'I’m weighing the latest evidence', message: `The agent is forming the next public action for turn ${event.turn} from the results gathered so far.` };
   }

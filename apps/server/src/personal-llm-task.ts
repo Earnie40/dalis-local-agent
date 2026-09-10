@@ -100,6 +100,21 @@ export function isPersonalAllowedTool(name: string): boolean {
   return (PERSONAL_ALLOWED_TOOLS as readonly string[]).includes(name);
 }
 
+/**
+ * A compact general reasoning loop shared by personal agent and chat prompts.
+ * It gives unfamiliar technical requests a path to evidence without loading
+ * repository skills into a personal run.
+ */
+export const CAPABILITY_REASONING_DIRECTIVE = `CAPABILITY REASONING PROTOCOL:
+- Treat an unfamiliar task as a set of testable unknowns, not as a reason to guess a procedure.
+- State the requested outcome, observable success condition, known facts, interface layers, and missing facts before choosing an action.
+- Separate physical/local device, transport, vendor or OEM service, account/entitlement, and application-integration layers; evidence for one layer does not establish another.
+- Prefer direct observation and current primary documentation over snippets, memory, or an assumed protocol. Label conclusions as observed, documented, inferred, or unknown.
+- Choose the available tool that can resolve the next unknown. If a tool or adapter is missing, identify its smallest contract: platform, required hardware/SDK, inputs, outputs, failure mode, and validation probe.
+- When the current request authorizes implementation, build and register that smallest tool or adapter, then run its non-destructive capability probe; do not stop at a proposal when the required implementation and validation tools are available.
+- For a vehicle request, identify vehicle/year/market, requested outcome, adapter model/firmware/transport, and applicable owner or developer surface before assuming OBD, Bluetooth, or connected-service behavior.
+- Report the evidence source, remaining prerequisite, and next highest-information action. Do not claim a connection, interface, account capability, or result until it is observed or documented for the exact target.`;
+
 export const PERSONAL_LLM_PROMPT = `You are DACAIS, the owner's local personal LLM.
 
 You are not limited to image/video generation. You are also not a repository coding agent on this run.
@@ -120,6 +135,8 @@ Rules:
 - Emit TASK_COMPLETE: only after answering from tool-backed public evidence, or after clearly stating which questions remain unpublished.
 - Emit TASK_BLOCKED: only when web.search/web.fetch are required and unavailable. Never substitute a repository dump for missing web access.
 
+${CAPABILITY_REASONING_DIRECTIVE}
+
 Completion protocol:
 - A directory listing, README excerpt, or media-pipeline file is not an answer to a personal question.
 - If you catch yourself reading this repository, stop and return to web.search.`;
@@ -136,7 +153,9 @@ Rules:
 - This software project is not evidence about people, businesses, families, property, courts, finances, or events outside the code.
 - Do not analogize the user's life, family, or finances to this repository's media pipeline, smart contracts, agents, or coding architecture unless they asked about the software.
 - If a current public fact is required, say so honestly. Agent mode with public web access can search; this chat cannot.
-- Do not invent private financial, legal, or contact details.`;
+- Do not invent private financial, legal, or contact details.
+
+${CAPABILITY_REASONING_DIRECTIVE}`;
 
 /** Skip workspace RAG/skills/memory when the question is not about this codebase. */
 export function personalContextOptions(): {

@@ -1,0 +1,10 @@
+{
+  "prompt": "Locate my MetaMask account on this computer and report the actual information you can verify from it.\n\nI want:\n\n* my public MetaMask wallet address\n* the custom tokens associated with that wallet\n* the network(s) those tokens are on, if determinable\n\nThis is a local-machine task. The answer must come from evidence connected to my actual MetaMask installation/account, not examples, test fixtures, documentation, repository sample values, or generic web instructions.\n\nDo not expose, recover, print, or access any seed phrase, Secret Recovery Phrase, private key, password, or other wallet secret. Only public wallet/account information is requested.\n\nYou have access to the tools and capabilities provided by DACAIS. Determine for yourself how to accomplish the goal.\n\nDo not ask me how to locate MetaMask or where it is installed unless you have exhausted the capabilities available to you and can explain specifically what information or capability is missing.\n\nDo not tell me how I can find the information myself. Perform the task.\n\nIf an approach fails, determine what that failure means and continue from the evidence available.\n\nIf you discover that DACAIS cannot complete the task because a required capability is genuinely missing or misconfigured, report exactly:\n\n* what capability is missing or broken\n* what you attempted\n* what evidence established the limitation\n* whether the problem is reasoning, tool selection, permissions, configuration, or missing implementation\n\nDo not claim success unless the requested information has actually been verified.\n\nReturn only the final verified result or a precise explanation of the capability preventing completion.",
+  "workspaceId": "ws_ye7404ue",
+  "alias": "agent",
+  "role": "coding",
+  "runMode": "interactive",
+  "maxTurns": 16,
+  "maxToolCalls": 32,
+  "sessionId": "planner-contract-unchanged-retest"
+}

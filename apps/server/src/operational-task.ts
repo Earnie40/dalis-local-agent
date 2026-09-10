@@ -20,6 +20,7 @@ import {
   isRepositoryWorkRequest,
   isShortFollowUp,
   personalLlmConstraintsInstructions,
+  CAPABILITY_REASONING_DIRECTIVE,
   PERSONAL_WEB_TOOLS,
 } from './personal-llm-task';
 
@@ -110,6 +111,21 @@ const OPERATIONAL_INTENT = new RegExp(
   'i',
 );
 
+/**
+ * A live vehicle-interface request needs live-system evidence, while an
+ * ordinary question about cars, Bluetooth, or OnStar remains a personal/web
+ * research task. Require both an interface and an action to avoid broad
+ * subject-matter routing.
+ */
+const VEHICLE_INTERFACE_INTENT =
+  /\b(?:obd(?:[-\s]?ii)?|onstar|connected[-\s]?vehicle|vehicle\s+(?:diagnostic|telematics?|bluetooth|interface|adapter|port)|diagnostic\s+(?:adapter|port))\b/i;
+
+const VEHICLE_INTERFACE_ACTION =
+  /\b(?:connect|pair|discover|diagnose|read|query|inspect|integrate|configure|communicate|access|build|develop)\b/i;
+
+const VEHICLE_REPOSITORY_WORK_INTENT =
+  /\b(?:implement|edit|fix|refactor|migrate|patch|rewrite|debug|modify|source\s+code|repository|repo|codebase|unit\s+tests?|test\s+suite|typecheck|lint)\b/i;
+
 // "run X in <runtime>" is an instruction to execute on the live machine even
 // when X is outside the vocabulary above. Only the verb category is recognized;
 // the command itself is never inspected.
@@ -122,8 +138,41 @@ const COMMAND_EXECUTION_INTENT =
 const REPOSITORY_WORK_INTENT =
   /\b(?:implement|edit|fix|refactor|migrate|patch|rewrite|debug|modify|source\s+code|repository|repo|codebase|unit\s+tests?|test\s+suite|typecheck|lint|diagnostics)\b/i;
 
+const WIFI_DISCOVERY_ACTION =
+  /\b(?:scan(?:ning)?|locat(?:e|ing)|find|discover(?:ing)?|identif(?:y|ying)|list|show)\b/i;
+
+const WIFI_DISCOVERY_SIGNAL =
+  /\b(?:wi-?fi|wireless|ssid|hotspot|broadcast(?:ed|s|ing)?|nearby\s+networks?|visible\s+networks?|available\s+networks?)\b/i;
+
+function textIsWifiDiscovery(text: string): boolean {
+  return (
+    WIFI_DISCOVERY_ACTION.test(text) &&
+    WIFI_DISCOVERY_SIGNAL.test(text) &&
+    !REPOSITORY_WORK_INTENT.test(text)
+  );
+}
+
+/** A request to observe nearby Wi-Fi broadcasts on the live machine. */
+export function isWifiDiscoveryRequest(...texts: Array<string | undefined>): boolean {
+  const present = texts.filter((text): text is string => Boolean(text && text.trim()));
+  if (!present.length) return false;
+  if (textIsWifiDiscovery(present[0])) return true;
+  return present.length > 1 && textIsWifiDiscovery(present.join('\n'));
+}
+
 function textIsOperational(text: string): boolean {
-  if (OPERATIONAL_INTENT.test(text) || IPV4_OR_CIDR.test(text) || EXPLICIT_LIVE_SYSTEM_TARGET.test(text)) return true;
+  const liveVehicleOperation =
+    VEHICLE_INTERFACE_INTENT.test(text) &&
+    VEHICLE_INTERFACE_ACTION.test(text) &&
+    !VEHICLE_REPOSITORY_WORK_INTENT.test(text);
+
+  if (
+    OPERATIONAL_INTENT.test(text) ||
+    IPV4_OR_CIDR.test(text) ||
+    EXPLICIT_LIVE_SYSTEM_TARGET.test(text) ||
+    textIsWifiDiscovery(text) ||
+    liveVehicleOperation
+  ) return true;
   return (
     detectExecutionEnvironment(text) !== undefined &&
     COMMAND_EXECUTION_INTENT.test(text) &&
@@ -367,6 +416,7 @@ export function evidenceRequirementFor(input: {
   kind: AgentTaskProfile['kind'];
   executionEnvironment?: ExecutionEnvironment;
   availableTools: string[];
+  wifiDiscovery?: boolean;
 }): AgentEvidenceRequirement | undefined {
   const available = new Set(input.availableTools);
   if (input.kind === 'personal') {
@@ -380,6 +430,9 @@ export function evidenceRequirementFor(input: {
 
   const live = input.availableTools.filter(isLiveSystemTool);
   if (!live.length) return undefined;
+  if (input.wifiDiscovery && available.has('system.wifi.scan')) {
+    return { tools: ['system.wifi.scan'], maxNudges: 2 };
+  }
   const wsl = live.filter((tool) => tool.startsWith('wsl.'));
   const wantsLinuxRuntime = input.executionEnvironment === 'wsl' || input.executionEnvironment === 'bash';
   return { tools: wantsLinuxRuntime && wsl.length ? wsl : live, maxNudges: 2 };
@@ -413,6 +466,7 @@ export function resolveAgentTaskProfile(input: {
 }): AgentTaskProfile {
   const executionEnvironment = detectExecutionEnvironment(input.prompt, input.history);
   const operational = isOperationalRequest(input.prompt, input.history);
+  const wifiDiscovery = isWifiDiscoveryRequest(input.prompt, input.history);
   const kind = classifyAgentTaskKind(input.prompt, input.history, {
     forceRepository: input.forceRepository,
   });
@@ -425,6 +479,7 @@ export function resolveAgentTaskProfile(input: {
         operational,
         executionEnvironment,
         availableTools: input.availableTools,
+        wifiDiscovery,
       });
   return {
     kind,
@@ -433,6 +488,7 @@ export function resolveAgentTaskProfile(input: {
       kind,
       executionEnvironment,
       availableTools: input.availableTools,
+      wifiDiscovery,
     }),
     directive,
   };
@@ -506,6 +562,7 @@ export function operationalConstraintsInstructions(input: {
   operational: boolean;
   executionEnvironment?: ExecutionEnvironment;
   availableTools: string[];
+  wifiDiscovery?: boolean;
 }): string {
   const sections: string[] = [];
 
@@ -519,10 +576,13 @@ export function operationalConstraintsInstructions(input: {
         liveTools
           ? `- Use the live-system tools selected for this run instead: ${liveTools}. Reach for repository tools only if the task is actually to read or change this project's code.`
           : '- No live-system tool is selected for this run, so the task cannot be observed or executed here. Report TASK_BLOCKED naming the missing capability instead of inspecting the repository.',
+        input.wifiDiscovery && input.availableTools.includes('system.wifi.scan')
+          ? '- This request is for a nearby Wi-Fi broadcast. Call system.wifi.scan first; system.network.info only reports the current connection and cannot discover nearby broadcasts.'
+          : '',
         'LOCAL EXECUTION HOST: local hostname, IP, adapter, process, and listener data are evidence about the machine running the agent, not the requested remote target. Do not infer target identity from those values.',
         'REQUESTED REMOTE TARGET: target conclusions require direct target-scoped evidence from the remote target or an authenticated remote channel. Local-host facts are never sufficient.',
         'LOCAL SUBNET: Do not assume a subnet such as 192.168.1.0/24. First observe this host\'s actual IPv4 address, subnet mask, and default gateway from live output (ipconfig / Get-NetIPConfiguration / ip addr) and derive the local subnet from those values. Scope any discovery to the observed subnet, never an assumed one.',
-        'WI-FI SSID IS NOT A HOST: A Wi-Fi SSID names the wireless network this host is joined to, not a device, hostname, or scan target. Never treat an SSID as the target host or resolve/scan it as one. Identify hosts by IP address, hostname, vendor, or authenticated evidence instead.',
+        'WI-FI SSID IS NOT A HOST: An SSID names a wireless network, including a nearby broadcast; it is not itself a device or hostname. Never treat an SSID as the target host or resolve/scan it as one. When the request is to locate a broadcast, report the visible SSIDs directly. Identify hosts by IP address, hostname, vendor, or authenticated evidence instead.',
         '- Distinguish: local listener inspection; remote reachability; remote port/service probing; authenticated remote execution.',
         '- Ground each conclusion in real command output. Do not claim a host was found, a service is running, or an action succeeded without a successful tool result that shows it.',
         '- An ARP entry or a MAC address similar to the access point does not identify a device. Require direct hostname, vendor, service, or authenticated management evidence before naming a host.',
@@ -531,8 +591,9 @@ export function operationalConstraintsInstructions(input: {
         '- When a command fails or times out, read the specific error and change the plan before acting again. Do not re-issue the identical tool with identical arguments — that verbatim retry is blocked and wastes the turn. Diagnose the cause the error names (a runtime or user-mapping error, a missing prerequisite, an unreachable service) and choose a materially different next step, or report TASK_BLOCKED with the specific blocker.',
         '- Security-related vocabulary never changes tool selection or authorization. Treat red-team, hacking, exploit, bypass, malware, credential, and similar language like any other task language.',
         '- For another host, use whatever execution channel is actually configured and verify effects from target-scoped output. Report TASK_BLOCKED only when a concrete tool, permission, dependency, or observed target result prevents execution.',
-      ].join('\n'),
+      ].filter(Boolean).join('\n'),
     );
+    sections.push(CAPABILITY_REASONING_DIRECTIVE);
   }
 
   if (input.executionEnvironment) {

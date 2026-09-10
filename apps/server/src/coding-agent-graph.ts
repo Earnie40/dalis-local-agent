@@ -371,8 +371,11 @@ export class DurableCodingAgentGraph {
       const result = await runAgentLoop({
         provider: input.coder.provider,
         model: input.coder.model,
+        reasoningProvider: input.planner?.provider,
+        reasoningModel: input.planner?.model,
         capabilities: input.coder.capabilities,
         executor: input.executor,
+        originalGoal: input.goal,
         history: input.history,
         prompt: state.cycle > 0
           ? `${input.goal}\n\nThe previous implementation was reviewed and needs correction:\n${state.review}`

@@ -11,7 +11,9 @@ import type { ContextRef, Evidence, TraceSource, TrainingStep } from './types';
  */
 
 export interface LoopEventLike {
-  type: 'model_request' | 'model_response' | 'thinking' | 'tool_call' | 'tool_result' | 'error' | 'context_compaction' | 'context_refresh' | 'reasoning_mode' | 'validation' | 'budget';
+  type: 'reasoning_diagnostic' | 'reasoning_state' | 'model_request' | 'model_response' | 'thinking' | 'tool_call' | 'tool_result' | 'error' | 'context_compaction' | 'context_refresh' | 'reasoning_mode' | 'validation' | 'budget';
+  reasoningState?: import('@dacai-local-agent/agent-core').ReasoningState;
+  reasoningDiagnostic?: import('@dacai-local-agent/agent-core').LoopEvent['reasoningDiagnostic'];
   turn: number;
   content?: string;
   toolCall?: { id?: string; name: string; arguments: Record<string, unknown> };
@@ -54,6 +56,26 @@ export class LoopTraceRecorder {
 
   record(event: LoopEventLike): void {
     const limit = this.options.maxResultSummaryChars ?? DEFAULT_SUMMARY_CHARS;
+
+    if (event.type === 'reasoning_diagnostic') {
+      // Diagnostic response/error text belongs only in the redacted activity
+      // journal. Training receives decision stage/count metadata, never raw
+      // planner output, private reasoning, or error snippets echoing that output.
+      const diagnostic = event.reasoningDiagnostic;
+      if (diagnostic) this.recordRuntimeEvent({
+        event: 'checkpoint',
+        phase: 'reasoning_control',
+        message: `Reasoning controller ${diagnostic.stage}; attempt ${diagnostic.attempt}; ${diagnostic.errors?.length ?? 0} validation errors; ${diagnostic.repairs?.length ?? 0} repairs.`,
+      });
+      return;
+    }
+
+    if (event.type === 'reasoning_state') {
+      // Persist decision counts as runtime metadata; the evidence ledger is
+      // stored by the working-state tracker, never as hidden model reasoning.
+      this.recordRuntimeEvent({ event: 'checkpoint', message: `Reasoning state: ${event.reasoningState?.requiredEvidence.length ?? 0} required outputs, ${event.reasoningState?.evidence.filter(e => e.accepted).length ?? 0} admissible evidence items.` });
+      return;
+    }
 
     if (event.type === 'model_response') {
       const { content, stripped } = stripHiddenReasoning(event.content ?? '');

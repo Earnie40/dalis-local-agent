@@ -1,6 +1,11 @@
+import { reasoningProtocolFixture } from './reasoning-protocol-fixture';
+import type { AgentLoopOptions } from '../packages/agent-core/src/agent-loop';
+function runAgentLoop(options: AgentLoopOptions) {
+  return runCoreAgentLoop({ reasoningProvider: reasoningProtocolFixture(), ...options });
+}
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ProviderInstance } from '../packages/shared/src/config';
-import { runAgentLoop, type ToolExecutor } from '../packages/agent-core/src/agent-loop';
+import { runAgentLoop as runCoreAgentLoop, type ToolExecutor } from '../packages/agent-core/src/agent-loop';
 import {
   buildOpenAIResponsesBody,
   normalizeOpenAIResponse,

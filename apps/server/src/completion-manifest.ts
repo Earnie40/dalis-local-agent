@@ -1,3 +1,4 @@
+import { reasoningAcceptance, type ReasoningState } from '@dacai-local-agent/agent-core';
 import {
   createHash,
 } from 'node:crypto';
@@ -997,79 +998,13 @@ function environmentRequirement(
 }
 
 function acceptanceRequirement(
-  state: unknown,
   validation: Record<string, unknown>,
+  objective: string,
 ): ManifestRequirement {
-  const stateAcceptance =
-    state && typeof state === 'object'
-      ? (state as { acceptanceCriteria?: unknown }).acceptanceCriteria
-      : undefined;
-
-  const acceptance =
-    validation
-      .acceptanceCriteria ??
-    validation
-      .acceptance ??
-    validation
-      .acceptanceState ??
-    stateAcceptance;
-
-  if (!acceptance) {
-    return requirement(
-      'acceptance',
-      'Acceptance criteria',
-      'not_applicable',
-      'No separately persisted acceptance-criteria object is present; existing loop completion guards remain authoritative.',
-    );
-  }
-
-  const decision =
-    aggregateDecision(
-      acceptance,
-    );
-
-  if (
-    decision ===
-      'blocked'
-  ) {
-    return requirement(
-      'acceptance',
-      'Acceptance criteria',
-      'blocked',
-      'One or more acceptance criteria are blocked or failed.',
-    );
-  }
-
-  if (
-    decision ===
-      'pending'
-  ) {
-    return requirement(
-      'acceptance',
-      'Acceptance criteria',
-      'pending',
-      'One or more acceptance criteria remain incomplete.',
-    );
-  }
-
-  if (
-    decision ===
-      'passed'
-  ) {
-    return requirement(
-      'acceptance',
-      'Acceptance criteria',
-      'passed',
-      'Persisted acceptance criteria are satisfied.',
-    );
-  }
-
-  return requirement(
-    'acceptance',
-    'Acceptance criteria',
-    'pending',
-    'Acceptance criteria exist but no satisfied state can be established.',
-  );
+  // An old aggregate "proven" flag cannot supersede original-output evidence.
+  const check = reasoningAcceptance(validation.reasoning as ReasoningState | undefined, objective);
+  return requirement('acceptance', 'Original output evidence', check.ok ? 'passed' : 'pending',
+    check.ok ? 'Every original output has admissible evidence and the final claims were verified.' : check.missing.join(' '));
 }
 
 function replanRequirement(
@@ -1343,8 +1278,8 @@ export async function buildCompletionManifest(
       ),
 
       acceptanceRequirement(
-        state,
         validation,
+        options.objective,
       ),
 
       replanRequirement(

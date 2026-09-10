@@ -1,4 +1,5 @@
 import type { LoopToolResult, NormalizedToolCall, ToolExecutor, ToolSchema } from '@dacai-local-agent/agent-core';
+import { sourcesForResult, executionEnvironment, isMutationTool, isValidationTool, toolResultSucceeded, type EvidenceSource } from '@dacai-local-agent/agent-core';
 import { PermissionEngine, redactDeep, sanitizeText } from '@dacai-local-agent/security';
 import type { PermissionDecision, WorkspaceCapabilities } from '@dacai-local-agent/security';
 import type { ToolDefinition, ToolExecutionContext } from './types';
@@ -54,6 +55,9 @@ export class PermissionedToolExecutor implements ToolExecutor {
       name: tool.name,
       description: tool.description,
       inputSchema: tool.inputSchema,
+      executionEnvironment: tool.commandRuntime === 'wsl'
+        ? { platform: 'linux', shell: '/bin/bash', arch: 'unknown' }
+        : executionEnvironment(),
     }));
   }
 
@@ -127,11 +131,26 @@ export class PermissionedToolExecutor implements ToolExecutor {
       const raw = await tool.execute(call.arguments, { ...this.options.context, signal: combined });
       const output = typeof raw === 'string' ? raw : JSON.stringify(redactDeep(raw), null, 2);
 
-      return {
-        output: sanitizeText(output),
-        success: true,
-        evidence: extractEvidence(tool.name, raw),
+      const result: LoopToolResult = {
+        output: sanitizeText(output), success: true, evidence: extractEvidence(tool.name, raw),
       };
+      result.success = toolResultSucceeded(result);
+      result.sources = tool.evidenceSources
+        ? tool.evidenceSources(raw, call.arguments).map(source => ({ ...source, content: sanitizeText(source.content) }))
+        : sourcesForResult(call, result);
+      // Runtime receipts prove execution/artifact presence, not the truth of
+      // example values in stdout. Keep them separate from content sources.
+      const receipts: EvidenceSource[] = (result.evidence ?? []).map((item, index) => ({
+        id: `receipt${index + 1}`, locator: `${tool.name} execution receipt`, provenance: 'local_machine',
+        effect: isValidationTool(tool.name) ? 'validation' : isMutationTool(tool.name) ? 'mutation' : 'read',
+        content: JSON.stringify(item),
+      }));
+      if (result.success && isMutationTool(tool.name)) {
+        receipts.push({ id: 'mutation', locator: `${tool.name} execution receipt`, provenance: 'local_machine',
+          effect: 'mutation', content: result.output });
+      }
+      result.sources.push(...receipts);
+      return result;
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
       return {

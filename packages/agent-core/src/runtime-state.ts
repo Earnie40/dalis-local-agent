@@ -1,9 +1,11 @@
+import { reasoningPromptView, type ReasoningState } from './reasoning-controller';
 import type { CompletionMessage } from './types';
 
 export type ReasoningMode = 'fast' | 'standard' | 'deep';
 export type ReasoningPreference = 'auto' | ReasoningMode;
 
 export interface AgentLoopContextSnapshot {
+  reasoning?: ReasoningState;
   goal: string;
   turn: number;
   reasoningMode: ReasoningMode;
@@ -208,7 +210,7 @@ export function compactMessagesForRequest(input: {
   const summaryMessage: CompletionMessage = {
     role: 'user',
     content: [
-      'CONTEXT COMPACTION — PRIOR OBSERVATIONS:',
+      'CONTEXT COMPACTION — PRIOR TRANSCRIPT EXCERPTS (UNVERIFIED):',
       'This is a deterministic summary of older turns. The original goal in the system prompt remains authoritative.',
       summary || '(No older observations retained.)',
     ].join('\n'),
@@ -235,11 +237,12 @@ export function buildWorkingStateContext(snapshot: AgentLoopContextSnapshot): st
     `Current goal: ${snapshot.goal}`,
   ];
 
+  if (snapshot.reasoning) lines.push(`GOAL / REQUIRED EVIDENCE / CURRENT HYPOTHESES / UNKNOWNS / NEXT ACTION / CAUSAL JUSTIFICATION / OBSERVATION / PROVENANCE / CONFIDENCE:\n${JSON.stringify(reasoningPromptView(snapshot.reasoning))}`);
   if (snapshot.plan) lines.push(`Plan / checklist:\n${snapshot.plan}`);
   if (snapshot.changedFiles.length) lines.push(`Changed files:\n${snapshot.changedFiles.map((path) => `- ${path}`).join('\n')}`);
   if (snapshot.validationResults.length) lines.push(`Validation evidence:\n${snapshot.validationResults.map((item) => `- ${item}`).join('\n')}`);
   if (snapshot.recentFailures.length) lines.push(`Recent failures:\n${snapshot.recentFailures.slice(-8).map((item) => `- ${item}`).join('\n')}`);
-  if (snapshot.succeededTools.length) lines.push(`Successful tools: ${snapshot.succeededTools.join(', ')}`);
+  if (snapshot.succeededTools.length) lines.push(`Successful execution (not proof of goal progress): ${snapshot.succeededTools.join(', ')}`);
   if (snapshot.knownPaths.length) {
     lines.push(
       `Known exact paths (authoritative observations; reuse these instead of guessing):\n${snapshot.knownPaths

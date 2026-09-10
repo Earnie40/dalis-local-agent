@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { api, streamAgent, type AgentActivityEvent, type AgentEvent, type AgentRun, type Upload, type Workspace } from './api';
@@ -80,6 +81,7 @@ const TOOL_LABELS: Record<string, string> = {
   'tests.run': 'Run tests/builds',
   'shell.run': 'Shell commands',
   'system.network.info': 'Network status',
+  'system.wifi.scan': 'Nearby Wi-Fi networks',
   'web.fetch': 'Fetch public web page',
   'web.search': 'Search public web',
   'download.approved': 'Download approved file',
@@ -256,7 +258,7 @@ export function AgentPanel() {
   const availableTools = useMemo(() => {
     const names: string[] = [];
     if (active?.capabilities.network) names.push('web.search', 'web.fetch', 'download.approved');
-    names.push('filesystem.list', 'filesystem.read', 'filesystem.search', 'filesystem.stat', 'git.run', 'system.network.info');
+    names.push('filesystem.list', 'filesystem.read', 'filesystem.search', 'filesystem.stat', 'git.run', 'system.network.info', 'system.wifi.scan');
     if (active?.capabilities.write) names.push('filesystem.edit', 'filesystem.write');
     if (active?.capabilities.shell) names.push('tests.run', 'shell.run', 'engineering.capabilities.inspect');
     if (active?.capabilities.write) names.push('image.generate');
@@ -483,6 +485,23 @@ export function AgentPanel() {
     }
   }, [running, sessionId, sessions]);
 
+  /*
+   * Clear the whole list. One bulk request rather than a delete per row, so the
+   * history cannot end up half-cleared if the operator navigates away.
+   */
+  const clearAllSessions = useCallback(() => {
+    if (running) return;
+    if (!window.confirm('Delete all agent run history? This cannot be undone.')) return;
+    setSessions([]);
+    setSessionId(undefined);
+    setEvents([]);
+    setActivityEvents([]);
+    setPrompt('');
+    setAttachments([]);
+    setError(undefined);
+    void api.deleteAllAgentRuns().catch(() => undefined);
+  }, [running]);
+
   const openSession = useCallback((session: AgentSession) => {
     if (running) return;
     setSessionId(session.id);
@@ -518,41 +537,71 @@ export function AgentPanel() {
     : latestActivity?.status === 'failed' ? 'Needs attention'
     : running ? 'Live' : latestActivity?.status === 'success' ? 'Complete' : 'Ready';
 
+  // The sidebar slot is rendered by App in agent mode; it exists by the time
+  // effects run, so the portal target resolves on the first commit.
+  const [historySlot, setHistorySlot] = useState<HTMLElement | null>(null);
+  useEffect(() => {
+    setHistorySlot(document.getElementById('agent-history-slot'));
+  }, []);
+
+  /*
+   * Run history belongs in the app sidebar next to the chat conversations, not
+   * in a strip above the panel: server-persisted history routinely runs to 100
+   * rows, and 100 cards in a horizontal row made the page ~27,000px wide and
+   * pushed every control off-window. The list lives in AgentPanel because it
+   * owns the session state, so it is rendered into the sidebar through a portal
+   * rather than lifted.
+   */
+  const historyPanel = (
+    <>
+      <button type="button" className="primary" onClick={newSession}>+ New agent conversation</button>
+      <nav className="agent-sessions">
+        {sessions.length === 0 && <p className="muted small">No agent runs yet.</p>}
+        {sessions.map((session) => (
+          <div key={session.id} className={`agent-session ${session.id === sessionId ? 'active' : ''}`}>
+            <button type="button" className="agent-session-open" onClick={() => openSession(session)}>
+              <strong>{session.title}</strong>
+              <span>
+                {new Date(session.updatedAt).toLocaleString()}
+                {session.remote && (
+                  <>
+                    {' · '}
+                    <em className={`agent-session-status ${session.remote.status}`}>{session.remote.status}</em>
+                    {session.remote.eventCount ? ` · ${session.remote.eventCount} events` : ''}
+                  </>
+                )}
+              </span>
+            </button>
+            <button
+              type="button"
+              className="agent-session-delete"
+              aria-label={`Delete conversation ${session.title}`}
+              title="Delete conversation"
+              onClick={() => deleteSession(session.id)}
+              disabled={running}
+            >
+              ×
+            </button>
+          </div>
+        ))}
+      </nav>
+      {sessions.length > 0 && (
+        <button
+          type="button"
+          className="history-clear"
+          onClick={clearAllSessions}
+          disabled={running}
+          title={running ? 'Finish or stop the current run first' : 'Delete all agent run history'}
+        >
+          Clear all history
+        </button>
+      )}
+    </>
+  );
+
   return (
     <div className="agent">
-      <aside className="agent-sessions">
-        <button type="button" className="primary" onClick={newSession}>+ New agent conversation</button>
-        <div className="agent-session-list">
-          {sessions.length === 0 && <p className="muted small">No agent runs yet.</p>}
-          {sessions.map((session) => (
-            <div key={session.id} className={`agent-session ${session.id === sessionId ? 'active' : ''}`}>
-              <button type="button" className="agent-session-open" onClick={() => openSession(session)}>
-                <strong>{session.title}</strong>
-                <span>
-                  {new Date(session.updatedAt).toLocaleString()}
-                  {session.remote && (
-                    <>
-                      {' · '}
-                      <em className={`agent-session-status ${session.remote.status}`}>{session.remote.status}</em>
-                      {session.remote.eventCount ? ` · ${session.remote.eventCount} events` : ''}
-                    </>
-                  )}
-                </span>
-              </button>
-              <button
-                type="button"
-                className="agent-session-delete"
-                aria-label={`Delete conversation ${session.title}`}
-                title="Delete conversation"
-                onClick={() => deleteSession(session.id)}
-                disabled={running}
-              >
-                ×
-              </button>
-            </div>
-          ))}
-        </div>
-      </aside>
+      {historySlot ? createPortal(historyPanel, historySlot) : null}
       <div className="agent-controls">
         <div className="field">
           <label htmlFor="agent-role">Role</label>
@@ -785,6 +834,9 @@ export function AgentPanel() {
         }}
       >
         <textarea
+          id="agent-prompt"
+          name="objective"
+          aria-label="Task for the agent"
           rows={3}
           value={prompt}
           placeholder="Give the agent a task, e.g. 'What does the permission engine do? Cite the file and lines.'"

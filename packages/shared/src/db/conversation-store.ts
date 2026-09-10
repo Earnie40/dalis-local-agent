@@ -134,6 +134,12 @@ export class ConversationStore {
     await getPool().query('DELETE FROM conversations WHERE id = $1', [id]);
   }
 
+  /** Clears the whole conversation list in one statement. */
+  async removeAll(): Promise<number> {
+    const { rowCount } = await getPool().query('DELETE FROM conversations');
+    return rowCount ?? 0;
+  }
+
   async messages(conversationId: string): Promise<MessageRecord[]> {
     const { rows } = await queryDatabaseRead<MessageRow>(
       'SELECT * FROM messages WHERE conversation_id = $1 ORDER BY created_at, id',

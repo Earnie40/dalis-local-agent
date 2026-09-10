@@ -1,3 +1,5 @@
+import { ReasoningController, type ReasoningDiagnostic, type ReasoningState, type ReasonedAction } from './reasoning-controller';
+import { toolResultSucceeded, type EvidenceSource, type ExecutionEnvironment } from './evidence-provenance';
 import { createId } from '@dacai-local-agent/shared';
 import type {
   CompletionMessage,
@@ -8,7 +10,7 @@ import type {
   ToolSchema,
 } from './types';
 import { isAgentLoopCapable } from './types';
-import { hasCompletionMarker, hasCompletionSignal, stripCompletionMarker } from './completion-markers';
+import { hasCompletionMarker, hasCompletionSignal } from './completion-markers';
 import {
   buildWorkingStateContext,
   chooseInitialReasoningMode,
@@ -43,6 +45,8 @@ import {
  */
 
 export interface LoopToolResult {
+  /** Runtime-owned origin spans. Model arguments never supply these. */
+  sources?: EvidenceSource[];
   /** Text handed back to the model as the tool observation. */
   output: string;
   success: boolean;
@@ -79,16 +83,24 @@ export type AgentCompletionState =
   | 'FAILED';
 
 export interface LoopEvent {
-  type: 'model_request' | 'model_response' | 'thinking' | 'tool_call' | 'tool_result' | 'error' | 'context_compaction' | 'context_refresh' | 'reasoning_mode' | 'validation' | 'budget';
+  type: 'reasoning_diagnostic' | 'reasoning_state' | 'model_request' | 'model_response' | 'thinking' | 'tool_call' | 'tool_result' | 'error' | 'context_compaction' | 'context_refresh' | 'reasoning_mode' | 'validation' | 'budget';
   turn: number;
   content?: string;
   toolCall?: NormalizedToolCall;
   result?: LoopToolResult;
   message?: string;
+  reasoningState?: ReasoningState;
+  /** Structured planning/decision stage record. Never hidden model reasoning. */
+  reasoningDiagnostic?: ReasoningDiagnostic;
   budget?: { mode?: string; turns: number; maxTurns: number; toolCalls: number; maxToolCalls: number; reserveTurns?: number };
 }
 
 export interface AgentLoopOptions {
+  /** Optional separately routed structured planner; defaults to the executing provider. */
+  reasoningProvider?: Pick<ModelProvider, 'chat'>;
+  reasoningModel?: string;
+  /** Trusted host/remote execution metadata, never inferred from user text. */
+  executionEnvironment?: ExecutionEnvironment;
   provider: ModelProvider;
   model: string;
   capabilities: ProviderCapabilities;
@@ -96,6 +108,8 @@ export interface AgentLoopOptions {
 
   /** The current user request. This remains the authoritative goal for the run. */
   prompt: string;
+  /** Stable request when prompt includes runtime review or attachment context. */
+  originalGoal?: string;
 
   /**
    * Raw base64 images attached to `prompt`, without a data: prefix.
@@ -160,7 +174,7 @@ export interface AgentLoopOptions {
    * Unlike a prompt instruction, this can reject TASK_COMPLETE
    * when durable execution evidence says required work remains.
    */
-  completionGuard?: () => Promise<{
+  completionGuard?: (reasoning: ReasoningState) => Promise<{
     ok: boolean;
     message?: string;
   }>;
@@ -239,6 +253,7 @@ export interface AgentLoopResult {
   usage: { inputTokens: number; outputTokens: number };
   messages: CompletionMessage[];
   workingState: {
+    reasoning?: ReasoningState;
     reasoningMode: ReasoningMode;
     knownPaths: string[];
     changedFiles: string[];
@@ -261,7 +276,7 @@ export class AgentCapabilityError extends Error {
 const DEFAULT_MAX_TURNS = 12;
 const DEFAULT_MAX_TOOL_CALLS = 96;
 const DEFAULT_MAX_TOOL_OUTPUT = 4000;
-const DEFAULT_MAX_UNPRODUCTIVE_TURNS = 2;
+const DEFAULT_MAX_UNPRODUCTIVE_TURNS = 10;
 const DEFAULT_MAX_HISTORY_MESSAGES = 16;
 const DEFAULT_MAX_ALIGNMENT_NUDGES = 1;
 /*
@@ -357,33 +372,6 @@ function engineeringArtifactPaths(call: NormalizedToolCall, result: LoopToolResu
   );
 }
 
-/**
- * These operations are explicitly observational.  They can be started together
- * when a model asks for distinct calls in the same turn; anything that can
- * mutate state, validate a changing workspace, prompt for permission, or run a
- * shell command remains ordered below.
- */
-function isSafelyBatchableReadOnlyTool(toolName: string): boolean {
-  return new Set([
-    'filesystem.list',
-    'filesystem.read',
-    'filesystem.search',
-    'filesystem.stat',
-    'code.symbol.search',
-    'code.symbol.references',
-    'code.symbol.callers',
-    'code.symbol.callees',
-    'code.symbol.impact',
-    'code.path.trace',
-    'code.architecture.context',
-    'code.failure.recall',
-    'code.working-state.get',
-    'code.validation.status',
-    'web.search',
-    'web.fetch',
-  ]).has(toolName);
-}
-
 function requestedToolPath(call: NormalizedToolCall): string | undefined {
   const path = call.arguments.path;
   return typeof path === 'string' && path.trim() ? path : undefined;
@@ -394,69 +382,13 @@ function looksLikeMissingPath(result: LoopToolResult): boolean {
   return /\bENOENT\b|no such file|no such directory|path .* not found|does not exist/i.test(result.output);
 }
 
-/**
- * Keep each model turn focused without weakening the executor boundary. Hidden
- * tools remain unavailable to the model for that turn, but PermissionEngine is
- * still authoritative for every tool that is actually executed.
- *
- * Tools the caller requires as evidence are always exposed: the loop refuses a
- * final answer until one of them succeeds, so hiding them would make the run
- * unsatisfiable and push the model toward whatever repository tool remained.
- */
+/** Registered capabilities stay available; causal admission selects actual actions. */
 export function selectToolsForTurn(
   tools: ToolSchema[],
-  snapshot: AgentLoopContextSnapshot,
-  requiredEvidenceTools: readonly string[] = [],
+  _snapshot: AgentLoopContextSnapshot,
+  _requiredEvidenceTools: readonly string[] = [],
 ): ToolSchema[] {
-  const goal = snapshot.goal.toLowerCase();
-  const names = new Set<string>();
-  const addPrefix = (prefix: string) => {
-    for (const tool of tools) if (tool.name.startsWith(prefix)) names.add(tool.name);
-  };
-  const add = (...wanted: string[]) => {
-    for (const name of wanted) if (tools.some((tool) => tool.name === name)) names.add(name);
-  };
-
-  add(...requiredEvidenceTools);
-
-  // Repository understanding is useful on every coding turn. Personal/general-LLM
-  // runs do not register filesystem tools; do not invent them here.
-  if (tools.some((tool) => tool.name.startsWith('filesystem.'))) {
-    add('filesystem.list', 'filesystem.read', 'filesystem.search', 'filesystem.stat');
-  }
-
-  const mutationIntent = goalImpliesMutation(goal);
-  if (mutationIntent || snapshot.changedFiles.length > 0) {
-    add('filesystem.edit', 'filesystem.write', 'filesystem.move', 'filesystem.copy');
-  }
-
-  if (mutationIntent || snapshot.changedFiles.length > 0 || /\b(?:test|verify|validate|typecheck|lint|build|diagnos)\w*\b/.test(goal)) {
-    add('tests.run', 'code.diagnostics', 'git.run');
-  }
-
-  if (snapshot.reasoningMode === 'deep' || /\b(?:shell|command|install|package|pnpm|npm|build|server|database|postgres|process|port)\b/.test(goal)) {
-    add('shell.run');
-  }
-
-  // Public-web tools stay visible whenever the executor registered them.
-  // Personal/research runs often lack coding keywords, so a keyword gate here
-  // would hide web.search/web.fetch and leave the model with nothing useful.
-  if (tools.some((tool) => tool.name.startsWith('web.'))) addPrefix('web.');
-  if (/\b(?:mcp|model context protocol|connector)\b/.test(goal)) add('mcp.list');
-  if (/\b(?:network|ip|interface|dns)\b/.test(goal)) add('system.network.info');
-
-  // Specialist tools have already passed server capability gates and explicit
-  // user selection. Preserve them instead of hiding them behind this coding-
-  // focused per-turn reducer.
-  addPrefix('engineering.');
-  addPrefix('cad.');
-  addPrefix('bim.');
-  addPrefix('scene.');
-
-  // If filtering would leave almost nothing, preserve the original set rather
-  // than accidentally creating a capability dead-end.
-  const selected = tools.filter((tool) => names.has(tool.name));
-  return selected.length >= Math.min(3, tools.length) ? selected : tools;
+  return tools;
 }
 
 /**
@@ -625,7 +557,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
 
   const maxTurns = options.maxTurns ?? DEFAULT_MAX_TURNS;
   const maxToolCalls = options.maxToolCalls ?? DEFAULT_MAX_TOOL_CALLS;
-  const synthesisReserveTurns = Math.min(options.synthesisReserveTurns ?? 0, Math.max(0, maxTurns - 1));
+  const synthesisReserveTurns = Math.min(options.synthesisReserveTurns ?? 2, Math.max(0, maxTurns - 1));
   const maxToolOutputChars = options.maxToolOutputChars ?? DEFAULT_MAX_TOOL_OUTPUT;
   const maxUnproductiveTurns = options.maxUnproductiveTurns ?? DEFAULT_MAX_UNPRODUCTIVE_TURNS;
   const maxHistoryMessages = options.maxHistoryMessages ?? DEFAULT_MAX_HISTORY_MESSAGES;
@@ -660,7 +592,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   const taskId = createId('task');
   const startedAt = Date.now();
   const history = trimHistory(options.history, maxHistoryMessages);
-  const currentGoal = options.prompt.trim();
+  const currentGoal = (options.originalGoal ?? options.prompt).trim();
   const baseSystemPrompt = buildRuntimeSystemPrompt(options.systemPrompt, currentGoal, history.length > 0);
   const messages: CompletionMessage[] = [
     ...history,
@@ -707,6 +639,48 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
   const succeededTools = new Set<string>();
   let error: string | undefined;
   const usage = { inputTokens: 0, outputTokens: 0 };
+  const reasoning = new ReasoningController({
+    goal: currentGoal, provider: options.reasoningProvider ?? provider, model: options.reasoningModel ?? model,
+    maxTurns, maxToolCalls, reserveTurns: synthesisReserveTurns, signal, tools,
+    environment: options.executionEnvironment,
+    onUsage: (value) => { usage.inputTokens += value.inputTokens ?? 0; usage.outputTokens += value.outputTokens ?? 0; },
+    onState: (state) => onEvent?.({ type: 'reasoning_state', turn: turns, reasoningState: state }),
+    onDiagnostic: (diagnostic) => onEvent?.({ type: 'reasoning_diagnostic', turn: turns, reasoningDiagnostic: diagnostic }),
+  });
+  /*
+   * PLANNING CONTRACT RECOVERY
+   *
+   * The controller already runs parse -> formatting repair -> one corrective
+   * retry carrying the exact validation errors, and falls back to an explicitly
+   * provisional contract when the planner output still cannot be validated. A
+   * malformed planning response is a transport/formatting failure, not evidence
+   * that the request is impossible, so the run continues into ordinary
+   * reasoning with the original request preserved. A provisional contract
+   * grants no evidence, no authorization and no completion: it is re-audited
+   * once observations exist, and every completion gate refuses it until then.
+   *
+   * Only a genuinely unexecutable request ends the run here — no goal to
+   * investigate, or an exhausted decision budget. Cancellation falls through to
+   * the loop so the run reports CANCELLED rather than a blocker.
+   */
+  try {
+    await reasoning.initialize();
+  } catch (cause) {
+    if (!signal?.aborted) {
+      error = cause instanceof Error ? cause.message : String(cause);
+      onEvent?.({
+        type: 'reasoning_diagnostic', turn: turns,
+        reasoningDiagnostic: {
+          phase: 'plan', stage: 'blocked', attempt: 1, model: options.reasoningModel ?? model,
+          errors: [error], message: 'The request cannot be planned or investigated.',
+        },
+      });
+      return { taskId, answer: `TASK_BLOCKED: ${error}`, stopReason: 'no-progress', completionState: 'BLOCKED',
+        turns, toolCalls, rejectedCalls, deniedCalls, retries, durationMs: Date.now() - startedAt, usage, messages,
+        workingState: { reasoning: reasoning.state, reasoningMode, knownPaths: [], changedFiles: [], validationResults: [], contextCompactions, mutationGeneration, validatedMutationGeneration }, error };
+    }
+  }
+
 
   // A referential follow-up with no history is a known context-boundary error.
   // Do not let the model compensate by exploring random repository files.
@@ -727,6 +701,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     }
 
     turns += 1;
+    reasoning.updateBudget(maxTurns - turns + 1, maxToolCalls - toolCalls);
 
     const turnsRemaining = maxTurns - turns;
     const synthesisReserveActive = synthesisReserveTurns > 0 && turnsRemaining < synthesisReserveTurns;
@@ -757,6 +732,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       recentFailures: recentFailures.slice(-8),
       validationResults: validationResults.slice(-8),
       rollingSummary,
+      reasoning: reasoning.state,
     };
 
     const shouldRefreshContext =
@@ -774,7 +750,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
       }
     }
 
-    const toolsForTurn = selectToolsForTurn(tools, snapshot, options.evidenceRequirement?.tools);
+    const toolsForTurn = synthesisReserveTurns > 0 && turnsRemaining === 0 ? [] : tools;
     const workingStateContext = buildWorkingStateContext(snapshot);
     const turnSystemPrompt = [
       baseSystemPrompt,
@@ -870,7 +846,7 @@ ${toolsForTurn.map((tool) => `- ${tool.name}`).join('\n')}`,
       providerContinuationItems: response.providerContinuationItems,
     });
 
-    onEvent?.({ type: 'model_response', turn: turns, content });
+    onEvent?.({ type: 'model_response', turn: turns, message: 'Model draft received; evidence review is pending.' });
     if (response.thinking?.trim()) {
       onEvent?.({
         type: 'thinking',
@@ -887,6 +863,7 @@ ${toolsForTurn.map((tool) => `- ${tool.name}`).join('\n')}`,
       const unmetEvidence =
         requirement &&
         !requirement.tools.some((tool) => succeededTools.has(tool)) &&
+        reasoning.unresolved().length > 0 &&
         evidenceNudges < (requirement.maxNudges ?? 1);
 
       if (unmetEvidence) {
@@ -985,13 +962,13 @@ ${toolsForTurn.map((tool) => `- ${tool.name}`).join('\n')}`,
       // rather than an accepted completion. A failed action never satisfies an
       // execution criterion.
       const requiredEvidenceUnmet =
-        Boolean(requirement) && !requirement!.tools.some((tool) => succeededTools.has(tool));
+        Boolean(requirement) && reasoning.unresolved().length > 0 && !requirement!.tools.some((tool) => succeededTools.has(tool));
       if (wantsTaskComplete && requiredEvidenceUnmet) {
         answer = [
           'TASK_BLOCKED: required execution did not succeed, so completion cannot be verified.',
           `No required tool produced a successful result: ${requirement!.tools.join(', ')}.`,
           'A proposed command, plan, or textual success claim does not satisfy an execution criterion.',
-          `Unverified completion claim (not accepted as evidence):\n${stripCompletionMarker(content).slice(0, 800)}`,
+
         ]
           .join('\n\n')
           .trim();
@@ -1075,13 +1052,46 @@ ${toolsForTurn.map((tool) => `- ${tool.name}`).join('\n')}`,
         }
       }
       /*
+       * A provisional contract was only ever a licence to investigate. Before
+       * any completion gate runs, re-audit it against what the run actually
+       * observed. Evidence collected under the provisional contract is rebound
+       * rather than inherited, so a successful audit still requires the
+       * requirement it now names to be observed. When the planner stays
+       * unusable across its bounded attempts, that is a real blocker.
+       */
+      if (reasoning.planningStatus() === 'provisional') {
+        let reaudited = false;
+        try { reaudited = await reasoning.reaudit(); }
+        catch (cause) { error = cause instanceof Error ? cause.message : String(cause); }
+        if (!reaudited) {
+          answer = [
+            'TASK_BLOCKED: the requested outcomes could not be planned into an audited evidence contract.',
+            // Report the planning failure and any separate re-audit failure:
+            // an exhausted decision budget is a different blocker than a
+            // planner whose output never validated.
+            ...new Set([reasoning.state.planning?.reason, error].filter(Boolean) as string[]),
+            'Investigation ran with the original request preserved, but completion cannot be certified without an audited contract.',
+          ].join('\n\n');
+          stopReason = 'no-progress';
+          completionState = 'BLOCKED';
+          break;
+        }
+      }
+      let goalCheck: { ok: boolean; reason: string };
+      try { goalCheck = await reasoning.verify(content); }
+      catch { goalCheck = { ok: false, reason: 'Final evidence verification did not return a valid decision.' }; }
+      if (!goalCheck.ok) {
+        retries += 1;
+        messages.push({ role: 'user', content: `GOAL EVIDENCE CHECK: completion rejected.\n${goalCheck.reason}\nResolve the missing requirements from the original request.` });
+        continue;
+      }
+      /*
        * RUNTIME COMPLETION GATE
        *
        * TASK_BLOCKED is still allowed to terminate when a real blocker exists.
        * TASK_COMPLETE must additionally satisfy the caller-owned evidence gate.
        */
       if (
-        wantsTaskComplete &&
         options.completionGuard
       ) {
         let completionCheck: {
@@ -1091,7 +1101,7 @@ ${toolsForTurn.map((tool) => `- ${tool.name}`).join('\n')}`,
 
         try {
           completionCheck =
-            await options.completionGuard();
+            await options.completionGuard(reasoning.state);
         } catch (cause) {
           completionCheck = {
             ok: false,
@@ -1138,23 +1148,10 @@ ${toolsForTurn.map((tool) => `- ${tool.name}`).join('\n')}`,
       break;
     }
 
-    let executedThisTurn = 0;
+    let evidenceProgressThisTurn = 0;
 
-    // Start a group of clearly independent, read-only requests concurrently.
-    // Results are still incorporated in model-specified order below, preserving
-    // deterministic transcripts, duplicate detection, recovery, and activity
-    // events.  A mixed group stays entirely sequential.
-    const remainingToolBudget = maxToolCalls - toolCalls;
-    const batchSignatures = requested.map(toolCallSignature);
-    const canBatchReadOnly =
-      requested.length > 1 &&
-      requested.length <= remainingToolBudget &&
-      new Set(batchSignatures).size === batchSignatures.length &&
-      requested.every((call, index) =>
-        isSafelyBatchableReadOnlyTool(call.name) &&
-        !seenCalls.has(batchSignatures[index]) &&
-        toolsForTurn.some((tool) => tool.name === call.name),
-      );
+    // Every call is assessed against the latest observation before dispatch.
+    // Do not prestart promises: a failed predecessor requires hypothesis revision.
     const executeSafely = async (call: NormalizedToolCall): Promise<LoopToolResult> => {
       try {
         return await executor.execute(call, signal);
@@ -1166,13 +1163,6 @@ ${toolsForTurn.map((tool) => `- ${tool.name}`).join('\n')}`,
         };
       }
     };
-    const batchedReadOnlyResults = new Map<string, Promise<LoopToolResult>>();
-    if (canBatchReadOnly) {
-      for (const call of requested) {
-        batchedReadOnlyResults.set(toolCallSignature(call), executeSafely(call));
-      }
-    }
-
     for (const call of requested) {
       if (signal?.aborted) {
         stopReason = 'cancelled';
@@ -1247,13 +1237,34 @@ ${toolsForTurn.map((tool) => `- ${tool.name}`).join('\n')}`,
         continue;
       }
 
+      let approvedAction: ReasonedAction | undefined;
+      let rejection = '';
+      try {
+        const decision = await reasoning.assess(call, toolsForTurn.find(tool => tool.name === call.name)!);
+        if (decision.ok) approvedAction = decision.action;
+        else rejection = decision.reason;
+      } catch { rejection = 'A valid causal decision is required before tool execution.'; }
+      if (!approvedAction) {
+        rejectedCalls += 1; retries += 1;
+        messages.push({ role: 'tool', toolName: call.name, toolCallId: call.providerCallId ?? call.id,
+          content: `REASONING ACTION REJECTED: ${rejection}` });
+        onEvent?.({ type: 'tool_result', turn: turns, toolCall: call,
+          result: { output: rejection, success: false, error: 'causal-rejection' } });
+        continue;
+      }
+
       seenCalls.add(signature);
       toolCalls += 1;
-      executedThisTurn += 1;
       onEvent?.({ type: 'tool_call', turn: turns, toolCall: call });
 
       let result: LoopToolResult;
-      result = await (batchedReadOnlyResults.get(signature) ?? executeSafely(call));
+      result = await executeSafely(call);
+      // A command can return normally while reporting a failing exit code.
+      result = { ...result, success: toolResultSucceeded(result) };
+      const observation = await reasoning.observe(call, result, approvedAction);
+      if (observation.progress) evidenceProgressThisTurn += 1;
+      reasoning.updateBudget(maxTurns - turns + 1, maxToolCalls - toolCalls);
+
 
       if (result.denied) deniedCalls += 1;
       if (result.success) succeededTools.add(call.name);
@@ -1416,10 +1427,9 @@ ${toolsForTurn.map((tool) => `- ${tool.name}`).join('\n')}`,
 
     if (stopReason === 'cancelled' || stopReason === 'tool-budget') break;
 
-    // Nothing ran this turn. Rejection messages are corrective feedback, so one
-    // such turn is allowed; repeated inability to produce an executable action
-    // means the loop is stuck.
-    if (executedThisTurn === 0) {
+    // Executed calls count as progress only when they add admissible evidence.
+    // Allow bounded correction of hypotheses; exhausting retries never proves a goal.
+    if (evidenceProgressThisTurn === 0) {
       unproductiveTurns += 1;
       if (unproductiveTurns >= maxUnproductiveTurns) {
         if (reasoningMode !== 'deep') {
@@ -1465,11 +1475,16 @@ ${toolsForTurn.map((tool) => `- ${tool.name}`).join('\n')}`,
     answer = lastAssistant?.content ?? '';
   }
 
+  if (stopReason === 'no-progress' && completionState !== 'FAILED' && !hasCompletionMarker(answer, 'TASK_BLOCKED')) {
+    completionState = 'BLOCKED';
+    answer = `TASK_BLOCKED: Evidence verification remains incomplete. Unresolved outputs: ${reasoning.unresolved().map(r => r.output).join('; ') || 'final verification'}.`;
+  }
+
   if (completionState === 'HARD_BUDGET_EXHAUSTED') {
     answer = [
       `TASK_BLOCKED: HARD_BUDGET_EXHAUSTED — the ${options.runMode ?? 'agent'} run reached its safety ceiling before verified completion.`,
       `Used ${turns}/${maxTurns} turns and ${toolCalls}/${maxToolCalls} tool calls.`,
-      answer ? `Last model response (not a completion claim):\n${answer}` : '',
+      `Unresolved required outputs: ${reasoning.unresolved().map(r => r.output).join('; ') || 'final evidence verification'}.`,
     ].filter(Boolean).join('\n\n');
   }
 
@@ -1487,6 +1502,7 @@ ${toolsForTurn.map((tool) => `- ${tool.name}`).join('\n')}`,
     usage,
     messages,
     workingState: {
+      reasoning: reasoning.state,
       reasoningMode,
       knownPaths: [...knownPaths],
       changedFiles: [...changedFiles],

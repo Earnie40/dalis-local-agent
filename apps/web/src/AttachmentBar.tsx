@@ -104,6 +104,9 @@ export function AttachmentBar({
         ref={fileRef}
         hidden
         multiple
+        id="attachment-file-input"
+        name="attachments"
+        aria-label="Attach files"
         type="file"
         accept={accept}
         onChange={(event) => {

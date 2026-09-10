@@ -1,5 +1,5 @@
 import type { ZodType, ZodTypeDef } from 'zod';
-import { UsageStore } from '@dacai-local-agent/shared';
+import { extractJsonCandidates, UsageStore } from '@dacai-local-agent/shared';
 import type { ModelChatRequest } from '@dacai-local-agent/agent-core';
 import { ProviderResolutionError, type ProviderRegistry, type ResolvedModel } from './provider-registry';
 
@@ -72,52 +72,7 @@ export interface StructuredResult<T> {
   outputTokens?: number;
 }
 
-/**
- * Every balanced top-level JSON object in a block of model text.
- *
- * Models wrap payloads in prose, markdown fences, or one-element arrays even
- * when told not to. Scanning for balanced braces recovers the payload without
- * accepting whatever the model said around it.
- */
-export function extractJsonCandidates(raw: string): unknown[] {
-  const cleaned = raw.replace(/```[a-z]*\s*/gi, '').replace(/```/g, '');
-  const found: unknown[] = [];
-  let depth = 0;
-  let start = -1;
-  let inString = false;
-  let escaped = false;
-
-  for (let index = 0; index < cleaned.length; index += 1) {
-    const character = cleaned[index];
-
-    if (inString) {
-      if (escaped) escaped = false;
-      else if (character === '\\') escaped = true;
-      else if (character === '"') inString = false;
-      continue;
-    }
-
-    if (character === '"') {
-      inString = true;
-    } else if (character === '{') {
-      if (depth === 0) start = index;
-      depth += 1;
-    } else if (character === '}') {
-      if (depth === 0) continue;
-      depth -= 1;
-      if (depth === 0 && start !== -1) {
-        try {
-          found.push(JSON.parse(cleaned.slice(start, index + 1)));
-        } catch {
-          // Braces balanced but the span is not JSON. Skip it rather than guess.
-        }
-        start = -1;
-      }
-    }
-  }
-
-  return found;
-}
+export { extractJsonCandidates } from '@dacai-local-agent/shared';
 
 /**
  * Validates the largest candidate first: an explanatory envelope wrapping the

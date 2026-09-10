@@ -8,6 +8,8 @@ export interface ToolExecutionContext {
 }
 
 export interface ToolDefinition {
+  /** Trusted source spans for adapters that observe production/local state. */
+  evidenceSources?: (result: unknown, input: Record<string, unknown>) => import('@dacai-local-agent/agent-core').EvidenceSource[];
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;

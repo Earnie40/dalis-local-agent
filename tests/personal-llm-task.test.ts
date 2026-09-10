@@ -7,6 +7,7 @@ import {
   resolveAgentTaskProfile,
 } from '../apps/server/src/operational-task';
 import {
+  CAPABILITY_REASONING_DIRECTIVE,
   isPersonalAllowedTool,
   isPersonalResearchRequest,
   isRepositoryInspectionTool,
@@ -153,5 +154,13 @@ describe('personal planning and persona', () => {
       enableRepositoryRag: false,
       enableMemory: false,
     });
+  });
+
+  it('gives personal and chat runs the general unknown-to-evidence reasoning path', () => {
+    expect(CAPABILITY_REASONING_DIRECTIVE).toContain('CAPABILITY REASONING PROTOCOL');
+    expect(CAPABILITY_REASONING_DIRECTIVE).toContain('physical/local device, transport');
+    expect(CAPABILITY_REASONING_DIRECTIVE).toContain('build and register that smallest tool or adapter');
+    expect(PERSONAL_LLM_PROMPT).toContain(CAPABILITY_REASONING_DIRECTIVE);
+    expect(PERSONAL_CHAT_PROMPT).toContain(CAPABILITY_REASONING_DIRECTIVE);
   });
 });

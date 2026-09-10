@@ -200,6 +200,20 @@ export class AgentRunStore {
   }
 
   /**
+   * Clears the history list in one statement.
+   *
+   * A run still `running` is deliberately kept: its writer is mid-flight and
+   * would re-record a half-row on finish, and "clear my history" is not a
+   * request to forget work that is still happening.
+   */
+  async removeAll(): Promise<number> {
+    const { rowCount } = await getPool().query(
+      "DELETE FROM agent_runs WHERE status <> 'running'",
+    );
+    return rowCount ?? 0;
+  }
+
+  /**
    * Reconciles runs left `running` by a process that died mid-flight. Without
    * this a killed server leaves rows that claim to be in progress forever.
    */

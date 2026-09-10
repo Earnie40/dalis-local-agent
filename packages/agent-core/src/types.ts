@@ -350,6 +350,8 @@ export interface ModelProvider {
 }
 
 export interface ToolSchema {
+  /** Runtime-owned execution target. Providers need not serialize this metadata. */
+  executionEnvironment?: { platform: string; shell: string; arch: string };
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;

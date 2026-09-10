@@ -64,6 +64,8 @@ export function registerChatRoutes(
     conversation: await conversations.create(request.body ?? {}),
   }));
 
+  server.delete('/api/conversations', async () => ({ ok: true, removed: await conversations.removeAll() }));
+
   server.delete<{ Params: { id: string } }>('/api/conversations/:id', async (request) => {
     await conversations.remove(request.params.id);
     return { ok: true };

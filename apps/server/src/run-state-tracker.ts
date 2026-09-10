@@ -6,10 +6,11 @@ import {
 import {
   rememberFailure,
 } from '@dacai-local-agent/memory';
-import { extractChangedPaths, isMutationTool } from '@dacai-local-agent/agent-core';
+import { extractChangedPaths, isMutationTool, type ReasoningState } from '@dacai-local-agent/agent-core';
 
 interface EventLike {
   type: string;
+  reasoningState?: ReasoningState;
   turn: number;
   content?: string;
   message?: string;
@@ -115,6 +116,11 @@ export class RunStateTracker {
 
   record(event: EventLike): Promise<void> {
     return this.queue(async () => {
+      if (event.type === 'reasoning_state' && event.reasoningState) {
+        this.state.validationState ??= {};
+        // Structured evidence/decision summaries only; no provider thinking.
+        this.state.validationState.reasoning = event.reasoningState;
+      }
       const tool = event.toolCall?.name;
       const args = event.toolCall?.arguments;
       const result = event.result;

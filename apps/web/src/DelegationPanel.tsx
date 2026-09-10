@@ -174,7 +174,7 @@ export function DelegationPanel() {
           <div className="intel-form-inline">
             <label className="field">
               <span className="muted small">Agent role</span>
-              <select value={role} onChange={(event) => setRole(event.target.value)}>
+              <select name="agentRole" value={role} onChange={(event) => setRole(event.target.value)}>
                 {roles.map((entry) => (
                   <option key={entry.id} value={entry.id}>
                     {entry.id} · {entry.alias} {entry.readOnly ? '(read-only)' : '(can edit)'}
@@ -185,7 +185,7 @@ export function DelegationPanel() {
 
             <label className="field">
               <span className="muted small">Workspace</span>
-              <select value={workspaceId} onChange={(event) => setWorkspaceId(event.target.value)}>
+              <select name="workspaceId" value={workspaceId} onChange={(event) => setWorkspaceId(event.target.value)}>
                 {workspaces.map((workspace) => (
                   <option key={workspace.id} value={workspace.id}>
                     {workspace.displayName}
@@ -207,6 +207,7 @@ export function DelegationPanel() {
           <label className="field">
             <span className="muted small">Objective</span>
             <textarea
+              name="objective"
               rows={3}
               value={objective}
               placeholder="What should the agent do? Be specific about scope and what counts as done."
@@ -217,7 +218,7 @@ export function DelegationPanel() {
           <div className="intel-form-inline">
             <label className="field">
               <span className="muted small">When</span>
-              <select value={when} onChange={(event) => setWhen(event.target.value as typeof when)}>
+              <select name="when" value={when} onChange={(event) => setWhen(event.target.value as typeof when)}>
                 <option value="now">Run now</option>
                 <option value="once">Once, at a set time</option>
                 <option value="interval">Repeat on an interval</option>
@@ -229,6 +230,7 @@ export function DelegationPanel() {
               <label className="field">
                 <span className="muted small">Frequency</span>
                 <select
+                  name="intervalSeconds"
                   value={intervalSeconds}
                   onChange={(event) => setIntervalSeconds(Number(event.target.value))}
                 >
@@ -245,6 +247,7 @@ export function DelegationPanel() {
               <label className="field">
                 <span className="muted small">{when === 'once' ? 'Run at' : 'First run'}</span>
                 <input
+                  name="firstRunAt"
                   type="datetime-local"
                   value={firstRunAt}
                   onChange={(event) => setFirstRunAt(event.target.value)}

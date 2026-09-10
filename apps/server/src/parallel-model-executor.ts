@@ -120,6 +120,7 @@ const READ_ONLY_TOOL_NAMES = new Set([
   'filesystem.stat',
   'git.run',
   'system.network.info',
+  'system.wifi.scan',
   'web.search',
   'web.fetch',
   'download.approved',

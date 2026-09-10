@@ -36,9 +36,18 @@ function parseSkill(path: string, raw: string): SkillDefinition {
     if (end !== -1) {
       const frontmatter = body.slice(3, end).trim();
       body = body.slice(end + 4).trim();
+      let metadata = false;
       for (const line of frontmatter.split(/\r?\n/)) {
+        const nested = /^\s+([A-Za-z0-9_-]+)\s*:\s*(.*)$/.exec(line);
+        if (metadata && nested?.[1].toLowerCase() === 'tags') {
+          meta.tags = nested[2].trim().replace(/^['"]|['"]$/g, '');
+          continue;
+        }
         const match = /^([A-Za-z0-9_-]+)\s*:\s*(.*)$/.exec(line);
-        if (match) meta[match[1].toLowerCase()] = match[2].trim().replace(/^['"]|['"]$/g, '');
+        if (match) {
+          metadata = match[1].toLowerCase() === 'metadata';
+          meta[match[1].toLowerCase()] = match[2].trim().replace(/^['"]|['"]$/g, '');
+        }
       }
     }
   }

@@ -13,3 +13,4 @@ export * from './db/audit-store';
 export * from './db/red-team-stores';
 export * from './db/defensive-testing-stores';
 export * from './db/memory-store';
+export * from './structured-json';

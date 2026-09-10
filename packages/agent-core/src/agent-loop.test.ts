@@ -1,6 +1,11 @@
+import { reasoningProtocolFixture } from '../../../tests/reasoning-protocol-fixture';
+import type { AgentLoopOptions } from './agent-loop';
+function runAgentLoop(options: AgentLoopOptions) {
+  return runCoreAgentLoop({ reasoningProvider: reasoningProtocolFixture(), ...options });
+}
 import { describe, expect, it } from 'vitest';
 import type { ModelChatRequest, ModelChatResponse, ModelProvider, NormalizedToolCall, ToolSchema } from './types';
-import { runAgentLoop, type LoopToolResult, type ToolExecutor } from './agent-loop';
+import { runAgentLoop as runCoreAgentLoop, type LoopToolResult, type ToolExecutor } from './agent-loop';
 
 function response(content: string, toolCalls?: NormalizedToolCall[]): ModelChatResponse {
   return {
@@ -27,7 +32,7 @@ function provider(turns: Array<(request: ModelChatRequest) => ModelChatResponse>
 }
 
 function executor(tools: ToolSchema[], run: (call: NormalizedToolCall) => LoopToolResult): ToolExecutor {
-  return { listTools: () => tools, execute: async (call) => run(call) };
+  return { listTools: () => tools, execute: async (call) => { const result = run(call); return { ...result, sources: [{ id: 'fixture', locator: 'isolated-loop-fixture', provenance: 'fixture', content: result.output, effect: 'read' }] }; } };
 }
 
 const capabilities = { toolCalling: 'verified' as const, streaming: 'verified' as const, contextWindow: 32768 };

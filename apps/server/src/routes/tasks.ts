@@ -18,6 +18,7 @@ import {
   READ_ONLY_FILESYSTEM_TOOLS,
   READ_ONLY_SHELL_TOOLS,
   SHELL_TOOLS,
+  SYSTEM_TOOLS,
   ToolRegistry,
   WEB_TOOLS,
   REPOSITORY_INTELLIGENCE_TOOLS,
@@ -167,19 +168,24 @@ export function registerTaskRoutes(
 
       await runner.run(task, async (signal) => {
         const tools = new ToolRegistry();
-        const personalTask = classifyAgentTaskKind(task.objective) === 'personal'
+        const taskKind = classifyAgentTaskKind(task.objective);
+        const personalTask = taskKind === 'personal'
           && resolvedRunMode.mode !== 'repository_audit';
         const available = personalTask
           ? (effective.network ? WEB_TOOLS.filter((tool) => isPersonalAllowedTool(tool.name)) : [])
           : [
               ...(effective.write ? FILESYSTEM_TOOLS : READ_ONLY_FILESYSTEM_TOOLS),
               ...(effective.shell ? SHELL_TOOLS : READ_ONLY_SHELL_TOOLS),
+              ...SYSTEM_TOOLS,
               ...(effective.network ? WEB_TOOLS : []),
               ...(resolvedRunMode.mode === 'repository_audit' ? REPOSITORY_INTELLIGENCE_TOOLS : []),
             ];
         for (const tool of available) {
           const auditReadOnlyTool = resolvedRunMode.mode === 'repository_audit' && tool.name.startsWith('code.');
-          if (personalTask || auditReadOnlyTool || !role.tools || role.tools.includes(tool.name)) tools.register(tool);
+          const operationalObservation = taskKind === 'operational' && tool.name.startsWith('system.');
+          if (personalTask || auditReadOnlyTool || operationalObservation || !role.tools || role.tools.includes(tool.name)) {
+            tools.register(tool);
+          }
         }
 
         const executor = new PermissionedToolExecutor({
@@ -215,7 +221,7 @@ export function registerTaskRoutes(
         // Build augmented system prompt with context
         let systemPrompt = [
           personalTask ? PERSONAL_LLM_PROMPT : role.systemPrompt,
-          personalTask ? taskProfile.directive : '',
+          taskProfile.directive,
           resolvedRunMode.mode === 'repository_audit' ? repositoryAuditInstructions() : '',
         ].filter(Boolean).join('\n\n');
         try {

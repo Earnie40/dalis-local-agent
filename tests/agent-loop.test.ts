@@ -1,7 +1,12 @@
+import { reasoningProtocolFixture } from './reasoning-protocol-fixture';
+import type { AgentLoopOptions } from '../packages/agent-core/src/agent-loop';
+function runAgentLoop(options: AgentLoopOptions) {
+  return runCoreAgentLoop({ reasoningProvider: reasoningProtocolFixture(), ...options });
+}
 import { describe, expect, it } from 'vitest';
 import {
   AgentCapabilityError,
-  runAgentLoop,
+  runAgentLoop as runCoreAgentLoop,
   selectToolsForTurn,
   toolCallSignature,
   truncateToolOutput,
@@ -72,7 +77,8 @@ function executor(
     listTools: () => tools,
     async execute(call) {
       calls.push(call);
-      return handler(call);
+      const result = await handler(call);
+      return { ...result, sources: result.sources ?? [{ id: 'fixture', locator: 'isolated-loop-fixture', provenance: 'fixture', content: result.output, effect: 'read' }] };
     },
   };
 }
@@ -194,40 +200,23 @@ describe('agent loop', () => {
     ]));
   });
 
-  it('starts distinct read-only repository calls concurrently while preserving result order', async () => {
-    const readOnlyTools: ToolSchema[] = ['filesystem.read', 'filesystem.search'].map((name) => ({
-      name,
-      description: name,
-      inputSchema: { type: 'object', properties: { path: { type: 'string' } } },
-    }));
+  it('assesses each read-only call after incorporating the preceding result', async () => {
     const started: string[] = [];
-    let release: (() => void) | undefined;
-    let bothStarted: (() => void) | undefined;
-    const executionGate = new Promise<void>((resolve) => { release = resolve; });
-    const allStarted = new Promise<void>((resolve) => { bothStarted = resolve; });
-
-    const run = runAgentLoop({
+    let firstObserved = false;
+    const result = await runAgentLoop({
       provider: scriptedProvider([
         { toolCalls: [call('filesystem.read', { path: 'a.ts' }, 'read'), call('filesystem.search', { path: 'src' }, 'search')] },
         { content: 'Evidence collected.' },
       ]),
       model: 'm', capabilities: VERIFIED,
       executor: executor(async (requested) => {
+        if (requested.name === 'filesystem.search') expect(firstObserved).toBe(true);
         started.push(requested.name);
-        if (started.length === 2) bothStarted?.();
-        await executionGate;
         return { output: requested.name, success: true };
-      }, readOnlyTools),
+      }, ['filesystem.read', 'filesystem.search'].map(name => ({ name, description: name, inputSchema: { type: 'object' } }))),
       prompt: 'Inspect the repository.',
+      onEvent: event => { if (event.type === 'tool_result' && event.toolCall?.name === 'filesystem.read') firstObserved = true; },
     });
-
-    await Promise.race([
-      allStarted,
-      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('read-only calls were not batched')), 250)),
-    ]);
-    release?.();
-    const result = await run;
-
     expect(started).toEqual(['filesystem.read', 'filesystem.search']);
     expect(result.toolCalls).toBe(2);
     expect(result.answer).toBe('Evidence collected.');
@@ -384,7 +373,7 @@ describe('malformed and wasteful calls', () => {
     expect(exec.calls).toHaveLength(2);
   });
 
-  it('gives the model one turn to recover, then stops if it cannot', async () => {
+  it('honors a caller-selected two-turn limit for unproductive calls', async () => {
     const result = await runAgentLoop({
       provider: scriptedProvider([{ content: 'thinking', toolCalls: [call('nope')] }]),
       model: 'm',
@@ -392,6 +381,7 @@ describe('malformed and wasteful calls', () => {
       executor: executor(() => ({ output: 'ok', success: true })),
       prompt: 'go',
       maxTurns: 8,
+      maxUnproductiveTurns: 2,
     });
 
     // Turn 1 is corrective feedback; turn 2 repeats the mistake, so it stops
@@ -468,7 +458,8 @@ describe('bounds', () => {
     expect(result.turns).toBe(3);
     expect(result.completionState).toBe('HARD_BUDGET_EXHAUSTED');
     expect(result.answer).toContain('HARD_BUDGET_EXHAUSTED');
-    expect(result.answer).toContain('still working');
+    expect(result.answer).toContain('Unresolved required outputs');
+    expect(result.answer).not.toContain('still working');
   });
 
   it('stops when the tool-call budget is spent', async () => {
@@ -572,7 +563,10 @@ describe('event stream', () => {
       onEvent: (event) => events.push(event.type),
     });
 
-    expect(events).toEqual(['budget', 'model_request', 'model_response', 'tool_call', 'tool_result', 'budget', 'model_request', 'model_response']);
+    // Reasoning control events are a separate diagnostic channel; the public
+    // transcript order is what this asserts.
+    const transcript = events.filter(event => event !== 'reasoning_state' && event !== 'reasoning_diagnostic');
+    expect(transcript).toEqual(['budget', 'model_request', 'model_response', 'tool_call', 'tool_result', 'budget', 'model_request', 'model_response']);
   });
 });
 
@@ -697,7 +691,7 @@ describe('evidence requirement drives per-turn tool exposure', () => {
     expect(result.turns).toBe(2);
   });
 
-  it('still hides runtime tools by default so ordinary coding turns stay compact', async () => {
+  it('retains registered runtime tools for semantic admission on unfamiliar tasks', async () => {
     const provider = scriptedProvider([{ content: 'done' }]);
     await runAgentLoop({
       provider,
@@ -706,7 +700,7 @@ describe('evidence requirement drives per-turn tool exposure', () => {
       executor: executor(() => ({ output: 'ok', success: true }), runTools),
       prompt: 'Explain how the parser module is structured.',
     });
-    expect(provider.requests[0].tools?.map((tool) => tool.name)).not.toContain('wsl.run');
+    expect(provider.requests[0].tools?.map((tool) => tool.name)).toContain('wsl.run');
   });
 
   it('a repository evidence requirement is not satisfied by live-system output', async () => {
@@ -717,6 +711,8 @@ describe('evidence requirement drives per-turn tool exposure', () => {
     ]);
     const result = await runAgentLoop({
       provider,
+      reasoningProvider: reasoningProtocolFixture('repository'),
+      maxTurns: 5,
       model: 'm',
       capabilities: VERIFIED,
       executor: executor(() => ({ output: 'hi', success: true }), runTools),

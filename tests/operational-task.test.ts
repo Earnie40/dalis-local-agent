@@ -7,11 +7,12 @@ import {
   evidenceRequirementFor,
   executionScopeForAction,
   isOperationalRequest,
+  isWifiDiscoveryRequest,
   operationalConstraintsInstructions,
   resolveAgentTaskProfile,
 } from '../apps/server/src/operational-task';
 
-const LIVE_TOOLS = ['shell.run', 'wsl.run', 'wsl.list', 'system.network.info', 'filesystem.search'];
+const LIVE_TOOLS = ['shell.run', 'wsl.run', 'wsl.list', 'system.network.info', 'system.wifi.scan', 'filesystem.search'];
 
 describe('operational vs. repository request detection', () => {
   it('1. an operational network request is not mapped to repository inspection', () => {
@@ -46,6 +47,50 @@ describe('operational vs. repository request detection', () => {
   it('does not misfire on coding prose that merely resembles system words', () => {
     // "service layer" / "network module" are code nouns, not host administration.
     expect(isOperationalRequest('refactor the service layer in the network module')).toBe(false);
+  });
+
+  it('routes nearby Wi-Fi discovery to the dedicated scan evidence', () => {
+    const prompt = 'Locate the network my truck broadcasts.';
+    const profile = resolveAgentTaskProfile({ prompt, availableTools: LIVE_TOOLS });
+
+    expect(isWifiDiscoveryRequest(prompt)).toBe(true);
+    expect(isOperationalRequest(prompt)).toBe(true);
+    expect(profile.kind).toBe('operational');
+    expect(profile.evidenceRequirement?.tools).toEqual(['system.wifi.scan']);
+    expect(profile.directive).toContain('Call system.wifi.scan first');
+    expect(profile.directive).toContain('system.network.info only reports the current connection');
+  });
+
+  it('does not mistake repository network searches for nearby Wi-Fi discovery', () => {
+    expect(isWifiDiscoveryRequest('Find the network module in this repository')).toBe(false);
+  });
+
+  it('routes an action on a vehicle interface to live-system reasoning without classifying ordinary questions', () => {
+    const livePrompt = 'Pair my Bluetooth OBD-II adapter and inspect the vehicle diagnostic interface.';
+    const diagnosticsPrompt = 'Connect to my OBD-II adapter for vehicle diagnostics.';
+    const ordinaryQuestion = 'What is the history of OnStar and how does Bluetooth work?';
+
+    expect(isOperationalRequest(livePrompt)).toBe(true);
+    expect(isOperationalRequest(diagnosticsPrompt)).toBe(true);
+    expect(resolveAgentTaskProfile({ prompt: livePrompt, availableTools: LIVE_TOOLS }).kind).toBe('operational');
+    expect(isOperationalRequest(ordinaryQuestion)).toBe(false);
+  });
+
+  it('keeps implementation work for a vehicle adapter on the repository path', () => {
+    const codingPrompt = 'Implement and test an OBD-II Bluetooth adapter in this repository.';
+
+    expect(isOperationalRequest(codingPrompt)).toBe(false);
+    expect(resolveAgentTaskProfile({ prompt: codingPrompt, availableTools: LIVE_TOOLS }).kind).toBe('repository');
+  });
+
+  it('gives live vehicle-interface work the unknown-to-evidence reasoning protocol', () => {
+    const profile = resolveAgentTaskProfile({
+      prompt: 'Pair my Bluetooth OBD-II adapter and query the vehicle.',
+      availableTools: LIVE_TOOLS,
+    });
+
+    expect(profile.directive).toContain('CAPABILITY REASONING PROTOCOL');
+    expect(profile.directive).toContain('adapter model/firmware/transport');
   });
 });
 

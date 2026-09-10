@@ -58,7 +58,10 @@ body {
 }
 
 .conversation {
+  /* `flex: 0 0 auto` keeps the row at its content height; the scrolling column
+     would otherwise shrink it back to the 48px floor and clip the model line. */
   display: flex;
+  flex: 0 0 auto;
   align-items: stretch;
   min-height: 48px;
   border-radius: 8px;
@@ -90,6 +93,9 @@ body {
 }
 
 .conversation-title {
+  /* Without `flex: 0 0 auto` the title is shrunk to zero height whenever the
+     model line below it wraps to two lines, leaving a row with no title. */
+  flex: 0 0 auto;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -381,30 +387,72 @@ button.icon {
   height: 100%;
 }
 
-.agent-sessions {
-  grid-column: 1 / -1;
+/*
+ * Run history lives in the sidebar, mirroring `.conversations`.
+ *
+ * It was previously a horizontal strip across the top of the panel
+ * (`grid-column: 1 / -1` + `overflow-x: auto`) holding fixed 180px cards. That
+ * was survivable while history was a handful of localStorage sessions, but
+ * server-persisted history lists up to 100 runs, which made the row ~27,000px
+ * wide, forced the whole page to scroll sideways, and pushed the composer and
+ * controls off-window. Vertical in the sidebar scrolls the one direction the
+ * sidebar already scrolls and never widens the page.
+ */
+.sidebar-history {
   display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 28px;
-  background: var(--panel);
-  border-bottom: 1px solid var(--border);
-  overflow-x: auto;
+  flex: 1;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
 }
 
-.agent-session-list {
+.agent-sessions {
   display: flex;
-  gap: 6px;
-  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 4px;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 .agent-session {
+  /* `flex: 0 0 auto` matters in a scrolling column: with 100 rows the default
+     flex-shrink squashes every card to a few pixels instead of scrolling. */
   display: flex;
-  min-width: 180px;
-  max-width: 260px;
+  flex: 0 0 auto;
+  align-items: stretch;
+  width: 100%;
+  min-width: 0;
+  min-height: 48px;
   text-align: left;
   padding: 0;
   overflow: hidden;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+/* Clears the whole list; sits below it in both chat and agent mode. */
+.history-clear {
+  flex: 0 0 auto;
+  padding: 8px;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+.history-clear:hover:not(:disabled),
+.history-clear:focus-visible {
+  color: var(--danger, #ef4444);
+  border-color: var(--danger, #ef4444);
+}
+
+.history-clear:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .agent-session-open {
