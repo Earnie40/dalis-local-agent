@@ -48,7 +48,7 @@ import {
 } from '../workspace-uploads';
 import { PrecisionMediaExecutor } from '../precision-media';
 import { LoopTraceRecorder } from '@dacai-local-agent/training-traces';
-import { PermissionAuditStore, UsageStore } from '@dacai-local-agent/shared';
+import { AgentRunStore, PermissionAuditStore, UsageStore } from '@dacai-local-agent/shared';
 import { createId } from '@dacai-local-agent/shared';
 import { CARRIED_HEADERS, sseFrame } from './chat';
 import { ApprovalRegistry, approvalRequestPayload } from '../approvals';
@@ -872,6 +872,7 @@ export function registerAgentRoutes(
   const workspaces = new PostgresWorkspaceRegistry();
   const usage = new UsageStore();
   const auditStore = new PermissionAuditStore();
+  const agentRuns = new AgentRunStore();
   const contextManager = new ContextManager();
   const memoryStore = new MemoryStore();
   const codingGraph = new DurableCodingAgentGraph(deps.config.databaseUrl);
@@ -922,6 +923,46 @@ export function registerAgentRoutes(
   });
 
   server.get('/api/audit', async () => ({ entries: await auditStore.recent(100) }));
+
+  /*
+   * Run history. `/api/agent/runs/:runId/activity` could only answer for a
+   * run id the caller already held, so the client kept its session list in
+   * browser localStorage and history did not survive a cleared profile or
+   * follow the operator to another machine. These make the persisted runs
+   * enumerable.
+   */
+  server.get<{ Querystring: { limit?: string; workspaceId?: string; sessionId?: string } }>(
+    '/api/agent/runs',
+    async (request, reply) => {
+      const rawLimit = request.query.limit;
+      if (rawLimit !== undefined) {
+        const limit = Number(rawLimit);
+        if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
+          return reply.code(400).send({ error: 'limit must be an integer between 1 and 200.' });
+        }
+      }
+      return {
+        runs: await agentRuns.list({
+          limit: rawLimit === undefined ? undefined : Number(rawLimit),
+          workspaceId: request.query.workspaceId,
+          sessionId: request.query.sessionId,
+        }),
+      };
+    },
+  );
+
+  server.get<{ Params: { runId: string } }>('/api/agent/runs/:runId', async (request, reply) => {
+    const run = await agentRuns.get(request.params.runId);
+    if (!run) return reply.code(404).send({ error: 'Unknown run.' });
+    return { run, events: await listAgentActivity(request.params.runId, 0) };
+  });
+
+  server.delete<{ Params: { runId: string } }>('/api/agent/runs/:runId', async (request, reply) => {
+    const run = await agentRuns.get(request.params.runId);
+    if (!run) return reply.code(404).send({ error: 'Unknown run.' });
+    await agentRuns.remove(request.params.runId);
+    return { ok: true };
+  });
 
   server.get<{ Params: { runId: string }; Querystring: { after?: string } }>(
     '/api/agent/runs/:runId/activity',
@@ -1360,6 +1401,30 @@ export function registerAgentRoutes(
       sessionId: body.sessionId,
       onEvent: (event) => write('activity', event),
     });
+
+    /*
+     * Record the run before any work happens, so it is listable while still in
+     * flight and still on record if this process dies mid-run. History that
+     * only appears on success is not history.
+     *
+     * Failing to record must never take down the run itself: this is
+     * observability, not execution.
+     */
+    try {
+      await agentRuns.start({
+        id: runId,
+        workspaceId: workspace.id,
+        sessionId: body.sessionId,
+        objective: effectivePrompt,
+        alias: resolved.alias,
+        model: resolved.model,
+        providerInstanceId: resolved.instance.id,
+        role: body.role ?? 'coding',
+        runMode: resolvedRunMode.mode,
+      });
+    } catch (error) {
+      request.log.warn({ err: error, runId }, 'Could not record agent run history.');
+    }
 
     if (!personalRun) {
       for (
@@ -2474,11 +2539,35 @@ export function registerAgentRoutes(
         })),
         parallelSynthesis: parallelExecution?.synthesis,
       });
+
+      try {
+        await agentRuns.finish(runId, {
+          status:
+            result.completionState === 'GOAL_COMPLETE' || result.completionState === 'VERIFICATION_COMPLETE'
+              ? 'completed'
+              : result.completionState === 'CANCELLED'
+                ? 'cancelled'
+                : result.completionState === 'BLOCKED' || result.completionState === 'HARD_BUDGET_EXHAUSTED'
+                  ? 'blocked'
+                  : 'failed',
+          answer: result.answer,
+          model: resolved.model,
+          providerInstanceId: resolved.instance.id,
+        });
+      } catch (error) {
+        request.log.warn({ err: error, runId }, 'Could not finalize agent run history.');
+      }
     } catch (error) {
       const message = error instanceof AgentCapabilityError ? error.message : String(error);
       await stateTracker.fail(message);
       await activity.emit({ type: 'error', status: 'failed', title: 'Agent run failed', message });
       write('error', { message });
+
+      try {
+        await agentRuns.finish(runId, { status: 'failed', error: message });
+      } catch (historyError) {
+        request.log.warn({ err: historyError, runId }, 'Could not record agent run failure.');
+      }
     }
 
     if (!reply.raw.writableEnded) reply.raw.end();

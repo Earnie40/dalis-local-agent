@@ -228,6 +228,25 @@ export type AgentActivityType =
   | 'file_edit' | 'test' | 'verification' | 'warning' | 'error' | 'success'
   | 'next_step' | 'model' | 'system';
 
+export interface AgentRun {
+  id: string;
+  workspaceId: string;
+  sessionId?: string;
+  title: string;
+  objective?: string;
+  alias?: string;
+  model?: string;
+  providerInstanceId?: string;
+  role?: string;
+  runMode?: string;
+  status: 'running' | 'completed' | 'failed' | 'blocked' | 'cancelled';
+  answer?: string;
+  error?: string;
+  startedAt: string;
+  endedAt?: string;
+  eventCount?: number;
+}
+
 export interface AgentActivityEvent {
   id: string;
   workspaceId: string;
@@ -410,6 +429,17 @@ export const api = {
   ),
   agentActivity: (runId: string, after = 0) =>
     json<{ events: AgentActivityEvent[] }>(`/api/agent/runs/${encodeURIComponent(runId)}/activity?after=${after}`),
+  listAgentRuns: (options: { limit?: number; workspaceId?: string } = {}) => {
+    const query = new URLSearchParams();
+    if (options.limit !== undefined) query.set('limit', String(options.limit));
+    if (options.workspaceId) query.set('workspaceId', options.workspaceId);
+    const suffix = query.toString();
+    return json<{ runs: AgentRun[] }>(`/api/agent/runs${suffix ? `?${suffix}` : ''}`);
+  },
+  agentRun: (runId: string) =>
+    json<{ run: AgentRun; events: AgentActivityEvent[] }>(`/api/agent/runs/${encodeURIComponent(runId)}`),
+  deleteAgentRun: (runId: string) =>
+    json<{ ok: boolean }>(`/api/agent/runs/${encodeURIComponent(runId)}`, { method: 'DELETE' }),
 
   // Red-team engagements: authorized targets, categories, and time window.
   listEngagements: (customerId: string) =>

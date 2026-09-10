@@ -2,7 +2,7 @@ import { fileURLToPath } from 'node:url';
 import Fastify from 'fastify';
 import fastifyMultipart from '@fastify/multipart';
 import { config as loadEnv } from 'dotenv';
-import { loadAppConfigResult, redactDatabaseUrl, runMigrations, verifyConnection } from '@dacai-local-agent/shared';
+import { AgentRunStore, loadAppConfigResult, redactDatabaseUrl, runMigrations, verifyConnection } from '@dacai-local-agent/shared';
 import type { AppConfigLoadResult } from '@dacai-local-agent/shared';
 import {
   groupModels,
@@ -365,6 +365,20 @@ const start = async () => {
     await verifyConnection(config.databaseUrl);
     const { applied, alreadyCurrent } = await runMigrations();
     server.log.info({ applied, alreadyCurrent: alreadyCurrent.length }, 'PostgreSQL schema is current');
+
+    /*
+     * A run row stays 'running' until its own request finishes it, so a server
+     * killed mid-run leaves history claiming work is still in progress that no
+     * writer will ever resolve. Reconcile those once at boot.
+     */
+    try {
+      const reconciled = await new AgentRunStore().failStaleRuns();
+      if (reconciled > 0) {
+        server.log.info({ reconciled }, 'Marked interrupted agent runs as failed.');
+      }
+    } catch (error) {
+      server.log.warn({ err: error }, 'Could not reconcile interrupted agent runs.');
+    }
 
     // Task registration starts reconciliation immediately. Register it only
     // after migrations so its queries cannot race the startup connection or

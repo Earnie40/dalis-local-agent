@@ -7,6 +7,7 @@ export * from './media-intent';
 export * from './db/pool';
 export * from './db/migrate';
 export * from './db/conversation-store';
+export * from './db/agent-run-store';
 export * from './db/usage-store';
 export * from './db/audit-store';
 export * from './db/red-team-stores';

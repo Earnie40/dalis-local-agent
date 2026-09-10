@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { api, streamAgent, type AgentActivityEvent, type AgentEvent, type Upload, type Workspace } from './api';
+import { api, streamAgent, type AgentActivityEvent, type AgentEvent, type AgentRun, type Upload, type Workspace } from './api';
 import { AttachmentBar } from './AttachmentBar';
 import {
   agentConversationHistory,
@@ -14,6 +14,8 @@ import { useStickToBottom } from './use-stick-to-bottom';
 interface AgentSession {
   id: string;
   title: string;
+  /** Present when this entry came from server run history rather than this browser. */
+  remote?: { status: AgentRun['status']; startedAt: string; eventCount?: number };
   events: AgentEvent[];
   activityEvents?: AgentActivityEvent[];
   runIds?: string[];
@@ -164,8 +166,56 @@ export function AgentPanel() {
     }
   }, []);
 
+  /*
+   * Agent history used to live only in this browser's localStorage, so it died
+   * with a cleared profile and never followed the operator to another machine —
+   * while every run's activity sat in PostgreSQL, unreachable because nothing
+   * could enumerate run ids. Merge the server's run list in as the durable
+   * source, keeping any local session that already covers the same run.
+   */
   useEffect(() => {
-    localStorage.setItem(AGENT_SESSIONS_KEY, JSON.stringify(sessions.slice(0, 30)));
+    let cancelled = false;
+
+    api.listAgentRuns({ limit: 100 })
+      .then(({ runs }) => {
+        if (cancelled) return;
+        setSessions((current) => {
+          const covered = new Set(current.flatMap((session) => session.runIds ?? [session.id]));
+          const additions = runs
+            .filter((run) => !covered.has(run.id))
+            .map<AgentSession>((run) => ({
+              id: run.id,
+              title: run.title,
+              events: [],
+              runIds: [run.id],
+              workspaceId: run.workspaceId,
+              alias: run.alias,
+              role: run.role as AgentSession['role'],
+              runMode: run.runMode as AgentSession['runMode'],
+              updatedAt: run.endedAt ?? run.startedAt,
+              remote: { status: run.status, startedAt: run.startedAt, eventCount: run.eventCount },
+            }));
+
+          if (additions.length === 0) return current;
+          return [...current, ...additions].sort(
+            (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
+          );
+        });
+      })
+      // History enrichment must never break the panel: local sessions still work.
+      .catch(() => undefined);
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    // Only this browser's own transcripts belong in localStorage. Persisting the
+    // server list too would let 100 remote rows evict real local work from the
+    // 30-entry cap.
+    const local = sessions.filter((session) => !session.remote);
+    localStorage.setItem(AGENT_SESSIONS_KEY, JSON.stringify(local.slice(0, 30)));
   }, [sessions]);
 
   useEffect(() => {
@@ -411,7 +461,18 @@ export function AgentPanel() {
 
   const deleteSession = useCallback((id: string) => {
     if (running) return;
+    const removed = sessions.find((session) => session.id === id);
     setSessions((current) => current.filter((session) => session.id !== id));
+
+    /*
+     * Drop the server-side history too, or the next history refresh re-adds
+     * the row the operator just deleted. Best-effort: a purely local session
+     * has no server row, and a failed delete must not block the UI.
+     */
+    for (const runId of removed?.runIds ?? []) {
+      void api.deleteAgentRun(runId).catch(() => undefined);
+    }
+
     if (sessionId === id) {
       setSessionId(undefined);
       setEvents([]);
@@ -420,7 +481,7 @@ export function AgentPanel() {
       setAttachments([]);
       setError(undefined);
     }
-  }, [running, sessionId]);
+  }, [running, sessionId, sessions]);
 
   const openSession = useCallback((session: AgentSession) => {
     if (running) return;
@@ -462,12 +523,21 @@ export function AgentPanel() {
       <aside className="agent-sessions">
         <button type="button" className="primary" onClick={newSession}>+ New agent conversation</button>
         <div className="agent-session-list">
-          {sessions.length === 0 && <p className="muted small">No saved agent conversations.</p>}
+          {sessions.length === 0 && <p className="muted small">No agent runs yet.</p>}
           {sessions.map((session) => (
             <div key={session.id} className={`agent-session ${session.id === sessionId ? 'active' : ''}`}>
               <button type="button" className="agent-session-open" onClick={() => openSession(session)}>
                 <strong>{session.title}</strong>
-                <span>{new Date(session.updatedAt).toLocaleString()}</span>
+                <span>
+                  {new Date(session.updatedAt).toLocaleString()}
+                  {session.remote && (
+                    <>
+                      {' · '}
+                      <em className={`agent-session-status ${session.remote.status}`}>{session.remote.status}</em>
+                      {session.remote.eventCount ? ` · ${session.remote.eventCount} events` : ''}
+                    </>
+                  )}
+                </span>
               </button>
               <button
                 type="button"

@@ -421,6 +421,19 @@ button.icon {
   border: 0;
 }
 
+/* Run outcome in the history sidebar. Colour is a second signal only: the
+   status word itself is always present for anyone who cannot distinguish it. */
+.agent-session-status {
+  font-style: normal;
+  font-weight: 600;
+}
+
+.agent-session-status.completed { color: #2f855a; }
+.agent-session-status.failed    { color: #c53030; }
+.agent-session-status.blocked   { color: #b7791f; }
+.agent-session-status.cancelled { color: #718096; }
+.agent-session-status.running   { color: #2b6cb0; }
+
 .agent-session-delete {
   flex: 0 0 auto;
   align-self: stretch;
