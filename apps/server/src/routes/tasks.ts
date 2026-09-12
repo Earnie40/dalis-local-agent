@@ -1,10 +1,10 @@
 import type { FastifyInstance } from 'fastify';
 import type { AppConfig } from '@dacai-local-agent/shared';
-import { createId, PermissionAuditStore, UsageStore } from '@dacai-local-agent/shared';
+import { createId, PermissionAuditStore, RedTeamEngagementStore, UsageStore } from '@dacai-local-agent/shared';
 import { runAgentLoop } from '@dacai-local-agent/agent-core';
 import type { ProviderRegistry } from '@dacai-local-agent/providers';
 import { getWorkerRole, WORKER_ROLE_IDS } from '@dacai-local-agent/agents';
-import { ScheduleStore, ScheduleValidationError, TaskRunner } from '@dacai-local-agent/orchestrator';
+import { ScheduleStore, ScheduleValidationError, SwarmStore, TaskRunner } from '@dacai-local-agent/orchestrator';
 import type { ScheduleKind, TaskRecord } from '@dacai-local-agent/orchestrator';
 import { PostgresWorkspaceRegistry } from '@dacai-local-agent/workspace';
 import { LoopTraceRecorder, TraceStore } from '@dacai-local-agent/training-traces';
@@ -27,6 +27,14 @@ import { repositoryAuditInstructions, resolveAgentRunMode } from '../agent-run-m
 import { resolveTaskModel } from '../task-model-routing';
 import { classifyAgentTaskKind, resolveAgentTaskProfile } from '../operational-task';
 import { PERSONAL_LLM_PROMPT, isPersonalAllowedTool } from '../personal-llm-task';
+import {
+  createSwarmSynthesisObjective,
+  planSwarmMembers,
+  SwarmPlanError,
+  type SwarmMemberPlan,
+  type SwarmStrategy,
+} from '../swarm-plan';
+import { resolveSwarmQwenModel, SWARM_QWEN_ALIAS } from '../swarm-model';
 
 /**
  * The delegated-task surface.
@@ -45,6 +53,20 @@ interface CreateTaskBody {
   source?: 'ui' | 'mcp' | 'internal';
   maxTurns?: number;
   runMode?: 'interactive' | 'coding' | 'repository_audit' | 'deep_research';
+}
+
+interface CreateSwarmBody {
+  objective: string;
+  workspaceId: string;
+  strategy?: SwarmStrategy;
+  engagementId?: string;
+  size?: number;
+  members?: Array<{
+    role: string;
+    objective: string;
+    alias?: string;
+  }>;
+  source?: 'ui' | 'mcp' | 'internal';
 }
 
 interface CreateScheduleBody {
@@ -93,6 +115,8 @@ export function registerTaskRoutes(
     maxTaskDepth: deps.config.limits.maxTaskDepth,
   });
   const schedules = new ScheduleStore();
+  const swarms = new SwarmStore();
+  const engagements = new RedTeamEngagementStore();
   const contextManager = new ContextManager();
 
   server.get('/api/roles', async () => ({
@@ -389,6 +413,52 @@ export function registerTaskRoutes(
   // and the point where TaskRunner accounts for it.
   let inFlight = 0;
   let draining = false;
+  let advancingSwarms = false;
+
+  /**
+   * Turns a finished member set into one ordinary reviewer task. The database
+   * claim makes this single-writer across server processes; the coordinator is
+   * still subject to the same model routing, queue and permission boundaries as
+   * every other delegated task.
+   */
+  async function advanceSwarms(): Promise<void> {
+    if (advancingSwarms) return;
+    advancingSwarms = true;
+    let queuedCoordinator = false;
+    try {
+      for (let advanced = 0; advanced < 10; advanced += 1) {
+        const swarm = await swarms.claimReadyForSynthesis(runner.runnerId);
+        if (!swarm) break;
+        try {
+          const role = getWorkerRole('reviewer');
+          if (!role) throw new Error('The reviewer role required for swarm synthesis is unavailable.');
+          const resolved = await resolveSwarmQwenModel(deps.registry);
+          const coordinator = await runner.create({
+            objective: createSwarmSynthesisObjective(swarm),
+            agentId: role.id,
+            modelAlias: SWARM_QWEN_ALIAS,
+            providerInstanceId: resolved.instance.id,
+            model: resolved.model,
+            workspaceId: swarm.workspaceId,
+            source: 'internal',
+          });
+          if (!(await swarms.setCoordinator(swarm.id, coordinator.id, runner.runnerId))) {
+            await runner.cancel(coordinator.id);
+            throw new Error(`Swarm ${swarm.id} lost its synthesis claim before the coordinator was attached.`);
+          }
+          queuedCoordinator = true;
+          server.log.info({ swarmId: swarm.id, taskId: coordinator.id }, 'swarm coordinator queued');
+        } catch (error) {
+          await swarms.releaseSynthesisClaim(swarm.id, runner.runnerId).catch(() => undefined);
+          server.log.error({ err: String(error), swarmId: swarm.id }, 'swarm synthesis could not be queued');
+          break;
+        }
+      }
+    } finally {
+      advancingSwarms = false;
+      if (queuedCoordinator) requestQueueDrain();
+    }
+  }
 
   /**
    * Claims and starts queued work until the worker cap is reached.
@@ -409,7 +479,9 @@ export function registerTaskRoutes(
           .catch((error) => server.log.error({ err: String(error), taskId: task.id }, 'task execution failed'))
           .finally(() => {
             inFlight -= 1;
-            requestQueueDrain();
+            void advanceSwarms()
+              .catch((error) => server.log.error({ err: String(error) }, 'swarm advancement failed'))
+              .finally(() => requestQueueDrain());
           });
       }
     } finally {
@@ -492,6 +564,148 @@ export function registerTaskRoutes(
     requestQueueDrain();
 
     return { task, queued: runner.queuedCount, active: inFlight };
+  });
+
+  // -------------------------------------------------------------------------
+  // AI swarms
+  // -------------------------------------------------------------------------
+
+  server.get('/api/swarms', async () => ({ swarms: await swarms.list() }));
+
+  server.get<{ Params: { id: string } }>('/api/swarms/:id', async (request, reply) => {
+    const swarm = await swarms.get(request.params.id);
+    if (!swarm) return reply.code(404).send({ error: 'Swarm not found.' });
+    return { swarm };
+  });
+
+  server.post<{ Body: CreateSwarmBody }>('/api/swarms', async (request, reply) => {
+    const body = request.body;
+    if (!body?.objective?.trim()) return reply.code(400).send({ error: 'objective is required.' });
+    const workspace = await workspaces.get(body.workspaceId);
+    if (!workspace) return reply.code(400).send({ error: 'Unknown workspace.' });
+
+    let plans: SwarmMemberPlan[];
+    let strategy: SwarmStrategy = body.members === undefined
+      ? body.strategy ?? 'balanced'
+      : 'custom';
+    let engagementId: string | undefined;
+    let securityContext = '';
+
+    if (strategy === 'offensive-security' && !body.engagementId?.trim()) {
+      return reply.code(400).send({
+        error: 'offensive-security swarms require an active engagementId so protected-system actions retain their existing audited scope.',
+      });
+    }
+    if (body.engagementId?.trim()) {
+      const engagement = await engagements.get(body.engagementId.trim());
+      if (!engagement) return reply.code(400).send({ error: 'Unknown security engagement.' });
+      if (strategy === 'offensive-security') {
+        const now = Date.now();
+        if (engagement.status !== 'active' || engagement.startsAt.getTime() > now || engagement.expiresAt.getTime() <= now) {
+          return reply.code(409).send({ error: 'The security engagement is not currently active.' });
+        }
+      }
+      engagementId = engagement.id;
+      securityContext = [
+        `Security engagement: ${engagement.id}`,
+        `Authorized targets: ${engagement.authorizedTargets.join(', ')}`,
+        `Authorized environments: ${engagement.authorizedEnvironments.join(', ')}`,
+        `Allowed test categories: ${engagement.allowedTestCategories.join(', ')}`,
+        `Prohibited actions: ${engagement.prohibitedActions.join(', ') || 'none recorded'}`,
+        'Keep live actions inside this engagement and use the existing LIVE_VALIDATION control plane for controlled protected-system operations.',
+      ].join('\n');
+    }
+
+    try {
+      if (body.members !== undefined) {
+        if (!Array.isArray(body.members) || body.members.length < 2 || body.members.length > 6) {
+          throw new SwarmPlanError('members must contain from 2 through 6 worker assignments.');
+        }
+        plans = body.members.map((member, index) => {
+          const role = getWorkerRole(member?.role ?? '');
+          if (!role) throw new SwarmPlanError(`Unknown role for member ${index + 1}. Known roles: ${WORKER_ROLE_IDS.join(', ')}.`);
+          if (!member.objective?.trim()) throw new SwarmPlanError(`Member ${index + 1} objective is required.`);
+          if (member.alias && member.alias !== SWARM_QWEN_ALIAS) {
+            throw new SwarmPlanError(
+              `Member ${index + 1} cannot select model alias "${member.alias}"; all AI swarms use "${SWARM_QWEN_ALIAS}".`,
+            );
+          }
+          return {
+            role: role.id,
+            objective: [member.objective.trim(), securityContext].filter(Boolean).join('\n\n'),
+          };
+        });
+      } else {
+        if (strategy === 'custom') {
+          throw new SwarmPlanError('The custom strategy requires explicit members.');
+        }
+        const defaultSize = strategy === 'offensive-security' || strategy === 'defensive-security' ? 6 : 3;
+        const scopedObjective = [body.objective, securityContext].filter(Boolean).join('\n\n');
+        plans = planSwarmMembers(body.objective ? scopedObjective : '', strategy, body.size ?? defaultSize);
+      }
+    } catch (error) {
+      if (error instanceof SwarmPlanError) return reply.code(400).send({ error: error.message });
+      throw error;
+    }
+
+    const resolvedMembers = [];
+    try {
+      const resolved = await resolveSwarmQwenModel(deps.registry);
+      for (const plan of plans) {
+        const role = getWorkerRole(plan.role)!;
+        resolvedMembers.push({ plan, role, resolved });
+      }
+    } catch (error) {
+      return reply.code(400).send({ error: (error as Error).message });
+    }
+
+    const swarmId = await swarms.create({
+      workspaceId: workspace.id,
+      engagementId,
+      objective: body.objective,
+      strategy,
+    });
+    const createdTaskIds: string[] = [];
+    try {
+      for (let index = 0; index < resolvedMembers.length; index += 1) {
+        const member = resolvedMembers[index];
+        const task = await runner.create({
+          objective: member.plan.objective,
+          agentId: member.role.id,
+          modelAlias: SWARM_QWEN_ALIAS,
+          providerInstanceId: member.resolved.instance.id,
+          model: member.resolved.model,
+          workspaceId: workspace.id,
+          source: body.source ?? 'internal',
+        });
+        createdTaskIds.push(task.id);
+        await swarms.addMember(swarmId, {
+          taskId: task.id,
+          role: member.role.id,
+          objective: member.plan.objective,
+          ordinal: index,
+        });
+      }
+      await swarms.seal(swarmId);
+    } catch (error) {
+      await Promise.all(createdTaskIds.map((id) => runner.cancel(id).catch(() => false)));
+      await swarms.remove(swarmId).catch(() => undefined);
+      throw error;
+    }
+
+    requestQueueDrain();
+    return reply.code(201).send({ swarm: await swarms.get(swarmId) });
+  });
+
+  server.post<{ Params: { id: string } }>('/api/swarms/:id/cancel', async (request, reply) => {
+    const swarm = await swarms.get(request.params.id);
+    if (!swarm) return reply.code(404).send({ error: 'Swarm not found.' });
+    const cancelled = await swarms.cancel(swarm.id);
+    await Promise.all([
+      ...swarm.members.map((member) => runner.cancel(member.taskId)),
+      ...(swarm.coordinator ? [runner.cancel(swarm.coordinator.taskId)] : []),
+    ]);
+    return { cancelled, swarm: await swarms.get(swarm.id) };
   });
 
   // -------------------------------------------------------------------------
@@ -590,13 +804,14 @@ export function registerTaskRoutes(
       if (interrupted || released) {
         server.log.warn({ interrupted, released }, 'recovered tasks abandoned by a previous process');
       }
-      return Promise.all([tickSchedules(), drainQueue()]);
+      return Promise.all([tickSchedules(), advanceSwarms()]).then(() => drainQueue());
     })
     .catch((error) => server.log.error({ err: String(error) }, 'task startup reconciliation failed'));
 
   const ticker = setInterval(() => {
     void runner.reconcile().catch(() => undefined);
     void tickSchedules().catch((error) => server.log.error({ err: String(error) }, 'schedule tick failed'));
+    void advanceSwarms().catch((error) => server.log.error({ err: String(error) }, 'swarm advancement failed'));
     requestQueueDrain();
   }, TICK_INTERVAL_MS);
   ticker.unref?.();
@@ -651,4 +866,3 @@ function roleToTaskType(roleId: string): string {
       return 'code_task';
   }
 }
-

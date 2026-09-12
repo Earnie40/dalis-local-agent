@@ -168,6 +168,19 @@ models:
     temperature: 0.2
 
   # ---------------------------------------------------------------------------
+  # TOMAHAWK1 SWARM MODEL
+  # ---------------------------------------------------------------------------
+  #
+  # Every swarm member and its synthesis coordinator resolves this dedicated
+  # alias. It is deliberately pinned to the stock open-source Qwen checkpoint
+  # through Ollama. Swarm routing rejects non-Ollama and non-Qwen resolutions,
+  # so OpenAI and Anthropic accounts cannot become a fallback for swarm work.
+  swarm_qwen:
+    provider: local_ollama
+    model: qwen3:8b
+    temperature: 0.12
+
+  # ---------------------------------------------------------------------------
   # VISION / IMAGE UNDERSTANDING
   # ---------------------------------------------------------------------------
   #
@@ -309,6 +322,13 @@ models:
     provider: remote_gpu_ollama
     model: huihui_ai/qwen3-abliterated:8b
     temperature: 0.2
+
+  # GPU twin of swarm_qwen. Both sides use the same stock Qwen checkpoint so
+  # gpu-preferred routing changes capacity, not model family or account owner.
+  gpu_swarm_qwen:
+    provider: remote_gpu_ollama
+    model: qwen3:8b
+    temperature: 0.12
 
   gpu_vision:
     provider: remote_gpu_ollama

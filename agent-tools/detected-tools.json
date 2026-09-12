@@ -1,0 +1,7 @@
+{
+  "PowerShell": "7.6.6",
+  "WSL": true,
+  "SSH": true,
+  "Nmap": true,
+  "Curl": true
+}

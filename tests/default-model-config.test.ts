@@ -58,4 +58,22 @@ describe('default model aliases', () => {
     expect(result.models.gpu_reviewer.model).toBe(result.models.reviewer.model);
     expect(result.models.gpu_structured_agent.model).toBe(result.models.structured_agent.model);
   });
+
+  it('pins swarm inference to matching stock Qwen checkpoints on Ollama', () => {
+    const result = loadModelAliases(
+      resolve(process.cwd(), 'config/models/default.yaml'),
+      process.env,
+    );
+
+    expect(result.models.swarm_qwen).toMatchObject({
+      providerInstanceId: 'local_ollama',
+      model: 'qwen3:8b',
+      temperature: 0.12,
+    });
+    expect(result.models.gpu_swarm_qwen).toMatchObject({
+      providerInstanceId: 'remote_gpu_ollama',
+      model: 'qwen3:8b',
+      temperature: 0.12,
+    });
+  });
 });

@@ -1,0 +1,22 @@
+{
+  "policy_version": 1,
+  "default": "deny",
+  "local_machine": true,
+  "require_explicit_network_authorization": true,
+  "targets": [
+    "127.0.0.1",
+    "localhost"
+  ],
+  "ssh_hosts": [],
+  "rules": {
+    "read_only_local_diagnostics": "allow",
+    "network_discovery": "allowlist_only",
+    "remote_ssh": "allowlist_only",
+    "configuration_changes": "user_approval_required",
+    "destructive_actions": "deny",
+    "credential_attacks": "deny",
+    "persistence": "deny",
+    "security_evasion": "deny",
+    "unauthorized_interception": "deny"
+  }
+}

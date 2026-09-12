@@ -218,10 +218,10 @@ export function reasoningPromptView(state: ReasoningState) {
 }
 
 const PLAN_SHAPE = '{successCondition, requirements:[{id, requestClause (exact quote from original request), output, successCondition, scope:user_specific|local_machine|repository|public|conceptual|artifact, kind:fact|implementation|artifact|answer, allowedProvenance:[allowed provenance values] (optional; the runtime retains compatible entries or derives a conservative set from scope)}], hypotheses:[{statement,basis,confidence:0..1}] (optional; [] is valid), unknowns:[] (optional)}';
-const PLAN_AUDIT_SHAPE = '{complete:boolean, explanation, missingRequirements:[same requirement shape as planning; include every requested output omitted by the draft]}';
+const PLAN_AUDIT_SHAPE = '{complete:boolean, explanation, missingRequirements:[same requirement shape as planning; only requested outputs omitted by the draft, with IDs distinct from proposedRequirements; [] when nothing is missing]}';
 const ACTION_SHAPE = '{relevant:boolean, requirementIds:[one or more exact IDs copied from state.requiredEvidence when relevant is true], unknown:"specific missing fact or procedure as text; never a boolean", prediction, causalJustification, purpose:discover|observe|mutate|verify, informationGain:0..1, higherInformationAlternative (a better available action and why, or empty string), requiredPlatform:any|win32|linux|darwin, platformCompatible:boolean, platformReason, hypothesis:{statement,basis,confidence}, revision:null|{observationId,failedAssumption,revisedHypothesis,reason}}';
 const OBSERVE_SHAPE = '{actual, predictionMatched:boolean, relevant:boolean, facts:[{requirementId,claim,sourceId,quote (exact source substring),mode:observation|inference|speculation,confidence:0..1}], contradictedEvidenceIds:[], failedAssumption, revisedHypothesis}';
-const VERIFY_SHAPE = '{complete:boolean, explanation, coveredRequirementIds:[], unsupportedClaims:[], uncoveredOutputs:[], implementationClaims:[{claim,requirementId}], citations:[{requirementId,evidenceIds (accepted ledger IDs),answerExcerpt (exact draft substring)}]}';
+const VERIFY_SHAPE = '{complete:boolean, explanation, coveredRequirementIds:[], unsupportedClaims:[], uncoveredOutputs:[], implementationClaims:[{claim,requirementId}] (only claims of software/tool/capability changes; [] for observed facts), citations:[{requirementId,evidenceIds (accepted ledger IDs),answerExcerpt (exact draft substring)}]}';
 
 const CONTRACT = `You are the evidence controller for a general agent. Return only the requested JSON decision record.
 These are short, auditable decisions and evidence references, not private chain-of-thought. Do not emit hidden reasoning.
@@ -240,6 +240,10 @@ Final verification checks EVERY original requested output and EVERY factual/impl
 Do not impose content/topic policy or request permissions: authorization remains external. Preserve generated artifacts even when uncertified.`;
 
 function phaseGuidance(phase: string): string {
+  if (phase === 'verification') return `VERIFICATION DECISION RULES:
+An observed fact obtained with an existing tool belongs in citations, not implementationClaims.
+implementationClaims contains only claims that software, a tool, a feature, or a capability was created or changed. Its requirementId must name a requirement whose kind is implementation; otherwise list the unsupported change claim in unsupportedClaims.
+Reporting an observed identifier, name, address, configuration, or diagnostic result is not a claim of software implementation. For an answer containing only observed facts, return implementationClaims: [].`;
   if (phase !== 'action') return '';
   return `ACTION DECISION RULES:
 The candidate tool call is already selected. Assess that exact candidate; do not choose, rename, or describe a different tool.
@@ -284,7 +288,7 @@ export class ReasoningController {
    * never fabricate requirements, evidence, authorization or a tool decision.
    */
   private async ask<S extends z.ZodTypeAny>(phase: string, shape: string, data: unknown, schema: S,
-    semantic?: (value: z.infer<S>) => void): Promise<z.infer<S>> {
+    semantic?: (value: z.infer<S>, attempt: number) => void): Promise<z.infer<S>> {
     const messages: ChatMessage[] = [{ role: 'user', content: JSON.stringify(data) }];
     let lastError: ReasoningDecisionError | undefined;
     for (let attempt = 1; attempt <= 2; attempt += 1) {
@@ -334,7 +338,7 @@ export class ReasoningController {
             repairs: ['unknown: converted boolean uncertainty flag into an explicit unresolved-fact string'] });
         }
         stage = 'semantic';
-        semantic?.(checked.data);
+        semantic?.(checked.data, attempt);
         this.diagnostic({ phase, stage: 'accepted', attempt, message: attempt > 1 ? 'Corrected decision accepted.' : 'Decision accepted.' });
         return checked.data;
       } catch (error) {
@@ -354,18 +358,49 @@ export class ReasoningController {
     throw lastError!;
   }
 
-  private validateRequirements(requirements: EvidenceRequirement[]): void {
-    const ids = new Set<string>();
-    for (const requirement of requirements) {
+  private normalizeRequirements(requirements: EvidenceRequirement[], existing: EvidenceRequirement[] = []): {
+    requirements: EvidenceRequirement[]; repairs: string[];
+  } {
+    const normalized: EvidenceRequirement[] = [];
+    const repairs: string[] = [];
+    const reserved = new Set([...existing, ...requirements].map(requirement => requirement.id));
+    const used = new Set(existing.map(requirement => requirement.id));
+    const fingerprint = ({ id: _id, ...requirement }: EvidenceRequirement) => JSON.stringify({
+      ...requirement, allowedProvenance: [...new Set(requirement.allowedProvenance)].sort(),
+    });
+    const seen = new Map(existing.map(requirement => [fingerprint(requirement), requirement.id]));
+    for (const incoming of requirements) {
       // Provenance is a runtime-owned constraint. Preserve a valid model
       // narrowing, but recover an all-invalid list with the conservative scope
       // defaults instead of declaring the user's request unplannable.
-      requirement.allowedProvenance = normalizeRequirementProvenance(requirement);
-      if (ids.has(requirement.id)) throw new Error(`Duplicate requirement ID: ${requirement.id}. Give each requested output a unique ID.`);
+      const requirement = { ...incoming, allowedProvenance: normalizeRequirementProvenance(incoming) };
       if (!this.state.goal.includes(requirement.requestClause)) throw new Error(`Requirement ${requirement.id}: requestClause must be an exact substring of originalRequest.`);
-      ids.add(requirement.id);
       if (!requirement.allowedProvenance.length) throw new Error(`No admissible provenance for ${requirement.id}.`);
+      // IDs are bookkeeping, not evidence. Before any actions bind to this
+      // contract, collapse an exact repeated requirement and assign a fresh ID
+      // to a distinct outcome with the same ID. Never replace or weaken the
+      // existing outcome, and disclose every repair in the execution journal.
+      const originalId = requirement.id;
+      const key = fingerprint(requirement);
+      const existingId = seen.get(key);
+      if (existingId !== undefined) {
+        repairs.push(`Requirement ${originalId}: merged an exact repeat of ${existingId}; the existing output and success condition are retained.`);
+        continue;
+      }
+      if (used.has(originalId)) {
+        let suffix = 2;
+        do {
+          const ending = `_${suffix++}`;
+          requirement.id = `${originalId.slice(0, 4000 - ending.length)}${ending}`;
+        } while (reserved.has(requirement.id));
+        reserved.add(requirement.id);
+        repairs.push(`Requirement ${originalId}: renamed a distinct output to ${requirement.id}; both outcomes are retained.`);
+      }
+      seen.set(key, requirement.id);
+      used.add(requirement.id);
+      normalized.push(requirement);
     }
+    return { requirements: normalized, repairs };
   }
 
   async initialize(): Promise<void> {
@@ -381,15 +416,21 @@ export class ReasoningController {
       const plan = draft = await this.ask('plan', PLAN_SHAPE, {
         originalRequest: this.state.goal, environment: this.state.environment,
         ...(wasProvisional ? { investigation: reasoningPromptView(this.state) } : {}),
-      }, planSchema, value => this.validateRequirements(value.requirements));
+      }, planSchema, (value, attempt) => {
+        const normalized = this.normalizeRequirements(value.requirements);
+        value.requirements = normalized.requirements;
+        if (normalized.repairs.length) this.diagnostic({ phase: 'plan', stage: 'repair', attempt, repairs: normalized.repairs });
+      });
       const audit = await this.ask('plan_audit', PLAN_AUDIT_SHAPE, {
         originalRequest: this.state.goal,
         proposedSuccessCondition: plan.successCondition,
         proposedRequirements: plan.requirements,
-        instruction: 'Challenge the plan clause by clause. Add a separate missing requirement for every original requested output that lacks its own observable success condition. Unknown solution paths are valid; judge outcome coverage, not whether the procedure is already known.',
-      }, planAuditSchema, value => {
+        instruction: 'Challenge the plan clause by clause. Add a separate missing requirement for every original requested output that lacks its own observable success condition. Do not repeat requirements already covered by proposedRequirements. Give additions unique IDs. If nothing is missing, return complete: true and missingRequirements: []. Unknown solution paths are valid; judge outcome coverage, not whether the procedure is already known.',
+      }, planAuditSchema, (value, attempt) => {
         if (!value.complete && !value.missingRequirements.length) throw new Error('The requirement audit found omissions but supplied no repair. List the omitted requested outputs in missingRequirements.');
-        this.validateRequirements([...plan.requirements, ...value.missingRequirements]);
+        const normalized = this.normalizeRequirements(value.missingRequirements, plan.requirements);
+        value.missingRequirements = normalized.requirements;
+        if (normalized.repairs.length) this.diagnostic({ phase: 'plan_audit', stage: 'repair', attempt, repairs: normalized.repairs });
       });
       plan.requirements.push(...audit.missingRequirements);
       if (wasProvisional) {

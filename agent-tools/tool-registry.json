@@ -1,0 +1,136 @@
+{
+  "registryVersion": 1,
+  "behavior": {
+    "observationBeforeModification": true,
+    "verificationRequired": true,
+    "authorizationRequiredForRemoteTargets": true,
+    "recordExecutionLogs": true
+  },
+  "tools": [
+    {
+      "id": "windows-diagnostics",
+      "skill": "windows.system.inspect",
+      "description": "Inspect Windows operating-system, process, service, interface, route and TCP state.",
+      "command": "agent-tools/tools/Invoke-DacaiTool.ps1",
+      "arguments": {
+        "Tool": "windows-diagnostics"
+      },
+      "risk": "read-only",
+      "approval": false
+    },
+    {
+      "id": "network-diagnostics",
+      "skill": "network.local.inspect",
+      "description": "Inspect local Windows network configuration and optionally test DNS/connectivity to a specified host.",
+      "command": "agent-tools/tools/Invoke-DacaiTool.ps1",
+      "arguments": {
+        "Tool": "network-diagnostics",
+        "HostName": "optional"
+      },
+      "risk": "read-only",
+      "approval": false
+    },
+    {
+      "id": "wsl-diagnostics",
+      "skill": "linux.wsl.inspect",
+      "description": "Inspect WSL Linux interfaces, routes, sockets, DNS and processes.",
+      "command": "agent-tools/tools/Invoke-DacaiTool.ps1",
+      "arguments": {
+        "Tool": "wsl-diagnostics"
+      },
+      "risk": "read-only",
+      "approval": false
+    },
+    {
+      "id": "nmap-authorized",
+      "skill": "network.authorized.discovery",
+      "description": "Perform bounded network discovery against explicitly allowlisted targets.",
+      "command": "agent-tools/tools/Invoke-DacaiTool.ps1",
+      "arguments": {
+        "Tool": "nmap-authorized",
+        "Target": "required",
+        "Mode": [
+          "Discovery",
+          "Services",
+          "Ports"
+        ]
+      },
+      "risk": "active-network-observation",
+      "approval": "authorization-allowlist"
+    },
+    {
+      "id": "ssh-readonly",
+      "skill": "remote.authorized.inspect",
+      "description": "Run predefined read-only diagnostic commands on explicitly authorized SSH hosts.",
+      "command": "agent-tools/tools/Invoke-DacaiTool.ps1",
+      "arguments": {
+        "Tool": "ssh-readonly",
+        "HostName": "required",
+        "User": "required",
+        "Check": [
+          "System",
+          "Uptime",
+          "Disk",
+          "Memory",
+          "Processes",
+          "Network"
+        ]
+      },
+      "risk": "remote-read-only",
+      "approval": "authorization-allowlist"
+    },
+    {
+      "id": "local-find",
+      "skill": "local.filesystem.find",
+      "description": "Locate files by name/glob and locate text inside files under a caller-specified local path. Read-only; never modifies files and performs no network activity.",
+      "command": "agent-tools/tools/Invoke-DacaiTool.ps1",
+      "arguments": {
+        "Tool": "local-find",
+        "Path": "required",
+        "Name": "optional glob, e.g. *.ts",
+        "Content": "optional regex to locate inside files",
+        "MaxResults": "optional integer cap (default 200)"
+      },
+      "risk": "read-only",
+      "approval": false
+    },
+    {
+      "id": "osint-lookup",
+      "skill": "osint.public.lookup",
+      "description": "Passive public-record lookup for an authorized domain or IP: forward DNS, reverse DNS, and whois when available. No active probing/scanning; sends no traffic to the target itself.",
+      "command": "agent-tools/tools/Invoke-DacaiTool.ps1",
+      "arguments": {
+        "Tool": "osint-lookup",
+        "Target": "required domain or IP",
+        "Types": "optional DNS record types"
+      },
+      "risk": "passive-public-records",
+      "approval": "authorization-allowlist"
+    },
+    {
+      "id": "reasoning-loop",
+      "skill": "agent.reasoning.loop",
+      "description": "Maintains durable goal, observation, hypothesis, plan, action, verification and replanning state.",
+      "command": "agent-tools/reasoning/Invoke-DacaiReasoningLoop.ps1",
+      "arguments": {
+        "Action": [
+          "Start",
+          "Observe",
+          "Hypothesis",
+          "Plan",
+          "ToolCall",
+          "Verify",
+          "Complete",
+          "Block",
+          "Fail",
+          "Show"
+        ],
+        "RunId": "required except Start",
+        "Goal": "required for Start",
+        "Text": "context dependent"
+      },
+      "risk": "state-management",
+      "approval": false
+    }
+  ]
+}

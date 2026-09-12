@@ -37,6 +37,16 @@ function infrastructureEvidence(
   }];
 }
 
+function swarmEvidence(locator: string, result: unknown, effect: 'read' | 'mutation' = 'read') {
+  return [{
+    id: 'agent-swarm',
+    locator,
+    provenance: 'production_data' as const,
+    content: typeof result === 'string' ? result : JSON.stringify(result, null, 2),
+    effect,
+  }];
+}
+
 function summarizeRunpodStatus(result: unknown): unknown {
   if (!result || typeof result !== 'object' || Array.isArray(result)) return result;
   const status = result as Record<string, unknown>;
@@ -127,6 +137,87 @@ export function createCodexServerTools(port: number): ToolDefinition[] {
         signal: ctx.signal,
       });
       return summarizeRunpodStatus(result);
+    },
+  };
+
+  const swarmCreate: ToolDefinition = {
+    name: 'agent.swarm.create',
+    description:
+      'Create a durable AI swarm of 2-6 bounded specialist workers for one objective. Members run through the existing task queue and permission system, then one coordinator automatically synthesizes their results.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        objective: { type: 'string', minLength: 1, maxLength: 12_000 },
+        strategy: {
+          type: 'string',
+          enum: ['balanced', 'research', 'review', 'security', 'offensive-security', 'defensive-security'],
+        },
+        size: { type: 'number', minimum: 2, maximum: 6 },
+        engagementId: {
+          type: 'string',
+          minLength: 1,
+          maxLength: 120,
+          description: 'Required for offensive-security so protected-system work binds to an active audited engagement.',
+        },
+      },
+      required: ['objective'],
+      additionalProperties: false,
+    },
+    permissionTier: 'mutation',
+    timeoutMs: 90_000,
+    evidenceSources: (result) => swarmEvidence('durable AI swarm creation', result, 'mutation'),
+    async execute(input, ctx) {
+      const current = requireContext(ctx);
+      const strategy = String(input.strategy ?? 'balanced');
+      return jsonFetch(`${base}/api/swarms`, {
+        method: 'POST',
+        body: JSON.stringify({
+          objective: String(input.objective ?? '').trim(),
+          workspaceId: current.workspaceId,
+          strategy,
+          size: input.size ?? (strategy === 'offensive-security' || strategy === 'defensive-security' ? 6 : 3),
+          engagementId: input.engagementId,
+          source: 'internal',
+        }),
+        signal: ctx.signal,
+      });
+    },
+  };
+
+  const swarmStatus: ToolDefinition = {
+    name: 'agent.swarm.status',
+    description:
+      'Read live member progress, evidence, coordinator state, and the final synthesized result for a durable AI swarm.',
+    inputSchema: {
+      type: 'object',
+      properties: { swarmId: { type: 'string', minLength: 1, maxLength: 120 } },
+      required: ['swarmId'],
+      additionalProperties: false,
+    },
+    permissionTier: 'safe',
+    timeoutMs: 20_000,
+    evidenceSources: (result) => swarmEvidence('durable AI swarm status', result),
+    async execute(input, ctx) {
+      const swarmId = encodeURIComponent(String(input.swarmId ?? ''));
+      return jsonFetch(`${base}/api/swarms/${swarmId}`, { signal: ctx.signal });
+    },
+  };
+
+  const swarmCancel: ToolDefinition = {
+    name: 'agent.swarm.cancel',
+    description: 'Cancel a durable AI swarm and every member/coordinator task that is still queued or running.',
+    inputSchema: {
+      type: 'object',
+      properties: { swarmId: { type: 'string', minLength: 1, maxLength: 120 } },
+      required: ['swarmId'],
+      additionalProperties: false,
+    },
+    permissionTier: 'mutation',
+    timeoutMs: 20_000,
+    evidenceSources: (result) => swarmEvidence('durable AI swarm cancellation', result, 'mutation'),
+    async execute(input, ctx) {
+      const swarmId = encodeURIComponent(String(input.swarmId ?? ''));
+      return jsonFetch(`${base}/api/swarms/${swarmId}/cancel`, { method: 'POST', signal: ctx.signal });
     },
   };
 
@@ -248,6 +339,9 @@ export function createCodexServerTools(port: number): ToolDefinition[] {
     runpodPreflight,
     gpuRouting,
     runpodReconnect,
+    swarmCreate,
+    swarmStatus,
+    swarmCancel,
     delegate,
     status,
     cancel,

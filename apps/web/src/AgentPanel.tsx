@@ -80,6 +80,10 @@ const TOOL_LABELS: Record<string, string> = {
   'git.run': 'Git inspection',
   'tests.run': 'Run tests/builds',
   'shell.run': 'Shell commands',
+  'wsl.list': 'WSL distributions',
+  'wsl.run': 'WSL commands / root',
+  'system.privileges': 'Administrator status',
+  'system.network.nmap': 'Nmap / port mapping',
   'system.network.info': 'Network status',
   'system.wifi.scan': 'Nearby Wi-Fi networks',
   'web.fetch': 'Fetch public web page',
@@ -122,10 +126,10 @@ function matchesActivityFilter(event: AgentActivityEvent, filter: ActivityFilter
 }
 
 /**
- * Agent mode. Unlike chat, this runs the tool loop. Ordinary/personal questions
- * use public-web tools. Coding requests inspect the workspace with filesystem,
- * git, and tests. Every call passes the permission engine, and each step is
- * shown as it happens.
+ * Unified Chat + Agent surface. It answers ordinary questions conversationally
+ * and uses the same continuing session for web, workspace, coding, vision, and
+ * media tools whenever the request needs them. Every call passes the permission
+ * engine, and each step is shown as it happens.
  */
 export function AgentPanel() {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
@@ -261,6 +265,9 @@ export function AgentPanel() {
     names.push('filesystem.list', 'filesystem.read', 'filesystem.search', 'filesystem.stat', 'git.run', 'system.network.info', 'system.wifi.scan');
     if (active?.capabilities.write) names.push('filesystem.edit', 'filesystem.write');
     if (active?.capabilities.shell) names.push('tests.run', 'shell.run', 'engineering.capabilities.inspect');
+    if (active?.capabilities.shell) names.push('wsl.list', 'system.privileges');
+    if (active?.capabilities.shell && active?.capabilities.write) names.push('wsl.run');
+    if (active?.capabilities.shell && active?.capabilities.write && active?.capabilities.network) names.push('system.network.nmap');
     if (active?.capabilities.write) names.push('image.generate');
     if (active?.capabilities.read && active?.capabilities.write) names.push('video.generate');
     names.push('mcp.list', 'engineering.artifact.inspect');
@@ -533,11 +540,11 @@ export function AgentPanel() {
   const activityStatus = latestActivity?.status === 'failed' || latestActivity?.status === 'blocked'
     ? 'error'
     : running || latestActivity?.status === 'running' ? 'active' : 'idle';
-  const activityLabel = latestActivity?.status === 'blocked' ? 'Waiting for approval'
+  const activityLabel = latestActivity?.status === 'blocked' ? 'Blocked'
     : latestActivity?.status === 'failed' ? 'Needs attention'
     : running ? 'Live' : latestActivity?.status === 'success' ? 'Complete' : 'Ready';
 
-  // The sidebar slot is rendered by App in agent mode; it exists by the time
+  // The sidebar slot is rendered by App in the unified Chat + Agent mode; it exists by the time
   // effects run, so the portal target resolves on the first commit.
   const [historySlot, setHistorySlot] = useState<HTMLElement | null>(null);
   useEffect(() => {
@@ -554,7 +561,7 @@ export function AgentPanel() {
    */
   const historyPanel = (
     <>
-      <button type="button" className="primary" onClick={newSession}>+ New agent conversation</button>
+      <button type="button" className="primary" onClick={newSession}>+ New conversation</button>
       <nav className="agent-sessions">
         {sessions.length === 0 && <p className="muted small">No agent runs yet.</p>}
         {sessions.map((session) => (
@@ -749,12 +756,11 @@ export function AgentPanel() {
         <div className="agent-log" ref={logScroll.ref} onScroll={logScroll.onScroll}>
           {events.length === 0 && !running && (
             <div className="empty">
-              <h2>Agent mode</h2>
+              <h2>Chat + Agent</h2>
               <p className="muted">
-                DACAIS is your local personal LLM for you and people you personally allow on a
-                local machine. Ordinary questions and public research use web tools. Coding
-                requests inspect this workspace. Every call passes the permission engine first,
-                and each step appears here as it happens.
+                Talk to DACAIS normally. It answers directly when that is enough and uses web,
+                workspace, coding, vision, and media tools when your request needs them. The same
+                conversation and history continue across both kinds of work.
               </p>
             </div>
           )}
@@ -821,7 +827,7 @@ export function AgentPanel() {
 
       <LiveMonitor
         active={running}
-        title="DACAIS · Agent monitor"
+        title="DACAIS · Live monitor"
         lines={activityMonitorLines(activityEvents)}
         onStop={() => abortRef.current?.abort()}
       />
@@ -836,10 +842,10 @@ export function AgentPanel() {
         <textarea
           id="agent-prompt"
           name="objective"
-          aria-label="Task for the agent"
+          aria-label="Message DACAIS"
           rows={3}
           value={prompt}
-          placeholder="Give the agent a task, e.g. 'What does the permission engine do? Cite the file and lines.'"
+          placeholder="Message DACAIS or give it a task…"
           onChange={(e) => setPrompt(e.target.value)}
           onKeyDown={(e) => {
             if (
@@ -873,7 +879,7 @@ export function AgentPanel() {
               className="primary"
               disabled={!prompt.trim() || !workspaceId}
             >
-              Run
+              Send
             </button>
           )}
         </div>

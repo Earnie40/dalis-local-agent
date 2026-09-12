@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "integration": "native-agent-system-prompt",
+  "runtime": "apps/server/src/routes/agent.ts",
+  "reasoning_state_machine": "agent-tools/reasoning/Invoke-DacaiReasoningLoop.ps1",
+  "execution_policy": {
+    "native_registered_tools_first": true,
+    "permissioned_executor_remains_authoritative": true,
+    "reasoning_state_does_not_grant_permissions": true,
+    "verification_required": true,
+    "private_chain_of_thought_storage": false
+  },
+  "behavior": {
+    "non_trivial_tasks_use_reasoning_protocol": true,
+    "observe_before_modify": true,
+    "competing_hypotheses": true,
+    "replan_on_contradiction": true,
+    "completion_requires_verification": true,
+    "missing_capability_must_be_reported": true
+  }
+}

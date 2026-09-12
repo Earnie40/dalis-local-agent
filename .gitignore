@@ -26,3 +26,6 @@ runpodssh.txt.pub
 # generated/images, generated/videos, generated/media-inputs. Every write path
 # mkdirs recursively, so the tree rebuilds itself on a fresh clone. Output, not source.
 generated/
+
+# Host execution receipts and timestamped local server logs.
+.dacai/runtime/

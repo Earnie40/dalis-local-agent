@@ -547,6 +547,40 @@ export interface CreateScheduleBody {
   firstRunAt?: string;
 }
 
+export type SwarmStrategy =
+  | 'balanced' | 'research' | 'review' | 'security'
+  | 'offensive-security' | 'defensive-security' | 'custom';
+export type SwarmStatus =
+  | 'queued' | 'running' | 'ready' | 'synthesizing'
+  | 'completed' | 'partial' | 'failed' | 'cancelled';
+
+export interface SwarmMemberSummary {
+  taskId: string;
+  role: string;
+  objective: string;
+  ordinal: number;
+  status: TaskStatus;
+  result?: string;
+  model: string;
+  providerInstanceId: string;
+  completedAt?: string;
+}
+
+export interface SwarmSummary {
+  id: string;
+  workspaceId: string;
+  engagementId?: string;
+  objective: string;
+  strategy: SwarmStrategy;
+  status: SwarmStatus;
+  members: SwarmMemberSummary[];
+  coordinator?: SwarmMemberSummary;
+  result?: string;
+  progress: { total: number; terminal: number; completed: number; failed: number };
+  createdAt: string;
+  cancelledAt?: string;
+}
+
 export const delegationApi = {
   roles: () => json<{ roles: WorkerRole[] }>('/api/roles'),
   workspaces: () => json<{ workspaces: Workspace[] }>('/api/workspaces'),
@@ -559,6 +593,21 @@ export const delegationApi = {
       body: JSON.stringify({ source: 'ui', ...body }),
     }),
   cancelTask: (id: string) => json<{ cancelled: boolean }>(`/api/tasks/${id}/cancel`, { method: 'POST' }),
+
+  swarms: () => json<{ swarms: SwarmSummary[] }>('/api/swarms'),
+  swarm: (id: string) => json<{ swarm: SwarmSummary }>(`/api/swarms/${id}`),
+  createSwarm: (body: {
+    objective: string;
+    workspaceId: string;
+    strategy?: Exclude<SwarmStrategy, 'custom'>;
+    size?: number;
+    engagementId?: string;
+  }) => json<{ swarm: SwarmSummary }>('/api/swarms', {
+    method: 'POST',
+    body: JSON.stringify({ source: 'ui', ...body }),
+  }),
+  cancelSwarm: (id: string) =>
+    json<{ cancelled: boolean; swarm: SwarmSummary }>(`/api/swarms/${id}/cancel`, { method: 'POST' }),
 
   schedules: () => json<{ schedules: Schedule[] }>('/api/schedules'),
   createSchedule: (body: CreateScheduleBody) =>

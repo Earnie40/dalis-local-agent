@@ -1,0 +1,46 @@
+{
+  "version": 1,
+
+  "mode": "evidence-driven-agent",
+
+  "phases": [
+    "goal",
+    "observe",
+    "hypothesize",
+    "plan",
+    "act",
+    "verify",
+    "replan",
+    "complete"
+  ],
+
+  "principles": {
+    "goal_before_tool": true,
+    "observe_before_modify": true,
+    "competing_hypotheses": true,
+    "tool_output_is_evidence": true,
+    "verification_required": true,
+    "replan_on_contradiction": true,
+    "persistent_state": true,
+    "authorization_required": true,
+    "record_decision_rationale": true,
+    "store_private_chain_of_thought": false
+  },
+
+  "completion": {
+    "require_verification": true,
+    "tool_success_is_not_completion": true
+  },
+
+  "limits": {
+    "max_repeated_identical_action": 2,
+    "max_consecutive_failed_actions": 5,
+    "require_replan_after_failed_verification": true
+  },
+
+  "confidence_levels": [
+    "low",
+    "medium",
+    "high"
+  ]
+}

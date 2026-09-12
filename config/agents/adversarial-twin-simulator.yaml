@@ -1,3 +1,4 @@
+
 id: adversarial-twin-simulator
 provider: local_ollama
 systemPrompt: |

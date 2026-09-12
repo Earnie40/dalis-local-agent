@@ -1,0 +1,25 @@
+{
+  "kind": "local_browser_capture",
+  "captureId": "1789195595859-capture",
+  "browserExecutable": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+  "outputDir": "C:\\Users\\Kyleh\\DacaiLocalAgent\\.dacai\\browser-artifacts\\1789195595859-capture",
+  "captures": [
+    {
+      "viewport": "desktop",
+      "viewportSize": {
+        "width": 1440,
+        "height": 1000
+      },
+      "requestedUrl": "http://127.0.0.1:5173/",
+      "finalUrl": "http://127.0.0.1:5173/",
+      "title": "DacaiLocalAgent",
+      "screenshotPath": "C:\\Users\\Kyleh\\DacaiLocalAgent\\.dacai\\browser-artifacts\\1789195595859-capture\\desktop.png",
+      "consoleMessages": [],
+      "pageErrors": [],
+      "failedRequests": [],
+      "badResponses": []
+    }
+  ],
+  "hasRuntimeErrors": false,
+  "createdAt": "2026-09-12T06:46:37.660Z"
+}

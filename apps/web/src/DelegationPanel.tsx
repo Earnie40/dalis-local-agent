@@ -3,6 +3,8 @@ import {
   delegationApi,
   type Schedule,
   type ScheduleKind,
+  type SwarmStrategy,
+  type SwarmSummary,
   type TaskStatus,
   type TaskSummary,
   type WorkerRole,
@@ -22,6 +24,7 @@ const REFRESH_MS = 5_000;
 
 /** Statuses that can still change, and so are worth polling for. */
 const LIVE_STATUSES: TaskStatus[] = ['queued', 'running', 'waiting_for_user'];
+const LIVE_SWARM_STATUSES = ['queued', 'running', 'ready', 'synthesizing'] as const;
 
 const STATUS_TONE: Record<TaskStatus, string> = {
   completed: 'ok',
@@ -34,6 +37,17 @@ const STATUS_TONE: Record<TaskStatus, string> = {
   interrupted: 'warn',
   cancelled: '',
   failed: 'warn',
+};
+
+const SWARM_STATUS_TONE: Record<SwarmSummary['status'], string> = {
+  completed: 'ok',
+  synthesizing: 'ok',
+  running: 'ok',
+  ready: 'ok',
+  queued: '',
+  partial: 'warn',
+  failed: 'warn',
+  cancelled: '',
 };
 
 const INTERVAL_PRESETS = [
@@ -73,6 +87,7 @@ export function DelegationPanel() {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [tasks, setTasks] = useState<TaskSummary[]>([]);
   const [schedules, setSchedules] = useState<Schedule[]>([]);
+  const [swarms, setSwarms] = useState<SwarmSummary[]>([]);
 
   const [role, setRole] = useState('repo-explorer');
   const [workspaceId, setWorkspaceId] = useState('');
@@ -80,19 +95,28 @@ export function DelegationPanel() {
   const [when, setWhen] = useState<'now' | ScheduleKind>('now');
   const [intervalSeconds, setIntervalSeconds] = useState(3600);
   const [firstRunAt, setFirstRunAt] = useState(() => toLocalInputValue(new Date(Date.now() + 5 * 60_000)));
+  const [swarmObjective, setSwarmObjective] = useState('');
+  const [swarmStrategy, setSwarmStrategy] = useState<Exclude<SwarmStrategy, 'custom'>>('balanced');
+  const [swarmSize, setSwarmSize] = useState(3);
+  const [swarmEngagementId, setSwarmEngagementId] = useState('');
 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | undefined>();
   const [notice, setNotice] = useState<string | undefined>();
-  const bodyScroll = useStickToBottom<HTMLDivElement>([tasks, schedules]);
+  const bodyScroll = useStickToBottom<HTMLDivElement>([tasks, schedules, swarms]);
 
   const selectedRole = useMemo(() => roles.find((entry) => entry.id === role), [roles, role]);
 
   const refresh = useCallback(async () => {
     try {
-      const [taskList, scheduleList] = await Promise.all([delegationApi.tasks(), delegationApi.schedules()]);
+      const [taskList, scheduleList, swarmList] = await Promise.all([
+        delegationApi.tasks(),
+        delegationApi.schedules(),
+        delegationApi.swarms(),
+      ]);
       setTasks(taskList.tasks);
       setSchedules(scheduleList.schedules);
+      setSwarms(swarmList.swarms);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     }
@@ -113,7 +137,8 @@ export function DelegationPanel() {
   }, [refresh]);
 
   // Poll only while something can still change, so an idle screen is quiet.
-  const hasLiveWork = tasks.some((task) => LIVE_STATUSES.includes(task.status));
+  const hasLiveWork = tasks.some((task) => LIVE_STATUSES.includes(task.status))
+    || swarms.some((swarm) => LIVE_SWARM_STATUSES.includes(swarm.status as typeof LIVE_SWARM_STATUSES[number]));
   useEffect(() => {
     if (!hasLiveWork && schedules.length === 0) return undefined;
     const timer = setInterval(() => void refresh(), REFRESH_MS);
@@ -159,6 +184,21 @@ export function DelegationPanel() {
         }),
       'Schedule created.',
     ).then(() => setObjective(''));
+  }
+
+  function submitSwarm(event: React.FormEvent): void {
+    event.preventDefault();
+    if (!swarmObjective.trim() || !workspaceId) return;
+    void act(
+      () => delegationApi.createSwarm({
+        objective: swarmObjective,
+        workspaceId,
+        strategy: swarmStrategy,
+        size: swarmSize,
+        engagementId: swarmEngagementId.trim() || undefined,
+      }),
+      'AI swarm queued.',
+    ).then(() => setSwarmObjective(''));
   }
 
   return (
@@ -263,6 +303,113 @@ export function DelegationPanel() {
 
         {error && <p className="error">{error}</p>}
         {notice && <p className="muted small">{notice}</p>}
+      </section>
+
+      <section className="intel-card">
+        <h3>AI swarm</h3>
+        <p className="muted small">
+          Launch bounded specialists together, preserve every worker result, then automatically queue one reviewer
+          to reconcile their evidence. Existing workspace permissions and worker limits remain authoritative.
+        </p>
+        <form className="intel-form" onSubmit={submitSwarm}>
+          <label className="field">
+            <span className="muted small">Swarm objective</span>
+            <textarea
+              name="swarmObjective"
+              rows={3}
+              value={swarmObjective}
+              placeholder="What should the swarm investigate, compare, or review?"
+              onChange={(event) => setSwarmObjective(event.target.value)}
+            />
+          </label>
+          <div className="intel-form-inline">
+            <label className="field">
+              <span className="muted small">Strategy</span>
+              <select
+                name="swarmStrategy"
+                value={swarmStrategy}
+                onChange={(event) => {
+                  const next = event.target.value as Exclude<SwarmStrategy, 'custom'>;
+                  setSwarmStrategy(next);
+                  if (next === 'offensive-security' || next === 'defensive-security') setSwarmSize(6);
+                }}
+              >
+                <option value="balanced">Balanced</option>
+                <option value="research">Research</option>
+                <option value="review">Review</option>
+                <option value="security">Security</option>
+                <option value="offensive-security">Offensive security force</option>
+                <option value="defensive-security">Defensive security force</option>
+              </select>
+            </label>
+            <label className="field">
+              <span className="muted small">Workers</span>
+              <select name="swarmSize" value={swarmSize} onChange={(event) => setSwarmSize(Number(event.target.value))}>
+                {[2, 3, 4, 5, 6].map((size) => <option key={size} value={size}>{size}</option>)}
+              </select>
+            </label>
+          </div>
+          {(swarmStrategy === 'offensive-security' || swarmStrategy === 'defensive-security') && (
+            <label className="field">
+              <span className="muted small">
+                Security engagement ID {swarmStrategy === 'offensive-security' ? '(required)' : '(optional)'}
+              </span>
+              <input
+                name="swarmEngagementId"
+                value={swarmEngagementId}
+                placeholder="eng_..."
+                onChange={(event) => setSwarmEngagementId(event.target.value)}
+              />
+            </label>
+          )}
+          <button
+            className="primary"
+            type="submit"
+            disabled={
+              busy || !swarmObjective.trim() || !workspaceId
+              || (swarmStrategy === 'offensive-security' && !swarmEngagementId.trim())
+            }
+          >
+            Launch swarm
+          </button>
+        </form>
+
+        {swarms.length === 0 ? (
+          <p className="muted small">No swarms yet.</p>
+        ) : (
+          <ul className="intel-list plain">
+            {swarms.map((swarm) => (
+              <li key={swarm.id}>
+                <div className="intel-actions-row">
+                  <span className={`badge ${SWARM_STATUS_TONE[swarm.status]}`}>{swarm.status}</span>
+                  <span className="badge">{swarm.strategy}</span>
+                  <span className="muted small">
+                    {swarm.progress.terminal}/{swarm.progress.total} workers finished
+                  </span>
+                </div>
+                <p className="muted small">{swarm.objective}</p>
+                <div className="intel-actions-row">
+                  {swarm.members.map((member) => (
+                    <span key={member.taskId} className={`badge ${STATUS_TONE[member.status] ?? ''}`}>
+                      {member.role}: {member.status.replace(/_/g, ' ')}
+                    </span>
+                  ))}
+                </div>
+                {swarm.result && <p className="muted small">{swarm.result.slice(0, 600)}</p>}
+                {LIVE_SWARM_STATUSES.includes(swarm.status as typeof LIVE_SWARM_STATUSES[number]) && (
+                  <div className="intel-actions-row">
+                    <button
+                      disabled={busy}
+                      onClick={() => void act(() => delegationApi.cancelSwarm(swarm.id), 'Swarm cancelled.')}
+                    >
+                      Cancel swarm
+                    </button>
+                  </div>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
       </section>
 
       <section className="intel-card">

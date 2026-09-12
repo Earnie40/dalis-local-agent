@@ -122,6 +122,7 @@ export const ModelAliasSchema = z.enum([
   'fast',
   'chat',
   'qwen_uncensored',
+  'swarm_qwen',
   'coder',
   'reasoner',
   'reviewer',
@@ -141,6 +142,7 @@ export const ModelAliasSchema = z.enum([
   'gpu_reviewer',
   'gpu_chat',
   'gpu_qwen_uncensored',
+  'gpu_swarm_qwen',
 ]);
 export type ModelAlias = z.infer<typeof ModelAliasSchema>;
 

@@ -47,6 +47,19 @@ describe('agent UI state', () => {
     );
   });
 
+  it('uses one combined Chat + Agent surface while preserving old transcripts', async () => {
+    const source = await readFile(join(process.cwd(), 'apps/web/src/App.tsx'), 'utf8');
+    const chatStart = source.indexOf(") : mode === 'chat' ? (");
+
+    expect(chatStart).toBeGreaterThan(-1);
+    expect(source).toContain('Chat + Agent');
+    expect(source).not.toContain("mode === 'agent'");
+    expect(source.match(/<AgentPanel \/>/g)).toHaveLength(1);
+    expect(source).not.toContain('streamChat');
+    expect(source).toContain('Archived Chat conversations');
+    expect(source).toContain('api.listConversations()');
+  });
+
   it('carries only visible conversation turns into a follow-up run', () => {
     expect(agentConversationHistory([
       { type: 'user_prompt', content: 'Inspect the router.' },

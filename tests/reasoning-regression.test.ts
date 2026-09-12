@@ -220,6 +220,91 @@ describe('general reasoning regression', () => {
     expect(controller.state.unknowns).toEqual(expect.arrayContaining(['identifier', 'configuration']));
   });
 
+  it.each([
+    { complete: false, auditId: 'wifi_network_name' },
+    { complete: true, auditId: 'wifi_network_name' },
+    { complete: false, auditId: 'wifi_network_name_extraction' },
+    { complete: true, auditId: 'wifi_network_name_extraction' },
+  ])('completes a network observation when the audit repeats the covered requirement ($complete, $auditId)', async ({ complete, auditId }) => {
+    // The saved failing run returned complete:false with an exact copy of the
+    // draft requirement, then successfully observed the SSID before blocking.
+    const goal = 'tell me the name of the wifi network we are on';
+    const wifi: EvidenceRequirement = { id: 'wifi_network_name', requestClause: goal,
+      output: 'netsh wlan show interfaces', successCondition: 'The output contains the name of the WiFi network.',
+      scope: 'local_machine', kind: 'fact', allowedProvenance: ['production_data', 'local_machine'] };
+    const diagnostics: Array<{ phase: string; stage: string }> = [];
+    const controller = controllerProvider([wifi], (phase, _input, decision) => phase === 'plan_audit'
+      ? { complete, explanation: 'The output must identify the WiFi network name.', missingRequirements: [{ ...wifi, id: auditId }] }
+      : decision);
+    let executed = 0;
+    const result = await runAgentLoop({ provider: primaryProvider([
+      response('', [call('system.network.info')]), response('TASK_COMPLETE: The WiFi network is Example-WiFi.'),
+    ], controller), model: 'mock', prompt: goal, executionEnvironment: windows,
+      capabilities: { toolCalling: 'verified', streaming: 'unsupported' }, maxTurns: 4, maxToolCalls: 2,
+      onEvent: event => { if (event.reasoningDiagnostic) diagnostics.push(event.reasoningDiagnostic); },
+      executor: { listTools: () => [schema('system.network.info', 'Read connected WiFi interface details')],
+        execute: async () => { executed += 1; return { success: true, output: 'SSID : Example-WiFi',
+          sources: [source('SSID : Example-WiFi', 'local_machine', 'system.network.info')] }; } } });
+    expect(result.completionState).toBe('GOAL_COMPLETE');
+    expect(result.answer).toContain('Example-WiFi');
+    expect(executed).toBe(1);
+    expect(result.workingState.reasoning!.requiredEvidence).toEqual([wifi]);
+    expect(reasoningAcceptance(result.workingState.reasoning, goal).ok).toBe(true);
+    expect(diagnostics.some(d => d.phase === 'plan_audit' && d.stage === 'repair')).toBe(true);
+    expect(diagnostics.some(d => d.stage === 'retry' || d.stage === 'fallback')).toBe(false);
+  });
+
+  it('retains distinct audit outcomes with colliding IDs without stealing explicit suffix IDs', async () => {
+    const goal = 'Observe the active identifier and configuration and firmware';
+    const original = requirement(goal, 'identifier');
+    const configuration = { ...requirement(goal, 'identifier'), output: 'configuration', successCondition: 'Observe configuration' };
+    const firmware = { ...requirement(goal, 'identifier_2'), output: 'firmware' };
+    const controller = new ReasoningController({ goal, model: 'mock', maxTurns: 8, maxToolCalls: 4, reserveTurns: 2,
+      provider: controllerProvider([original], (phase, _input, decision) => phase === 'plan_audit'
+        ? { complete: false, explanation: 'Configuration and firmware are also requested.',
+          missingRequirements: [configuration, { ...configuration, allowedProvenance: [...configuration.allowedProvenance].reverse() }, firmware] }
+        : decision) });
+    await controller.initialize();
+    expect(controller.planningStatus()).toBe('ready');
+    expect(controller.state.requiredEvidence).toEqual([original, { ...configuration, id: 'identifier_3' }, firmware]);
+    expect(controller.unresolved()).toHaveLength(3);
+    expect(reasoningAcceptance(controller.state, goal).ok).toBe(false);
+  });
+
+  it('repairs duplicate IDs in the initial draft before presenting them to the audit', async () => {
+    const goal = 'Observe the active identifier and configuration';
+    const original = requirement(goal, 'identifier');
+    const configuration = { ...original, output: 'configuration', successCondition: 'Observe configuration' };
+    let proposed: EvidenceRequirement[] = [];
+    const controller = new ReasoningController({ goal, model: 'mock', maxTurns: 8, maxToolCalls: 4, reserveTurns: 2,
+      provider: controllerProvider([original, { ...original }, configuration], (phase, input, decision) => {
+        if (phase === 'plan_audit') proposed = (input as unknown as { proposedRequirements: EvidenceRequirement[] }).proposedRequirements;
+        return decision;
+      }) });
+    await controller.initialize();
+    expect(proposed).toEqual([original, { ...configuration, id: 'identifier_2' }]);
+    expect(controller.state.requiredEvidence).toEqual(proposed);
+    expect(controller.planningStatus()).toBe('ready');
+  });
+
+  it('does not hide an invalid request clause behind a duplicate audit ID', async () => {
+    const goal = 'Observe the active identifier';
+    const original = requirement(goal, 'identifier');
+    let audits = 0;
+    const controller = new ReasoningController({ goal, model: 'mock', maxTurns: 8, maxToolCalls: 4, reserveTurns: 2,
+      provider: controllerProvider([original], (phase, _input, decision) => {
+        if (phase !== 'plan_audit') return decision;
+        audits += 1;
+        return { complete: false, explanation: 'Invalid clause is not an owner-requested output.',
+          missingRequirements: [{ ...original, requestClause: 'an invented request' }] };
+      }) });
+    await controller.initialize();
+    expect(audits).toBe(2);
+    expect(controller.planningStatus()).toBe('provisional');
+    expect(controller.state.planning?.reason).toContain('exact substring');
+    expect(controller.state.requiredEvidence).toEqual([original]);
+  });
+
   it('compares a declared command platform against trusted host and target metadata', async () => {
     const goal = 'Observe operating system details';
     const provider = controllerProvider([requirement(goal)], (phase, _input, decision) => phase === 'action'
