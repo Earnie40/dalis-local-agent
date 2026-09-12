@@ -63,7 +63,6 @@ Prefer read-only inspection.
 Evaluate:
 
 - what was actually observed
-- whether evidence supports the hypothesis
 - whether additional evidence is required
 - whether the original goal is satisfied
 
@@ -118,7 +117,6 @@ Required lifecycle:
 
 Start
 → Observe
-→ Hypothesis
 → Plan
 → ToolCall
 → Verify
@@ -140,4 +138,3 @@ Never fabricate unavailable tools or observations.
 
 Use concise decision records instead of storing private
 chain-of-thought.
-

@@ -34,7 +34,7 @@ $jobs = @(
   },
   @{
     role = "security-reviewer"
-    objective = "Perform a bounded defensive hypothesis review of recent repository changes. Use only local repository/test evidence. Do not test public targets. Return confirmed issues and rejected hypotheses separately."
+    objective = "Perform a bounded defensive review of recent repository changes. Use only local repository/test evidence. Do not test public targets. Return confirmed issues with their evidence."
   }
 )
 

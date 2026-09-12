@@ -1151,7 +1151,7 @@ ${toolsForTurn.map((tool) => `- ${tool.name}`).join('\n')}`,
     let evidenceProgressThisTurn = 0;
 
     // Every call is assessed against the latest observation before dispatch.
-    // Do not prestart promises: a failed predecessor requires hypothesis revision.
+    // Dispatch sequentially so each assessment sees the preceding tool result.
     const executeSafely = async (call: NormalizedToolCall): Promise<LoopToolResult> => {
       try {
         return await executor.execute(call, signal);
@@ -1428,7 +1428,7 @@ ${toolsForTurn.map((tool) => `- ${tool.name}`).join('\n')}`,
     if (stopReason === 'cancelled' || stopReason === 'tool-budget') break;
 
     // Executed calls count as progress only when they add admissible evidence.
-    // Allow bounded correction of hypotheses; exhausting retries never proves a goal.
+    // Allow bounded recovery; exhausting retries never proves a goal.
     if (evidenceProgressThisTurn === 0) {
       unproductiveTurns += 1;
       if (unproductiveTurns >= maxUnproductiveTurns) {
@@ -1578,6 +1578,4 @@ export class LocalAgentConversation {
     return result;
   }
 }
-
-
 

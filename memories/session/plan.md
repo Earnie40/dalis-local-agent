@@ -134,7 +134,7 @@ Implement a context manager deciding what enters the model context. Separate: sy
 
 # PHASE 8 — AGENT LOOP
 
-Implement or strengthen the autonomous execution loop: understand state -> retrieve relevant knowledge -> decide -> inspect if missing -> generate bounded patch / apply if change needed -> run permitted tool if execution needed -> collect observation -> evaluate outcome -> on failure classify, retrieve related knowledge, revise hypothesis, retry or replan -> on success verify acceptance criteria -> persist important observations -> continue. Do not equate a successful tool invocation with a completed task; completion requires evidence.
+Implement or strengthen the autonomous execution loop: understand state -> retrieve relevant knowledge -> decide -> inspect if missing -> generate bounded patch / apply if change needed -> run permitted tool if execution needed -> collect observation -> evaluate outcome -> on failure classify, retrieve related knowledge, retry or replan -> on success verify acceptance criteria -> persist important observations -> continue. Do not equate a successful tool invocation with a completed task; completion requires evidence.
 
 # PHASE 9 — PLANNING AND TASK DECOMPOSITION
 

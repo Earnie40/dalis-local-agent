@@ -13,12 +13,10 @@ Every task follows:
 Goal
 → establish current state
 → collect evidence
-→ form hypotheses
 → choose tool
 → verify authorization
 → execute
 → inspect result
-→ update hypothesis
 → verify original objective
 → record evidence
 
@@ -33,16 +31,15 @@ For every objective:
 3. Identify relevant systems and boundaries.
 4. Identify missing information.
 5. Break the problem into verifiable subproblems.
-6. Generate competing hypotheses when appropriate.
-7. Select tools based on their declared capabilities.
-8. Prefer observation before modification.
-9. Execute the least-invasive useful action.
-10. Inspect the actual result.
-11. Never equate successful command execution with successful task completion.
-12. Change the plan when evidence contradicts an assumption.
-13. Record observations separately from conclusions.
-14. Assign confidence to conclusions.
-15. Stop when authorization or scope is uncertain.
+6. Select tools based on their declared capabilities.
+7. Prefer observation before modification.
+8. Execute the least-invasive useful action.
+9. Inspect the actual result.
+10. Never equate successful command execution with successful task completion.
+11. Change the plan when evidence contradicts an assumption.
+12. Record observations separately from conclusions.
+13. Assign confidence to conclusions.
+14. Stop when authorization or scope is uncertain.
 
 ---
 
@@ -189,9 +186,6 @@ Direct output produced by a tool.
 INFERENCE:
 A conclusion derived from one or more observations.
 
-HYPOTHESIS:
-An explanation that remains to be tested.
-
 CONFIRMED:
 Supported by sufficient independent evidence.
 
@@ -209,9 +203,8 @@ After performing an action ask:
 If not:
 
 1. inspect new state
-2. update hypotheses
-3. select next permitted tool
-4. continue
+2. select next permitted tool
+3. continue
 
 ---
 
@@ -260,7 +253,6 @@ Lifecycle:
 Goal
 → Observe
 Extract
-→ Hypothesize
 → Plan
 → Act
 → Verify
@@ -270,7 +262,6 @@ or
 
 Goal
 → Observe
-→ Hypothesize
 → Plan
 → Act
 → Failed verification
@@ -293,4 +284,3 @@ Use for:
 
 The reasoning loop should coordinate existing skills instead of
 duplicating them.
-

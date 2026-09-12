@@ -19,7 +19,7 @@ function state(): ReasoningState {
     version: 1, goal, successCondition: 'Both facts observed',
     requiredEvidence: ['identifier', 'configuration'].map(id => ({ id, requestClause: goal, output: id,
       successCondition: `Observe ${id}`, scope: 'user_specific', kind: 'fact', allowedProvenance: ['local_machine'] })),
-    hypotheses: [], unknowns: ['configuration'], observations: [], revisions: [],
+    unknowns: ['configuration'], observations: [],
     environment: { platform: 'win32', shell: 'cmd.exe', arch: 'x64' },
     budget: { turnsRemaining: 5, toolCallsRemaining: 5, reserveTurns: 2, controlRequests: 4, maxControlRequests: 20 },
     evidence: [{ id: 'e1', observationId: 'o1', requirementId: 'identifier', claim: 'mock identifier', quote: 'mock identifier',

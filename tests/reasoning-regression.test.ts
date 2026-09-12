@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { runAgentLoop, type ToolExecutor, type LoopEvent } from '../packages/agent-core/src/agent-loop';
-import { ReasoningController, reasoningAcceptance, type EvidenceRequirement, type ReasoningState } from '../packages/agent-core/src/reasoning-controller';
+import { ReasoningController, reasoningAcceptance, reasoningPromptView, type EvidenceRequirement, type ReasoningState } from '../packages/agent-core/src/reasoning-controller';
 import { sourcesForResult, type EvidenceSource } from '../packages/agent-core/src/evidence-provenance';
 import { buildWorkingStateContext, compactMessagesForRequest } from '../packages/agent-core/src/runtime-state';
 import type { ModelChatRequest, ModelChatResponse, ModelProvider, NormalizedToolCall, ToolSchema } from '../packages/agent-core/src/types';
@@ -16,16 +16,13 @@ const requirement = (goal: string, id = 'account'): EvidenceRequirement => ({ id
 
 type DecisionInput = { state: ReasoningState; candidate: NormalizedToolCall; tool: ToolSchema; sources: EvidenceSource[]; success: boolean; observationId: string; draft: string };
 
-/** The model boundary is mocked; schema/origin/revision/completion gates are real. */
+/** The model boundary is mocked; schema/origin/completion gates are real. */
 function controllerProvider(requirements: EvidenceRequirement[], customize?: (phase: string, input: DecisionInput, decision: Record<string, unknown>) => unknown): Pick<ModelProvider, 'chat'> {
-  let number = 0;
   return { async chat(request) {
-    number += 1;
     const phase = request.systemPrompt!.match(/REASONING_CONTROL:(\w+)/)![1];
     const input = JSON.parse(request.messages[0].content) as DecisionInput;
-    const statement = `Hypothesis ${number}: inspect a source that can establish the outstanding fact`;
     let decision: Record<string, unknown> = {};
-    if (phase === 'plan') decision = { successCondition: 'Every requested output is observed from admissible evidence', requirements, hypotheses: [{ statement: 'A local provider may expose the active account', basis: 'Unverified approach', confidence: 0.4 }], unknowns: requirements.map(r => r.output) };
+    if (phase === 'plan') decision = { successCondition: 'Every requested output is observed from admissible evidence', requirements, unknowns: requirements.map(r => r.output) };
     if (phase === 'plan_audit') decision = {
       complete: true,
       explanation: 'Every requested output has its own requirement in this test plan.',
@@ -35,15 +32,13 @@ function controllerProvider(requirements: EvidenceRequirement[], customize?: (ph
       relevant: true, requirementIds: requirements.map(r => r.id), unknown: 'The owner-specific account facts',
       prediction: 'This source may expose the required account facts', causalJustification: 'The proposed source exposes account state or the procedure for obtaining that state.',
       purpose: 'observe', informationGain: 0.9, higherInformationAlternative: '', requiredPlatform: 'any', platformCompatible: true, platformReason: 'The tool is mocked on the registered Windows host.',
-      hypothesis: { statement, basis: 'Update grounded in the previous observation', confidence: 0.7 },
-      revision: input.state.revisionRequired ? { observationId: input.state.revisionRequired, failedAssumption: 'The prior source would establish the owner-specific fact', revisedHypothesis: statement, reason: 'The recorded result failed or did not provide admissible evidence.' } : null,
     };
     if (phase === 'observation') decision = {
       actual: input.sources.map(s => s.content).join('\n') || 'No output', predictionMatched: input.success, relevant: input.success,
       // Deliberately overclaim that every returned value proves a fact. The
       // runtime must still reject decoy origins even with confidence 1.
       facts: input.sources.flatMap(s => requirements.map(r => ({ requirementId: r.id, claim: s.content, sourceId: s.id, quote: s.content, mode: 'observation', confidence: 1 }))),
-      contradictedEvidenceIds: [], failedAssumption: 'The source contained the required real-world fact', revisedHypothesis: 'The result does not establish the owner-specific fact; inspect a different authoritative source',
+      contradictedEvidenceIds: [],
     };
     if (phase === 'verification') decision = {
       complete: true, explanation: 'Mock semantic verifier accepts the draft; runtime evidence checks still apply',
@@ -70,7 +65,7 @@ function contractBoundProvider(plan: () => ModelChatResponse | undefined): Pick<
     const sources = input.sources ?? [];
     if (isPhase(request, 'plan')) return plan() ?? response(JSON.stringify({
       successCondition: 'Observe the requested account from an authorized local source',
-      requirements: [requirement(input.originalRequest ?? '')], hypotheses: [], unknowns: [],
+      requirements: [requirement(input.originalRequest ?? '')], unknowns: [],
     }));
     if (isPhase(request, 'plan_audit')) return response(JSON.stringify({
       complete: true, explanation: 'Every requested output has its own requirement.', missingRequirements: [],
@@ -81,17 +76,12 @@ function contractBoundProvider(plan: () => ModelChatResponse | undefined): Pick<
       causalJustification: 'The registered tool reads the account state the request asks about.',
       purpose: 'observe', informationGain: 0.9, higherInformationAlternative: '',
       requiredPlatform: 'any', platformCompatible: true, platformReason: 'The tool is mocked on the registered host.',
-      hypothesis: { statement: 'The local provider exposes the active account', basis: 'Registered tool description', confidence: 0.7 },
-      revision: input.state?.revisionRequired
-        ? { observationId: input.state.revisionRequired, failedAssumption: 'The prior source established the account',
-          revisedHypothesis: 'The local provider exposes the active account', reason: 'The recorded result supplied no admissible evidence.' }
-        : null,
     }));
     if (isPhase(request, 'observation')) return response(JSON.stringify({
       actual: sources.map(item => item.content).join(' ') || 'No output',
       predictionMatched: input.success === true, relevant: input.success === true,
       facts: ids.flatMap(id => sources.map(item => ({ requirementId: id, claim: item.content, sourceId: item.id, quote: item.content, mode: 'observation', confidence: 1 }))),
-      contradictedEvidenceIds: [], failedAssumption: '', revisedHypothesis: '',
+      contradictedEvidenceIds: [],
     }));
     return response(JSON.stringify({
       complete: true, explanation: 'Reviewed against the runtime ledger', coveredRequirementIds: ids,
@@ -167,7 +157,7 @@ describe('general reasoning regression', () => {
       response('', [call('shell.run', { command: 'ls /proc/example-process' })]),
       response('', [call('local.record', { profile: 'first' })]),
       (request: ModelChatRequest) => {
-        expect(request.systemPrompt).toContain('revisionRequired');
+        expect(request.systemPrompt).not.toMatch(/hypothes|revisionRequired/i);
         expect(request.systemPrompt).toContain('profile unavailable');
         return response('', [call('local.record', { profile: 'second' })]);
       },
@@ -187,23 +177,58 @@ describe('general reasoning regression', () => {
     const state = result.workingState.reasoning!;
     expect(state.evidence.filter(e => e.accepted).map(e => e.claim)).toEqual([authoritative, 'configured-value']);
     expect(state.evidence.filter(e => !e.accepted).map(e => e.source.provenance)).toEqual(expect.arrayContaining(['documentation', 'fixture', 'example']));
-    expect(state.observations.find(o => o.tool === 'local.record' && !o.success)?.failedAssumption).toBeTruthy();
-    expect(state.revisions.length).toBeGreaterThanOrEqual(4);
+    expect(state.observations.find(o => o.tool === 'local.record' && !o.success)?.actual).toContain('profile unavailable');
     expect(reasoningAcceptance(state, scenario.goal).ok).toBe(true);
     expect(result.turns).toBeLessThan(20);
   });
 
-  it('requires revision after irrelevant successful output and rejects an unchanged hypothesis', async () => {
+  it.each([
+    { outcome: 'failed execution', success: false, relevant: true, predictionMatched: false },
+    { outcome: 'irrelevant output', success: true, relevant: false, predictionMatched: true },
+    { outcome: 'no accepted evidence', success: true, relevant: true, predictionMatched: true },
+    { outcome: 'unexpected output', success: true, relevant: true, predictionMatched: false },
+  ])('allows the next action after $outcome without a hypothesis or revision', async ({ success, relevant, predictionMatched }) => {
     const goal = 'Observe the active local account';
-    const provider = controllerProvider([requirement(goal)], (phase, _input, decision) => phase === 'action' ? { ...decision, revision: null } : phase === 'observation' ? { ...decision, relevant: false } : decision);
+    const provider = controllerProvider([requirement(goal)], (phase, _input, decision) => phase === 'observation'
+      ? { ...decision, relevant, predictionMatched, facts: [] } : decision);
     const controller = new ReasoningController({ goal, provider, model: 'mock', maxTurns: 8, maxToolCalls: 4, reserveTurns: 2 });
     await controller.initialize();
     const candidate = call('local.lookup');
     const action = (await controller.assess(candidate, schema(candidate.name))).action!;
-    const observed = await controller.observe(candidate, { success: true, output: 'Wi-Fi SSID: decoy', sources: [source('Wi-Fi SSID: decoy', 'local_machine')] }, action);
+    const observed = await controller.observe(candidate, { success, output: 'No account data', sources: [source('No account data', 'local_machine')] }, action);
     expect(observed.progress).toBe(false);
     expect(controller.state.evidence.every(e => !e.accepted)).toBe(true);
-    expect((await controller.assess(call('local.next'), schema('local.next'))).reason).toContain('hypothesis revision');
+    expect(observed.feedback).not.toMatch(/hypothes|revisionRequired|failedAssumption/i);
+    // Even a retry of the same candidate needs no manufactured change record.
+    expect((await controller.assess(candidate, schema(candidate.name))).ok).toBe(true);
+    expect((await controller.assess(call('local.next'), schema('local.next'))).ok).toBe(true);
+    expect((await controller.verify('TASK_COMPLETE: invented account')).ok).toBe(false);
+  });
+
+  it('ignores obsolete decision fields and excludes them from restored prompt state', async () => {
+    const goal = 'Observe the active local account';
+    const prompts: string[] = [];
+    const legacy = { hypothesis: false, revision: 'obsolete malformed record' };
+    const base = controllerProvider([requirement(goal)], (phase, _input, decision) => phase === 'action'
+      ? { ...decision, ...legacy } : decision);
+    const controller = new ReasoningController({ goal, model: 'mock', maxTurns: 8, maxToolCalls: 4, reserveTurns: 2,
+      provider: { async chat(request) { prompts.push(request.systemPrompt!); return base.chat(request); } } });
+    await controller.initialize();
+    const assessed = await controller.assess(call('local.lookup'), schema('local.lookup'));
+    expect(assessed.ok).toBe(true);
+    expect(assessed.action).not.toHaveProperty('hypothesis');
+    expect(assessed.action).not.toHaveProperty('revision');
+    const saved = { ...structuredClone(controller.state), hypotheses: [{ statement: 'Legacy note' }],
+      revisions: [{ reason: 'Legacy revision' }], revisionRequired: 'o1',
+      nextAction: { ...controller.state.nextAction!, ...legacy },
+      observations: [{ id: 'o1', tool: 'local.lookup', prediction: 'Read account', actual: 'Unavailable',
+        success: false, relevant: false, predictionMatched: false, failedAssumption: 'Legacy assumption', revisedHypothesis: 'Legacy change' }] };
+    const view = reasoningPromptView(saved);
+    expect(JSON.stringify(view)).not.toMatch(/hypothes|revision|failedAssumption/i);
+    expect(view.observations[0].actual).toBe('Unavailable');
+    expect(view.requiredEvidence).toEqual(controller.state.requiredEvidence);
+    expect(saved.revisionRequired).toBe('o1');
+    expect(prompts.join('\n')).not.toMatch(/hypothes|revision/i);
   });
 
   it('repairs an initial plan that omitted an original requested output', async () => {
@@ -453,14 +478,13 @@ describe('general reasoning regression', () => {
     const goal = 'Observe the active local account';
     const provider = controllerProvider([requirement(goal)], (phase, _input, decision) => {
       if (phase !== 'plan') return decision;
-      // No hypotheses, no unknowns, and no provenance list at all.
+      // No unknowns or provenance list at all.
       return { successCondition: decision.successCondition,
         requirements: (decision.requirements as Array<Record<string, unknown>>).map(({ allowedProvenance: _omitted, ...rest }) => rest) };
     });
     const controller = new ReasoningController({ goal, provider, model: 'mock', maxTurns: 8, maxToolCalls: 4, reserveTurns: 2 });
     await controller.initialize();
     expect(controller.planningStatus()).toBe('ready');
-    expect(controller.state.hypotheses).toEqual([]);
     expect(controller.state.requiredEvidence[0].allowedProvenance).toEqual(['local_machine', 'production_data']);
     // A derived list is never wider than the requirement scope allows.
     for (const provenance of ['documentation', 'fixture', 'example', 'inference', 'speculation', 'unknown']) {
@@ -569,14 +593,13 @@ describe('general reasoning regression', () => {
     expect(assessed.action).toBeDefined();
   });
 
-  it('starts an unfamiliar task with an unknown solution path and no invented hypothesis', async () => {
+  it('starts an unfamiliar task with an unknown solution path', async () => {
     const goal = 'Establish how the connected device reports its own calibration state';
     const provider = controllerProvider([requirement(goal, 'calibration')], (phase, _input, decision) => phase === 'plan'
-      ? { ...decision, hypotheses: [], unknowns: ['The procedure for reading calibration state is unknown.'] }
+      ? { ...decision, unknowns: ['The procedure for reading calibration state is unknown.'] }
       : decision);
     const controller = new ReasoningController({ goal, provider, model: 'mock', maxTurns: 8, maxToolCalls: 4, reserveTurns: 2 });
     await controller.initialize();
-    expect(controller.state.hypotheses).toEqual([]);
     expect(controller.state.unknowns).toContain('The procedure for reading calibration state is unknown.');
     // Discovery stays admissible while the solution path is unresolved.
     expect((await controller.assess(call('local.discover'), schema('local.discover', 'List the interfaces the device exposes'))).ok).toBe(true);

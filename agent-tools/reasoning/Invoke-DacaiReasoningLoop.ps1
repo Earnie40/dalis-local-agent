@@ -4,7 +4,6 @@ param(
     [ValidateSet(
         "Start",
         "Observe",
-        "Hypothesis",
         "Plan",
         "ToolCall",
         "Verify",
@@ -141,8 +140,6 @@ switch ($Action) {
 
             observations = @()
 
-            hypotheses   = @()
-
             plan         = @()
 
             actions      = @()
@@ -191,44 +188,9 @@ switch ($Action) {
         $state.observations =
             @($state.observations) + $entry
 
-        $state.phase = "hypothesize"
-
-        Add-History $state "observation" $Text
-
-        Save-Run $state $RunId
-
-        $state | ConvertTo-Json -Depth 20
-    }
-
-
-    # --------------------------------------------------------
-    # HYPOTHESIS
-    # --------------------------------------------------------
-
-    "Hypothesis" {
-
-        if (-not $Text) {
-            throw "Text is required."
-        }
-
-        $state = Load-Run $RunId
-
-        $entry = [pscustomobject]@{
-            timestamp  = (Get-Date).ToString("o")
-            hypothesis = $Text
-            confidence = $Confidence
-            status     = "untested"
-        }
-
-        $state.hypotheses =
-            @($state.hypotheses) + $entry
-
         $state.phase = "plan"
 
-        Add-History `
-            $state `
-            "hypothesis" `
-            "$Text [confidence=$Confidence]"
+        Add-History $state "observation" $Text
 
         Save-Run $state $RunId
 

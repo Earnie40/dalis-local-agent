@@ -13,7 +13,6 @@
   "behavior": {
     "non_trivial_tasks_use_reasoning_protocol": true,
     "observe_before_modify": true,
-    "competing_hypotheses": true,
     "replan_on_contradiction": true,
     "completion_requires_verification": true,
     "missing_capability_must_be_reported": true

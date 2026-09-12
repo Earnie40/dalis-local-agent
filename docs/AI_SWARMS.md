@@ -60,7 +60,7 @@ provider telemetry, engagement record, and permission audit remain observable.
 
 `offensive-security` coordinates six lanes for authorized access assessment:
 trust-boundary analysis, interface enumeration, intelligence gathering,
-hypothesis testing, variant hunting, independent review, and reproducible proof.
+failure investigation, variant hunting, independent review, and reproducible proof.
 It requires an active security engagement ID and carries that engagement's exact targets,
 environments, allowed categories, and prohibited actions into every assignment.
 Controlled actions against protected systems continue through the existing

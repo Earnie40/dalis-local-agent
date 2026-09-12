@@ -14,7 +14,7 @@ Good child roles:
 - `debugger` for diagnosis.
 - `coder` for bounded implementation.
 - `test-engineer` for tests.
-- `security-reviewer` for hypothesis-driven defensive review.
+- `security-reviewer` for defensive review.
 - `variant-hunter` for structural analog searches.
 - `ci-fixer` for CI remediation.
 

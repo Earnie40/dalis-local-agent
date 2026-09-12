@@ -110,13 +110,12 @@
     {
       "id": "reasoning-loop",
       "skill": "agent.reasoning.loop",
-      "description": "Maintains durable goal, observation, hypothesis, plan, action, verification and replanning state.",
+      "description": "Maintains durable goal, observation, plan, action, verification and replanning state.",
       "command": "agent-tools/reasoning/Invoke-DacaiReasoningLoop.ps1",
       "arguments": {
         "Action": [
           "Start",
           "Observe",
-          "Hypothesis",
           "Plan",
           "ToolCall",
           "Verify",

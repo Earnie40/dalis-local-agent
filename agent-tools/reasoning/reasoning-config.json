@@ -6,7 +6,6 @@
   "phases": [
     "goal",
     "observe",
-    "hypothesize",
     "plan",
     "act",
     "verify",
@@ -17,7 +16,6 @@
   "principles": {
     "goal_before_tool": true,
     "observe_before_modify": true,
-    "competing_hypotheses": true,
     "tool_output_is_evidence": true,
     "verification_required": true,
     "replan_on_contradiction": true,

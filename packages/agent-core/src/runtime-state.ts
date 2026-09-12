@@ -237,7 +237,7 @@ export function buildWorkingStateContext(snapshot: AgentLoopContextSnapshot): st
     `Current goal: ${snapshot.goal}`,
   ];
 
-  if (snapshot.reasoning) lines.push(`GOAL / REQUIRED EVIDENCE / CURRENT HYPOTHESES / UNKNOWNS / NEXT ACTION / CAUSAL JUSTIFICATION / OBSERVATION / PROVENANCE / CONFIDENCE:\n${JSON.stringify(reasoningPromptView(snapshot.reasoning))}`);
+  if (snapshot.reasoning) lines.push(`GOAL / REQUIRED EVIDENCE / UNKNOWNS / NEXT ACTION / CAUSAL JUSTIFICATION / OBSERVATION / PROVENANCE / CONFIDENCE:\n${JSON.stringify(reasoningPromptView(snapshot.reasoning))}`);
   if (snapshot.plan) lines.push(`Plan / checklist:\n${snapshot.plan}`);
   if (snapshot.changedFiles.length) lines.push(`Changed files:\n${snapshot.changedFiles.map((path) => `- ${path}`).join('\n')}`);
   if (snapshot.validationResults.length) lines.push(`Validation evidence:\n${snapshot.validationResults.map((item) => `- ${item}`).join('\n')}`);

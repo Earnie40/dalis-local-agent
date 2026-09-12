@@ -36,8 +36,7 @@ integration.
    do not stop at a proposal while the necessary build and validation tools are
    available.
 7. Make a dependency-ordered plan: identify -> observe -> verify contract ->
-   integrate -> validate. Replan only the disproven branch when an observation
-   conflicts with a hypothesis.
+   integrate -> validate.
 8. Finish with an evidence ledger containing source, revision/date, scope,
    result, uncertainty, missing prerequisite, and the next highest-value
    action.

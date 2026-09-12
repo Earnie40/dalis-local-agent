@@ -29,7 +29,7 @@ const STRATEGY_LENSES: Record<Exclude<SwarmStrategy, 'custom'>, Array<{
   ],
   research: [
     { role: 'repo-explorer', assignment: 'Collect primary repository evidence and map the relevant components.' },
-    { role: 'debugger', assignment: 'Challenge the leading explanation with alternative hypotheses and counter-evidence.' },
+    { role: 'debugger', assignment: 'Check the leading explanation against the observed evidence.' },
     { role: 'variant-hunter', assignment: 'Search broadly for related implementations, edge cases, and structural variants.' },
     { role: 'reviewer', assignment: 'Compare the evidence and identify unsupported claims or missing context.' },
     { role: 'security-reviewer', assignment: 'Analyze security and privacy implications supported by concrete evidence.' },
@@ -44,7 +44,7 @@ const STRATEGY_LENSES: Record<Exclude<SwarmStrategy, 'custom'>, Array<{
     { role: 'repo-explorer', assignment: 'Confirm architecture and call-path claims against repository evidence.' },
   ],
   security: [
-    { role: 'security-reviewer', assignment: 'Map trust boundaries and test concrete security hypotheses.' },
+    { role: 'security-reviewer', assignment: 'Map trust boundaries and inspect concrete security risks.' },
     { role: 'variant-hunter', assignment: 'Search for variants of every confirmed or suspected weakness.' },
     { role: 'debugger', assignment: 'Trace exploitable failure conditions and challenge false positives.' },
     { role: 'reviewer', assignment: 'Independently review severity, reachability, and remediation tradeoffs.' },
@@ -54,7 +54,7 @@ const STRATEGY_LENSES: Record<Exclude<SwarmStrategy, 'custom'>, Array<{
   'offensive-security': [
     { role: 'security-reviewer', assignment: 'Map the protected system trust boundaries and identify concrete paths to obtain the authorized level of access.' },
     { role: 'repo-explorer', assignment: 'Enumerate exposed interfaces, authentication flows, authorization checks, and reachable assets.' },
-    { role: 'debugger', assignment: 'Test competing access-path hypotheses with available evidence and report reproducible failure conditions.' },
+    { role: 'debugger', assignment: 'Inspect access paths using available evidence and report reproducible failure conditions.' },
     { role: 'variant-hunter', assignment: 'Search for alternate access paths and structural variants of every confirmed weakness.' },
     { role: 'reviewer', assignment: 'Independently assess reachability, impact, false positives, and operational tradeoffs.' },
     { role: 'test-engineer', assignment: 'Design reproducible proof and regression checks for the authorized access assessment. Do not modify files.' },
