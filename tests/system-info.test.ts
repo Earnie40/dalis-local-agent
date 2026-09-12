@@ -41,6 +41,10 @@ describe('nearby Wi-Fi discovery', () => {
     expect(SYSTEM_TOOLS.map((tool) => tool.name)).toEqual([
       'system.network.info',
       'system.wifi.scan',
+      'system.network.interfaces',
+      'system.network.routes',
+      'system.network.dns',
+      'system.network.ping',
     ]);
   });
 });

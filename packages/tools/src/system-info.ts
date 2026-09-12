@@ -1,4 +1,5 @@
 import { runProcess } from './shell-tools';
+import { NETWORK_DIAGNOSTIC_TOOLS } from './network-diagnostics';
 import type { ToolDefinition } from './types';
 
 /**
@@ -119,4 +120,5 @@ export const systemWifiScanTool: ToolDefinition = {
 export const SYSTEM_TOOLS: ToolDefinition[] = [
   systemNetworkInfoTool,
   systemWifiScanTool,
+  ...NETWORK_DIAGNOSTIC_TOOLS,
 ];

@@ -1,4 +1,4 @@
-import { classifyCommand } from '@dacai-local-agent/security';
+import { classifyCommand, sanitizeText } from '@dacai-local-agent/security';
 import type { ToolDefinition, ToolExecutionContext } from './types';
 import { runProcess } from './shell-tools';
 
@@ -98,7 +98,8 @@ export const wslRunTool: ToolDefinition = {
   description:
     'Run a command inside a WSL distribution and return its output. Use this for Linux-native work on ' +
     'this Windows host — package managers, Linux toolchains, POSIX scripts — when shell.run would give ' +
-    'you PowerShell instead. The workspace directory is the working directory, translated to its /mnt path.',
+    'you a Windows shell instead. The workspace directory is the working directory, translated to its /mnt path. ' +
+    'Set user to root for Linux administration, package installation, packet capture, and security tools such as nmap.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -111,6 +112,10 @@ export const wslRunTool: ToolDefinition = {
       distro: {
         type: 'string',
         description: 'Distribution name from wsl.list. Omit to use the default distro.',
+      },
+      user: {
+        type: 'string',
+        description: 'Linux user to execute as, including root. Omit for the distribution default user.',
       },
       cwd: {
         type: 'string',
@@ -153,6 +158,7 @@ export const wslRunTool: ToolDefinition = {
     if (!command) throw new Error('"command" is required.');
 
     const distro = readDistro(input);
+    const user = typeof input.user === 'string' ? input.user.trim() : '';
     const classification = classifyCommand(command, { runtime: 'wsl' });
 
     const requestedCwd = typeof input.cwd === 'string' ? input.cwd.trim() : '';
@@ -164,17 +170,20 @@ export const wslRunTool: ToolDefinition = {
         : 60_000;
     timeoutMs = Math.max(1_000, Math.min(timeoutMs, 120_000));
 
-    // `--` ends WSL's own option parsing, so nothing in the command is read as
-    // a wsl.exe flag. bash -lc keeps one argument, so no Windows-side quoting
-    // rules apply to what the user actually asked to run.
+    // wsl.exe reparses the Windows command line and can preserve escaped quote
+    // characters literally. Transport the script as base64 so quotes, variables,
+    // Unicode and newlines survive. Source the decoded script in the login bash;
+    // process substitution leaves the command's stdin and exit status intact.
+    const encodedCommand = Buffer.from(command, 'utf8').toString('base64');
     const args = [
       ...(distro ? ['-d', distro] : []),
+      ...(user ? ['--user', user] : []),
       '--cd',
       cwd,
       '--',
       'bash',
       '-lc',
-      command,
+      `source <(printf %s ${encodedCommand} | base64 -d)`,
     ];
 
     const result = await runProcess('wsl.exe', args, {
@@ -186,7 +195,9 @@ export const wslRunTool: ToolDefinition = {
 
     return {
       ...result,
+      command: sanitizeText(command),
       distro: distro ?? '(default)',
+      user: user || '(default)',
       cwd,
       classifiedAs: classification.tier,
       executable: classification.executable,

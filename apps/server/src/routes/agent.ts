@@ -20,6 +20,7 @@ import {
   REPOSITORY_INTELLIGENCE_TOOLS,
   HOST_TOOLS,
   WSL_TOOLS,
+  SECURITY_TOOLS,
   READ_ONLY_WSL_TOOLS,
   SKILL_TOOLS,
   WORKTREE_TOOLS,
@@ -1262,13 +1263,6 @@ export function registerAgentRoutes(
     // command. Tool selection below depends on it: a runtime the user named in
     // an earlier turn must still have its tools selected now.
     const executionEnvironment = detectExecutionEnvironment(effectivePrompt, historyText);
-    // Linux-native work on a Windows host. shell.run gives PowerShell, so a
-    // prompt about apt, a POSIX script or a distro needs the WSL path instead.
-    const wantsWsl =
-      process.platform === 'win32' &&
-      (executionEnvironment === 'wsl' ||
-        executionEnvironment === 'bash' ||
-        /\b(ubuntu|debian|linux subsystem|apt-get|apt install|\/mnt\/[a-z]\b)\b/.test(prompt));
     const wantsGithub = workspace.capabilities.network && /\b(github|pull request|\bpr\b|ci|actions|checks)\b/.test(prompt);
     const codexServerTools = createCodexServerTools(deps.config.port);
 
@@ -1279,6 +1273,7 @@ export function registerAgentRoutes(
       ...(workspace.capabilities.write ? FILESYSTEM_TOOLS : READ_ONLY_FILESYSTEM_TOOLS),
       ...(workspace.capabilities.shell ? SHELL_TOOLS : READ_ONLY_SHELL_TOOLS),
       ...SYSTEM_TOOLS,
+      ...(workspace.capabilities.shell ? SECURITY_TOOLS : []),
       ...simulationTools,
       ...(workspace.capabilities.network ? WEB_TOOLS : []),
       ...MCP_TOOLS,
@@ -1288,7 +1283,8 @@ export function registerAgentRoutes(
       // wsl.run is a full command path, so it needs the same shell+write rights
       // shell.run does. Without them only the read-only distro listing appears,
       // which lets a run report what exists without being able to act on it.
-      ...(wantsWsl || [...advancedRequested].some((name) => name.startsWith('wsl.'))
+      // The owner requested persistent WSL access, independent of prompt wording.
+      ...(process.platform === 'win32'
         ? workspace.capabilities.shell && workspace.capabilities.write
           ? WSL_TOOLS
           : READ_ONLY_WSL_TOOLS

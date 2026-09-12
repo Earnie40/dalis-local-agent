@@ -11,6 +11,7 @@ export function registerInfrastructureRoutes(
   registry: ProviderRegistry,
 ): void {
   server.get('/api/infrastructure/runpod/status', async () => runpod.status());
+  server.post('/api/infrastructure/runpod/reconnect', async () => runpod.initialize());
   server.get('/api/infrastructure/runpod/preflight', async () => {
     const presence = await resolveRunpodPodPresence();
     if (!presence) {

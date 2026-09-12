@@ -12,10 +12,10 @@
 # Capability is determined by runtime probes, not assumptions in this file.
 #
 # HOST SELECTION:
-# Under ROUTING_POLICY=gpu-preferred a role alias runs on the RunPod GPU when
-# its `gpu_<role>` twin below is reachable and serving the named model. Local
-# Ollama is the fallback, never the silent default: when the pod is stopped,
-# unreachable, or missing the model, the run reports which of those it was.
+# The ordinary role aliases below directly select the RunPod GPU provider.
+# `gpu_<role>` aliases remain equivalent explicit selections. The one named
+# local escape hatch is `intelligence_local`; it runs only when deliberately
+# selected.
 #
 # Current measured capabilities:
 #
@@ -72,7 +72,7 @@ models:
   #
   # Do not replace this with an advisory-only model.
   agent:
-    provider: local_ollama
+    provider: remote_gpu_ollama
     model: huihui_ai/qwen3-abliterated:8b
     temperature: 0.15
 
@@ -86,12 +86,12 @@ models:
   # Slightly higher temperature allows consideration of multiple plausible
   # approaches without making the output excessively random.
   planner:
-    provider: local_ollama
+    provider: remote_gpu_ollama
     model: huihui_ai/qwen3-abliterated:8b
     temperature: 0.25
 
   reasoner:
-    provider: local_ollama
+    provider: remote_gpu_ollama
     model: huihui_ai/qwen3-abliterated:8b
     temperature: 0.25
 
@@ -109,14 +109,14 @@ models:
   # Keep temperature low. Coding execution should favor established repository
   # patterns over creative invention.
   coder:
-    provider: local_ollama
+    provider: remote_gpu_ollama
     model: huihui_ai/qwen3-abliterated:8b
     temperature: 0.08
 
   # Explicit alias for tool-loop execution when the caller specifically needs
   # verified structured tool calls.
   structured_agent:
-    provider: local_ollama
+    provider: remote_gpu_ollama
     model: huihui_ai/qwen3-abliterated:8b
     temperature: 0.05
 
@@ -136,7 +136,7 @@ models:
   # A slightly different sampling profile from the coder helps reduce identical
   # reasoning paths during self-review.
   reviewer:
-    provider: local_ollama
+    provider: remote_gpu_ollama
     model: huihui_ai/qwen3-abliterated:8b
     temperature: 0.22
 
@@ -147,7 +147,7 @@ models:
   # Default conversational/completion role. This uses the same low-refusal
   # checkpoint as the coding executor, with a chat-oriented temperature.
   chat:
-    provider: local_ollama
+    provider: remote_gpu_ollama
     model: huihui_ai/qwen3-abliterated:8b
     temperature: 0.2
 
@@ -163,7 +163,7 @@ models:
   # The agent loop admits it only if the runtime tool-capability probe passes;
   # it remains usable for ordinary chat when tool calling is not verified.
   qwen_uncensored:
-    provider: local_ollama
+    provider: remote_gpu_ollama
     model: huihui_ai/qwen3-abliterated:8b
     temperature: 0.2
 
@@ -185,7 +185,7 @@ models:
   #
   # Install with: ollama pull qwen2.5vl:7b
   vision:
-    provider: local_ollama
+    provider: remote_gpu_ollama
     model: qwen2.5vl:7b
     temperature: 0.2
 
@@ -198,8 +198,8 @@ models:
   #
   # NO TOOL EXECUTION.
   fast:
-    provider: local_ollama
-    model: phi3:mini
+    provider: remote_gpu_ollama
+    model: qwen3:8b
     temperature: 0.25
 
   # ---------------------------------------------------------------------------
@@ -210,8 +210,8 @@ models:
   # the autonomous execution loop until a capability probe proves correct tool
   # calling.
   research:
-    provider: local_ollama
-    model: phi4-mini:latest
+    provider: remote_gpu_ollama
+    model: qwen3:8b
     temperature: 0.35
 
   # ---------------------------------------------------------------------------

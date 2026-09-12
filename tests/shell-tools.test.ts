@@ -122,6 +122,23 @@ describe('git.run', () => {
 });
 
 describe('shell.run classification', () => {
+  it.skipIf(process.platform !== 'win32')('executes actual PowerShell syntax and reports its failure status', async () => {
+    const result = await shellRunTool.execute({ shell: 'powershell', command: '$value = 6 * 7; Write-Output $value' }, ctx);
+    expect(result).toMatchObject({ exitCode: 0, shell: 'powershell' });
+    expect((result as { stdout: string }).stdout.trim()).toBe('42');
+    expect(await shellRunTool.execute({ shell: 'powershell', command: 'exit 7' }, ctx)).toMatchObject({ exitCode: 7 });
+  });
+
+  it.skipIf(process.platform !== 'win32')('executes Command Prompt builtins and captures output', async () => {
+    const result = await shellRunTool.execute({ shell: 'cmd', command: 'echo CMD_READY' }, ctx);
+    expect(result).toMatchObject({ exitCode: 0, shell: 'cmd' });
+    expect((result as { stdout: string }).stdout.trim()).toBe('CMD_READY');
+  });
+
+  it('rejects unknown interpreters before execution', async () => {
+    await expect(shellRunTool.execute({ shell: 'missing', command: 'echo hello' }, ctx)).rejects.toThrow('Unsupported shell');
+  });
+
   const engine = new PermissionEngine();
 
   const decide = (command: string) =>

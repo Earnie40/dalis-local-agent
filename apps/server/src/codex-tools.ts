@@ -23,6 +23,33 @@ function childName(objective: string): string {
   return `${words.join('-').slice(0, 45)}-${Date.now().toString(36)}`;
 }
 
+function infrastructureEvidence(
+  locator: string,
+  result: unknown,
+  effect: 'read' | 'mutation' = 'read',
+) {
+  return [{
+    id: 'infrastructure',
+    locator,
+    provenance: 'production_data' as const,
+    content: typeof result === 'string' ? result : JSON.stringify(result, null, 2),
+    effect,
+  }];
+}
+
+function summarizeRunpodStatus(result: unknown): unknown {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return result;
+  const status = result as Record<string, unknown>;
+  const connected = status.connected === true;
+  const tunnelHealthy = status.tunnelHealthy === true;
+  return {
+    statusSummary: connected
+      ? `The configured RunPod is connected; its inference tunnel is ${tunnelHealthy ? 'healthy' : 'not healthy'}.`
+      : 'The configured RunPod is not connected.',
+    ...status,
+  };
+}
+
 async function jsonFetch(url: string, init?: RequestInit): Promise<any> {
   const response = await fetch(url, {
     ...init,
@@ -38,6 +65,70 @@ async function jsonFetch(url: string, init?: RequestInit): Promise<any> {
 export function createCodexServerTools(port: number): ToolDefinition[] {
   const base = `http://127.0.0.1:${port}`;
   const workspaces = new PostgresWorkspaceRegistry();
+
+  const runpodStatus: ToolDefinition = {
+    name: 'infrastructure.runpod.status',
+    description:
+      'Measure the configured RunPod SSH connection, GPU/VRAM, CUDA, Python, Ollama, tunnel, inference endpoint and available models. ' +
+      'Uses the server connection without exposing credentials to the model.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    permissionTier: 'safe',
+    requiresNetwork: true,
+    timeoutMs: 120_000,
+    evidenceSources: (result) => infrastructureEvidence('configured RunPod status', result),
+    async execute(_input, ctx) {
+      const result = await jsonFetch(`${base}/api/infrastructure/runpod/status`, { signal: ctx.signal });
+      return summarizeRunpodStatus(result);
+    },
+  };
+
+  const runpodPreflight: ToolDefinition = {
+    name: 'infrastructure.runpod.preflight',
+    description:
+      'Read the configured RunPod account and pod availability used for routing, including whether a pod is running and ready to route. ' +
+      'Does not start billable compute.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    permissionTier: 'safe',
+    requiresNetwork: true,
+    timeoutMs: 30_000,
+    evidenceSources: (result) => infrastructureEvidence('RunPod account and pod preflight', result),
+    async execute(_input, ctx) {
+      return jsonFetch(`${base}/api/infrastructure/runpod/preflight`, { signal: ctx.signal });
+    },
+  };
+
+  const gpuRouting: ToolDefinition = {
+    name: 'infrastructure.gpu-routing',
+    description:
+      'Refresh and report whether this agent run can route to the configured RunPod GPU provider, including the exact fallback reason when it cannot.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    permissionTier: 'safe',
+    requiresNetwork: true,
+    timeoutMs: 30_000,
+    evidenceSources: (result) => infrastructureEvidence('live GPU routing probe', result),
+    async execute(_input, ctx) {
+      return jsonFetch(`${base}/api/infrastructure/gpu-routing?refresh=1`, { signal: ctx.signal });
+    },
+  };
+
+  const runpodReconnect: ToolDefinition = {
+    name: 'infrastructure.runpod.reconnect',
+    description:
+      'Reconnect the configured RunPod SSH endpoint, restore the existing pod-side Ollama service when needed, and rebuild its local inference tunnel. ' +
+      'This does not create or start a stopped RunPod pod, but it can change service state on an already-running configured pod.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    permissionTier: 'mutation',
+    requiresNetwork: true,
+    timeoutMs: 120_000,
+    evidenceSources: (result) => infrastructureEvidence('configured RunPod reconnect', result, 'mutation'),
+    async execute(_input, ctx) {
+      const result = await jsonFetch(`${base}/api/infrastructure/runpod/reconnect`, {
+        method: 'POST',
+        signal: ctx.signal,
+      });
+      return summarizeRunpodStatus(result);
+    },
+  };
 
   const delegate: ToolDefinition = {
     name: 'agent.delegate',
@@ -152,5 +243,13 @@ export function createCodexServerTools(port: number): ToolDefinition[] {
     },
   };
 
-  return [delegate, status, cancel];
+  return [
+    runpodStatus,
+    runpodPreflight,
+    gpuRouting,
+    runpodReconnect,
+    delegate,
+    status,
+    cancel,
+  ];
 }

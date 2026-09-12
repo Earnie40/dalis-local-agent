@@ -4,6 +4,7 @@ export * from './permissioned-executor';
 export * from './diff';
 export * from './filesystem-tools';
 export * from './shell-tools';
+export * from './security-tools';
 export * from './system-info';
 export * from './adversarial-simulation-tools';
 export * from './web-tools';

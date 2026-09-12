@@ -392,6 +392,8 @@ export const shellRunTool: ToolDefinition = {
 
   description:
     'Run an explicitly approved shell command inside the selected workspace. ' +
+    'Select powershell or cmd on Windows, bash on Linux, or default for the host shell. ' +
+    'Commands inherit the server process privileges; use wsl.run with user root for Linux administration. ' +
     'Commands are classified before execution, receive a minimal environment, ' +
     'and are bounded by timeout and output limits.',
 
@@ -399,6 +401,11 @@ export const shellRunTool: ToolDefinition = {
     type: 'object',
 
     properties: {
+      shell: {
+        type: 'string',
+        enum: ['default', 'powershell', 'cmd', 'bash'],
+        description: 'Shell interpreter. Default preserves the host shell. Windows Administrator privileges require an elevated server.',
+      },
       command: {
         type: 'string',
         minLength: 1,
@@ -482,10 +489,28 @@ export const shellRunTool: ToolDefinition = {
         ),
       );
 
+    const selectedShell = input.shell ?? 'default';
+    if (!['default', 'powershell', 'cmd', 'bash'].includes(String(selectedShell))) {
+      throw new Error(`Unsupported shell: ${String(selectedShell)}`);
+    }
+    if ((selectedShell === 'powershell' || selectedShell === 'cmd') && process.platform !== 'win32') {
+      throw new Error(`${selectedShell} requires a Windows host.`);
+    }
+    if (selectedShell === 'bash' && process.platform === 'win32') {
+      throw new Error('Use wsl.run for bash on Windows.');
+    }
+    const invocation = selectedShell === 'powershell'
+      ? { file: 'powershell.exe', args: ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(command, 'utf16le').toString('base64')] }
+      : selectedShell === 'cmd'
+        ? { file: 'cmd.exe', args: ['/d', '/s', '/c', command] }
+        : selectedShell === 'bash'
+          ? { file: '/bin/bash', args: ['-lc', command] }
+          : { file: command, args: undefined };
+
     const result =
       await runProcess(
-        command,
-        undefined,
+        invocation.file,
+        invocation.args,
         {
           cwd: root,
           timeoutMs,
@@ -495,12 +520,16 @@ export const shellRunTool: ToolDefinition = {
           /*
            * This is the only intentionally free-form shell path.
            */
-          useShell: true,
+          useShell: selectedShell === 'default',
         },
       );
 
     return {
       ...result,
+      // Show the redacted original, never an opaque encoded command that can
+      // conceal credentials from output redaction.
+      command: sanitizeText(command),
+      shell: selectedShell,
 
       classifiedAs:
         classification.tier,
