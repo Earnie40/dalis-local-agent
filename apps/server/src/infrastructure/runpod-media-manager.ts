@@ -298,6 +298,15 @@ export class RunpodMediaManager {
       return this.status();
     }
 
+    if (this.env.TOR_SOCKS_PROXY?.trim()) {
+      // The HTTP control plane above is covered by the global Tor fetch layer,
+      // but OpenSSH would otherwise create a separate raw TCP connection.
+      // Until an SSH SOCKS transport is implemented and verified, fail closed.
+      throw new Error(
+        'RunPod media SSH is disabled by Tor-only mode; use DACAI_MEDIA_TRANSPORT=https or loopback.',
+      );
+    }
+
     const endpoint = await this.runningEndpoint();
     this.update({ pod: { id: endpoint.podId, name: endpoint.name, connected: false } });
     const identityFile = this.identityFile();

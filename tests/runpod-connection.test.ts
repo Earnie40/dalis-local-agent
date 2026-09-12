@@ -67,6 +67,20 @@ describe('RunPod SSH connection', () => {
     expect(serialized).not.toContain('private-key');
   });
 
+  it('does not open raw RunPod SSH while Tor-only mode is active', async () => {
+    const run = vi.fn().mockResolvedValue({ code: 0, stdout: 'DACAIS_RUNPOD_READY', stderr: '' });
+    const status = await new RunpodService(
+      'ssh root@gpu.example',
+      11435,
+      run,
+      async () => undefined,
+      'socks5h://127.0.0.1:9050',
+    ).status();
+
+    expect(status.error).toContain('disabled by Tor-only mode');
+    expect(run).not.toHaveBeenCalled();
+  });
+
   it('activates the existing remote provider from RUNPOD_CONNECTION only', () => {
     const instances = buildProviderInstances({ RUNPOD_CONNECTION: 'ssh root@gpu.example' }) as Record<
       string,

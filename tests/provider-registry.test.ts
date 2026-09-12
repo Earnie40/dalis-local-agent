@@ -9,6 +9,9 @@ import { ProviderRegistry, ProviderResolutionError } from '../packages/providers
 function buildConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   return AppConfigSchema.parse({
     databaseUrl: 'postgresql://user:pw@localhost:5433/db',
+    // Most registry cases exercise legacy/fallback routing. Keep that intent
+    // explicit now that the application default is privacy-first local-only.
+    routingPolicy: 'local-preferred',
     providerInstances: {
       local_ollama: {
         id: 'local_ollama',

@@ -37,6 +37,19 @@ describe('environment sanitization', () => {
     expect(env.LANG).toBe('en_US.UTF-8');
     expect(env.SECRET_THING).toBeUndefined();
   });
+
+  it('replaces inherited proxies with the mandatory Tor route for child tools', () => {
+    const env = minimalEnv({
+      PATH: '/usr/bin',
+      TOR_SOCKS_PROXY: 'socks5h://127.0.0.1:9050',
+      HTTPS_PROXY: 'http://clearnet-proxy.example:8080',
+      NO_PROXY: '*',
+    });
+
+    expect(env.ALL_PROXY).toBe('socks5h://127.0.0.1:9050');
+    expect(env.HTTPS_PROXY).toBe('socks5h://127.0.0.1:9050');
+    expect(env.NO_PROXY).toBe('127.0.0.1,localhost,::1');
+  });
 });
 
 describe('process execution', () => {

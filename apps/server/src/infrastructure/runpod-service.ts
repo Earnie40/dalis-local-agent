@@ -75,16 +75,24 @@ export class RunpodService {
   private configurationError?: string;
   private tunnel?: ChildProcess;
   private lastEndpoint?: RunpodSshEndpoint;
+  private readonly torOnly: boolean;
 
   constructor(
     connectionValue = process.env.RUNPOD_CONNECTION,
     private readonly localPort = Number(process.env.RUNPOD_LOCAL_OLLAMA_PORT ?? 11435),
     private readonly runCommand: RunCommand = defaultRunCommand,
     private readonly resolveEndpoint: EndpointResolver = defaultEndpointResolver,
+    torSocksProxy = process.env.TOR_SOCKS_PROXY,
   ) {
+    this.torOnly = Boolean(torSocksProxy?.trim());
     try { this.connection = parseRunpodConnection(connectionValue); }
     catch (error) {
       this.configurationError = error instanceof Error ? error.message : 'RunPod configuration is invalid.';
+    }
+    if (this.torOnly) {
+      // Built-in SSH currently has no verified SOCKS transport. Block it
+      // instead of letting a raw SSH socket reveal the workstation address.
+      this.configurationError = 'RunPod SSH is disabled by Tor-only mode; use a Tor-routed HTTPS endpoint or local inference.';
     }
   }
 
@@ -132,6 +140,7 @@ export class RunpodService {
 
   /** Handshake, re-resolving the endpoint once when the stored one is stale. */
   private async handshake(): Promise<boolean> {
+    if (this.torOnly) return false;
     if (await this.handshakeOnce()) return true;
     if (!(await this.rediscover())) return false;
     return this.handshakeOnce();
@@ -176,7 +185,7 @@ export class RunpodService {
   async status(): Promise<RunpodStatus> {
     if (!(await this.handshake())) {
       return this.connection
-        ? { ...EMPTY_STATUS, configured: true, error: 'RunPod SSH connection failed.' }
+        ? { ...EMPTY_STATUS, configured: true, error: this.configurationError ?? 'RunPod SSH connection failed.' }
         : { ...EMPTY_STATUS, error: this.configurationError };
     }
 

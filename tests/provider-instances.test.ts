@@ -37,12 +37,32 @@ describe('provider instances', () => {
   it('defaults to local Ollama with every remote provider disabled', () => {
     const config = loadAppConfig(BASE_ENV);
 
-    expect(config.routingPolicy).toBe('local-preferred');
+    expect(config.routingPolicy).toBe('local-only');
     expect(config.providerInstances.local_ollama.enabled).toBe(true);
     expect(config.providerInstances.local_ollama.usageClass).toBe('LOCAL_OLLAMA');
     expect(config.providerInstances.remote_gpu_ollama.enabled).toBe(false);
     expect(config.providerInstances.huggingface.enabled).toBe(false);
     expect(config.providerInstances.anthropic.enabled).toBe(false);
+  });
+
+  it('pins a public remote Ollama URL to Tor while keeping an SSH loopback tunnel local', () => {
+    const publicInstances = buildProviderInstances({
+      OLLAMA_REMOTE_ENABLED: 'true',
+      OLLAMA_REMOTE_BASE_URL: 'https://gpu.example.test',
+      OLLAMA_REMOTE_TRANSPORT: 'tls-proxy',
+      TOR_SOCKS_PROXY: 'socks5h://127.0.0.1:9150',
+    }) as Record<string, { proxyUrl?: string; proxyRequired?: boolean }>;
+    expect(publicInstances.remote_gpu_ollama).toMatchObject({
+      proxyUrl: 'socks5h://127.0.0.1:9150',
+      proxyRequired: true,
+    });
+
+    const tunnelInstances = buildProviderInstances({ RUNPOD_CONNECTION: 'ssh root@gpu.example' }) as Record<
+      string,
+      { proxyUrl?: string; proxyRequired?: boolean }
+    >;
+    expect(tunnelInstances.remote_gpu_ollama).toMatchObject({ proxyRequired: false });
+    expect(tunnelInstances.remote_gpu_ollama.proxyUrl).toBeUndefined();
   });
 
   it('disables aliases whose provider is inactive and says so in warnings', () => {

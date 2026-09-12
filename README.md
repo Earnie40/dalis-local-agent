@@ -24,7 +24,9 @@ project-specific public application.
 
 ## Local setup (Windows PowerShell)
 
-1. Install Node.js 22+, pnpm, PostgreSQL 16, and Ollama.
+1. Install Node.js 22+, pnpm, PostgreSQL 16, Ollama, and a Tor client. Tor must
+   expose its SOCKS listener at `127.0.0.1:9050` (or the DNS-safe `socks5h://`
+   endpoint set in `TOR_SOCKS_PROXY`).
 2. Open PowerShell in the repository root.
 3. Install dependencies and create your env file:
 
@@ -54,6 +56,11 @@ The server verifies the local Ollama endpoint during startup. If Ollama is
 installed but not running, it launches `ollama serve` in the background and
 waits for the endpoint before a local request or GPU-to-local fallback runs.
 Set `OLLAMA_EXECUTABLE` only when `ollama` is not on `PATH`.
+
+The server also verifies its public route with the Tor Project before it opens
+the API. Public fetches have no clearnet fallback. See
+[Tor-only network mode](docs/TOR_ONLY_NETWORK.md) for the enforced boundary,
+Tor configuration, and anonymity limitations.
 
 6. Open the web app at http://localhost:5173 and the API at http://localhost:3001/health.
    `GET /api/providers` reports which inference instances are configured.

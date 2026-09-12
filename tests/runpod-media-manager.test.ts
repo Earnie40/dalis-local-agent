@@ -103,6 +103,29 @@ describe('Runpod media supervisor', () => {
     expect(runCommand).not.toHaveBeenCalled();
   });
 
+  it('blocks raw media SSH in Tor-only mode before endpoint discovery', async () => {
+    const runCommand = vi.fn();
+    const resolveEndpoint = vi.fn(async () => ENDPOINT);
+    const manager = new RunpodMediaManager({
+      env: {
+        DACAI_IMAGE_BACKEND: 'dacais-media',
+        DACAI_MEDIA_TRANSPORT: 'ssh-tunnel',
+        DACAI_MEDIA_BASE_URL: 'http://127.0.0.1:18090',
+        TOR_SOCKS_PROXY: 'socks5h://127.0.0.1:9050',
+      },
+      runCommand,
+      resolveEndpoint,
+    });
+
+    expect(await manager.initialize()).toMatchObject({
+      ready: false,
+      phase: 'error',
+      error: expect.stringContaining('disabled by Tor-only mode'),
+    });
+    expect(resolveEndpoint).not.toHaveBeenCalled();
+    expect(runCommand).not.toHaveBeenCalled();
+  });
+
   it('uses a healthy same-host loopback endpoint without RunPod discovery or SSH', async () => {
     const fetchMock = vi.fn(async () => healthResponse());
     const runCommand = vi.fn();

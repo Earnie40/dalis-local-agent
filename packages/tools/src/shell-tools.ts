@@ -64,6 +64,24 @@ export function minimalEnv(
    */
   result.GIT_TERMINAL_PROMPT = '0';
 
+  // The server installs TOR_SOCKS_PROXY before any agent tool can execute.
+  // Common network-aware child processes inherit only that proxy and a narrow
+  // loopback bypass; parent proxy settings are not trusted or forwarded.
+  // This complements the process-wide fetch guard. An OS/container egress rule
+  // is still required to confine binaries which deliberately ignore proxies.
+  const torProxy = env.TOR_SOCKS_PROXY?.trim();
+  if (torProxy) {
+    result.TOR_SOCKS_PROXY = torProxy;
+    result.ALL_PROXY = torProxy;
+    result.all_proxy = torProxy;
+    result.HTTP_PROXY = torProxy;
+    result.http_proxy = torProxy;
+    result.HTTPS_PROXY = torProxy;
+    result.https_proxy = torProxy;
+    result.NO_PROXY = '127.0.0.1,localhost,::1';
+    result.no_proxy = result.NO_PROXY;
+  }
+
   return result;
 }
 

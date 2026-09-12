@@ -5,10 +5,13 @@ import { config as loadEnv } from 'dotenv';
 import { AgentRunStore, loadAppConfigResult, redactDatabaseUrl, runMigrations, verifyConnection } from '@dacai-local-agent/shared';
 import type { AppConfigLoadResult } from '@dacai-local-agent/shared';
 import {
+  assertTorOnlyLocalDatabase,
   groupModels,
   GpuAvailabilityProbe,
+  installTorOnlyFetch,
   PostgresCapabilityStore,
   ProviderRegistry,
+  verifyTorRoute,
 } from '@dacai-local-agent/providers';
 import { AnonymizedSourceDetector, AnonymizedSourceFeedRefresher, type AnonymizedSourceAudit } from '@dacai-local-agent/security';
 import { AnonymizedSourceAuditStore } from '@dacai-local-agent/shared';
@@ -62,6 +65,12 @@ try {
 
 const { config, warnings } = loaded;
 
+// Owner-requested privacy boundary: every public fetch uses Tor with remote
+// DNS, while loopback stays direct for the UI, PostgreSQL, and local models.
+// The startup check below fails closed; there is no clearnet retry path.
+assertTorOnlyLocalDatabase(config.databaseUrl);
+const torNetwork = installTorOnlyFetch(process.env);
+
 const server = Fastify({
   logger: true,
 });
@@ -73,16 +82,29 @@ void server.register(fastifyMultipart, {
   limits: { fileSize: MAX_VIDEO_UPLOAD_BYTES, files: 10 },
 });
 
+// `vite preview` serves on this port; unlike the dev server it is fixed in
+// vite.config.ts rather than driven by WEB_PORT.
+const PREVIEW_PORT = 4173;
+
+// Vite walks forward from its configured port when that port is already in
+// use, so a second `pnpm dev` started against a still-running first one lands
+// on 5174 and every request fails preflight. The web app addresses this server
+// directly in dev rather than going through Vite's /api proxy, so CORS is
+// always in play there; this span covers the fallback walk instead of leaving
+// the app dead on an origin the user cannot predict.
+const PORT_FALLBACK_SPAN = 10;
+
 // The web app is served from a different origin in development. Both spellings
 // of loopback are allowed because the browser treats them as distinct origins,
 // and the dev server prints one while a user may type the other. Nothing
 // outside loopback is accepted.
-const allowedOrigins = new Set([
-  `http://localhost:${config.webPort}`,
-  `http://127.0.0.1:${config.webPort}`,
-  `http://localhost:4173`,
-  `http://127.0.0.1:4173`,
-]);
+const allowedOrigins = new Set(
+  [config.webPort, PREVIEW_PORT]
+    .flatMap((base) =>
+      Array.from({ length: PORT_FALLBACK_SPAN }, (_unused, offset) => base + offset),
+    )
+    .flatMap((port) => [`http://localhost:${port}`, `http://127.0.0.1:${port}`]),
+);
 
 server.addHook('onRequest', async (request, reply) => {
   const origin = request.headers.origin;
@@ -216,6 +238,7 @@ server.get('/health', async () => ({
     nodeEnv: config.nodeEnv,
     port: config.port,
     routingPolicy: config.routingPolicy,
+    networkPrivacy: torNetwork.policy.mode,
     database: redactDatabaseUrl(config.databaseUrl),
   },
 }));
@@ -355,12 +378,16 @@ registerMediaStudioRoutes(server, { registry, media: runpodMediaManager });
 server.get('/api/status', async () => ({
   ok: true,
   message: 'DacaiLocalAgent server is initialized.',
+  networkPrivacy: torNetwork.policy.mode,
   defaultEscalationMode: config.defaultEscalationMode,
   configWarnings: warnings,
 }));
 
 const start = async () => {
   try {
+    await verifyTorRoute(torNetwork);
+    server.log.info('Public HTTP(S) transport verified through Tor; clearnet fallback is disabled');
+
     // Fail fast and loudly: there is no silent fallback persistence layer.
     await verifyConnection(config.databaseUrl);
     const { applied, alreadyCurrent } = await runMigrations();

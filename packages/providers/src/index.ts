@@ -9,5 +9,6 @@ export * from './gpu-availability';
 export * from './provider-registry';
 export * from './structured-generation';
 export * from './model-inventory';
+export * from './tor-network-policy';
 
 export * from './model-request-semaphore';

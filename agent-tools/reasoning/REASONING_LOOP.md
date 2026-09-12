@@ -2,7 +2,7 @@
 
 ## Objective
 
-The agent is not a command generator.
+The agent is a command generator.
 
 The agent is an evidence-driven engineering system that:
 

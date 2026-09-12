@@ -175,7 +175,10 @@ export const AppConfigSchema = z
     port: z.number().int().positive().default(3001),
     webPort: z.number().int().positive().default(5173),
     providerInstances: z.record(z.string(), ProviderInstanceSchema).default({}),
-    routingPolicy: RoutingPolicySchema.default('local-preferred'),
+    // Local inference is the privacy-preserving default. Remote provider
+    // accounts remain explicitly selectable through environment configuration,
+    // but are never the implicit route.
+    routingPolicy: RoutingPolicySchema.default('local-only'),
     anthropicModel: z.string().optional(),
     databaseUrl: z.string().min(1),
     defaultEscalationMode: EscalationModeSchema.default('ask'),
@@ -246,6 +249,12 @@ export function buildProviderInstances(env: NodeJS.ProcessEnv = process.env): Re
     env.RUNPOD_CONNECTION?.trim() || env.RUNPOD_API_KEY?.trim(),
   );
   const runpodLocalPort = Number(env.RUNPOD_LOCAL_OLLAMA_PORT ?? 11435);
+  const remoteOllamaBaseUrl =
+    env.OLLAMA_REMOTE_BASE_URL ||
+    (runpodConfigured ? `http://127.0.0.1:${runpodLocalPort}` : undefined);
+  const remoteOllamaIsLoopback = Boolean(
+    remoteOllamaBaseUrl && isLoopbackUrl(remoteOllamaBaseUrl),
+  );
 
   return {
     local_ollama: {
@@ -260,14 +269,16 @@ export function buildProviderInstances(env: NodeJS.ProcessEnv = process.env): Re
     remote_gpu_ollama: {
       id: 'remote_gpu_ollama',
       kind: 'ollama',
-      baseUrl:
-        env.OLLAMA_REMOTE_BASE_URL ||
-        (runpodConfigured ? `http://127.0.0.1:${runpodLocalPort}` : undefined),
+      baseUrl: remoteOllamaBaseUrl,
       enabled: truthy(env.OLLAMA_REMOTE_ENABLED) || runpodConfigured,
       usageClass: 'REMOTE_GPU_OLLAMA',
       transport: env.OLLAMA_REMOTE_TRANSPORT ?? 'ssh-tunnel',
-      proxyUrl: env.OLLAMA_REMOTE_SOCKS5_PROXY || env.OUTBOUND_SOCKS5_PROXY || undefined,
-      proxyRequired: truthy(env.OUTBOUND_PROXY_REQUIRED),
+      // An SSH tunnel terminates on loopback and remains direct/local. A real
+      // public Ollama URL uses the DNS-safe Tor route and cannot fall back.
+      proxyUrl: remoteOllamaIsLoopback
+        ? undefined
+        : env.TOR_SOCKS_PROXY || 'socks5h://127.0.0.1:9050',
+      proxyRequired: !remoteOllamaIsLoopback,
       authTokenEnvVar: env.OLLAMA_REMOTE_AUTH_TOKEN ? 'OLLAMA_REMOTE_AUTH_TOKEN' : undefined,
       requestTimeoutMs: Number(env.RUNPOD_OLLAMA_REQUEST_TIMEOUT_MS ?? env.OLLAMA_REQUEST_TIMEOUT_MS ?? 300_000),
       // Keep the remote model's KV cache bounded. A large context can consume
@@ -363,7 +374,7 @@ export function loadAppConfigResult(
     port: Number(env.PORT ?? 3001),
     webPort: Number(env.WEB_PORT ?? 5173),
     providerInstances: buildProviderInstances(env),
-    routingPolicy: env.ROUTING_POLICY ?? 'local-preferred',
+    routingPolicy: env.ROUTING_POLICY ?? 'local-only',
     anthropicModel: env.ANTHROPIC_MODEL || undefined,
     databaseUrl: env.DATABASE_URL ?? '',
     defaultEscalationMode: env.DEFAULT_ESCALATION_MODE ?? 'ask',
@@ -407,7 +418,7 @@ export function loadAppConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     port: Number(env.PORT ?? 3001),
     webPort: Number(env.WEB_PORT ?? 5173),
     providerInstances: buildProviderInstances(env),
-    routingPolicy: env.ROUTING_POLICY ?? 'local-preferred',
+    routingPolicy: env.ROUTING_POLICY ?? 'local-only',
     anthropicModel: env.ANTHROPIC_MODEL || undefined,
     databaseUrl: env.DATABASE_URL ?? '',
     defaultEscalationMode: env.DEFAULT_ESCALATION_MODE ?? 'ask',
